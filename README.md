@@ -2,7 +2,7 @@
   <p>
     <img src="assets/aios-logo.png" width="112" alt="aiOS logo">
   </p>
-  <img src="assets/operator-logo.svg" width="560" alt="OPERATOR logo">
+  <img src="assets/operator-logo.png" width="560" alt="OPERATOR logo">
   <h1>aiOS</h1>
   <p><strong>Windows desktop helper with OPERATOR built in.</strong></p>
   <p>
