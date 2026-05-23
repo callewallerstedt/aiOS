@@ -18,6 +18,8 @@
 .\install-aios.ps1
 ```
 
+or double-click `install-aios.bat`.
+
 or manually:
 
 ```powershell
@@ -31,6 +33,7 @@ python helper_overlay.py
 
 ```powershell
 .\install-aios.ps1
+.\install-aios.bat
 .\install-startup.ps1
 .\install-voice.ps1
 ```

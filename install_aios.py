@@ -45,6 +45,8 @@ class Installer(tk.Tk):
         self.worker: threading.Thread | None = None
         self.codex_login_event = threading.Event()
         self.stop_requested = False
+        self.page = 0
+        self.logo_image = None
 
         self.install_deps = tk.BooleanVar(value=True)
         self.download_whisper = tk.BooleanVar(value=True)
@@ -64,19 +66,45 @@ class Installer(tk.Tk):
     def _build(self) -> None:
         header = tk.Frame(self, bg="#080b0f")
         header.pack(fill="x", padx=28, pady=(24, 14))
-        logo = tk.Label(header, text="aiOS", bg="#080b0f", fg="#ffffff", font=("Segoe UI", 28, "bold"))
-        logo.pack(anchor="w")
+        logo_row = tk.Frame(header, bg="#080b0f")
+        logo_row.pack(anchor="w", fill="x")
+        logo_path = BASE_DIR / "assets" / "aios-logo.png"
+        if logo_path.exists():
+            try:
+                self.logo_image = tk.PhotoImage(file=str(logo_path)).subsample(2, 2)
+                tk.Label(logo_row, image=self.logo_image, bg="#080b0f").pack(side="left", padx=(0, 12))
+            except tk.TclError:
+                self.logo_image = None
+        tk.Label(logo_row, text="aiOS", bg="#080b0f", fg="#ffffff", font=("Segoe UI", 28, "bold")).pack(side="left")
         sub = tk.Label(
             header,
-            text="Install dependencies, configure OPERATOR, and prepare local voice transcription.",
+            text="Installer",
             bg="#080b0f",
             fg="#9fb0c2",
             font=("Segoe UI", 10),
         )
         sub.pack(anchor="w", pady=(4, 0))
 
+        self.welcome_page = tk.Frame(self, bg="#0d1218", highlightbackground="#243244", highlightthickness=1)
+        tk.Label(
+            self.welcome_page,
+            text="Install aiOS",
+            bg="#0d1218",
+            fg="#ffffff",
+            font=("Segoe UI", 18, "bold"),
+        ).pack(anchor="w", padx=18, pady=(18, 6))
+        tk.Label(
+            self.welcome_page,
+            text="This will prepare voice transcription, OPERATOR, Codex auth, and optional startup.",
+            bg="#0d1218",
+            fg="#9fb0c2",
+            font=("Segoe UI", 10),
+            wraplength=640,
+            justify="left",
+        ).pack(anchor="w", padx=18, pady=(0, 18))
+
         body = tk.Frame(self, bg="#0d1218", highlightbackground="#243244", highlightthickness=1)
-        body.pack(fill="x", padx=28, pady=(0, 16))
+        self.options_page = body
 
         self._option(body, self.install_deps, "Python dependencies", "Recommended")
         self._option(body, self.download_whisper, "Download Whisper small model", "Recommended, SV + EN")
@@ -88,8 +116,9 @@ class Installer(tk.Tk):
         self._option(body, self.add_startup, "Add aiOS hotkey launcher to Windows startup", "Asks before changing startup")
         self._option(body, self.start_now, "Start aiOS after install", "Optional")
 
-        progress_box = tk.Frame(self, bg="#080b0f")
-        progress_box.pack(fill="x", padx=28)
+        self.install_page = tk.Frame(self, bg="#080b0f")
+        progress_box = tk.Frame(self.install_page, bg="#080b0f")
+        progress_box.pack(fill="x")
         self.status = tk.Label(progress_box, text="Ready", bg="#080b0f", fg="#dbe7f3", anchor="w")
         self.status.pack(fill="x")
         self.progress = tk.Canvas(progress_box, height=12, bg="#101820", highlightthickness=0)
@@ -98,7 +127,7 @@ class Installer(tk.Tk):
         self.progress.bind("<Configure>", lambda _event: self._draw_progress())
 
         self.log = tk.Text(
-            self,
+            self.install_page,
             height=12,
             bg="#05070a",
             fg="#d7e4ee",
@@ -108,15 +137,28 @@ class Installer(tk.Tk):
             pady=10,
             font=("Consolas", 9),
         )
-        self.log.pack(fill="both", expand=True, padx=28, pady=(0, 18))
+        self.log.pack(fill="both", expand=True, pady=(0, 0))
         self.log.configure(state="disabled")
 
         actions = tk.Frame(self, bg="#080b0f")
         actions.pack(fill="x", padx=28, pady=(0, 24))
+        self.back_btn = tk.Button(
+            actions,
+            text="Back",
+            command=self._back,
+            bg="#182333",
+            fg="#dbe7f3",
+            activebackground="#26384e",
+            activeforeground="#ffffff",
+            relief="flat",
+            padx=18,
+            pady=8,
+        )
+        self.back_btn.pack(side="left")
         self.install_btn = tk.Button(
             actions,
-            text="Install",
-            command=self.start_install,
+            text="Next",
+            command=self._next,
             bg="#ffffff",
             fg="#05070a",
             activebackground="#dbe7f3",
@@ -125,7 +167,7 @@ class Installer(tk.Tk):
             pady=8,
             font=("Segoe UI", 10, "bold"),
         )
-        self.install_btn.pack(side="left")
+        self.install_btn.pack(side="left", padx=(10, 0))
         tk.Button(
             actions,
             text="Close",
@@ -138,6 +180,35 @@ class Installer(tk.Tk):
             padx=18,
             pady=8,
         ).pack(side="left", padx=(10, 0))
+        self._show_page(0)
+
+    def _show_page(self, page: int) -> None:
+        self.page = page
+        for frame in (self.welcome_page, self.options_page, self.install_page):
+            frame.pack_forget()
+        if page == 0:
+            self.welcome_page.pack(fill="x", padx=28, pady=(0, 16))
+            self.back_btn.configure(state="disabled")
+            self.install_btn.configure(text="Next", state="normal")
+        elif page == 1:
+            self.options_page.pack(fill="x", padx=28, pady=(0, 16))
+            self.back_btn.configure(state="normal")
+            self.install_btn.configure(text="Next", state="normal")
+        else:
+            self.install_page.pack(fill="both", expand=True, padx=28, pady=(0, 18))
+            self.back_btn.configure(state="disabled")
+            self.install_btn.configure(text="Installing...", state="disabled")
+
+    def _next(self) -> None:
+        if self.page == 0:
+            self._show_page(1)
+        elif self.page == 1:
+            self._show_page(2)
+            self.start_install()
+
+    def _back(self) -> None:
+        if self.page == 1:
+            self._show_page(0)
 
     def _option(self, parent: tk.Widget, var: tk.BooleanVar, text: str, hint: str) -> None:
         row = tk.Frame(parent, bg="#0d1218")
