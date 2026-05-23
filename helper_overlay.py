@@ -1592,18 +1592,26 @@ class HelperOverlay:
         ).pack(anchor="w")
         model_label = self.config.get("chat_model") or "gpt-5-mini"
         key_ok = bool(self.get_openai_api_key())
-        meta = f"{model_label} · {'API key ready' if key_ok else 'No API key'}"
+        codex_ok, codex_label = codex_auth_info()
+        if key_ok:
+            auth_label = "API key ready"
+        elif codex_ok:
+            auth_label = f"Codex {codex_label}"
+        else:
+            auth_label = "No auth"
+        meta = f"{model_label} · {auth_label}"
         self.chat_account_label = tk.Label(
             head_left,
             text=meta,
             bg=self.c("surface"),
-            fg=self.c("success") if key_ok else self.c("danger"),
+            fg=self.c("success") if (key_ok or codex_ok) else self.c("danger"),
             font=self.font(8),
         )
         self.chat_account_label.pack(anchor="w")
         chat_actions = tk.Frame(chat_head, bg=self.c("surface"))
         chat_actions.pack(side="right")
         self.header_chip(chat_actions, "Reset", self.reset_chat, hint="Clear chat").pack(side="right", padx=(4, 0))
+        self.header_chip(chat_actions, "Login", self.codex_login, hint="Sign in to Codex").pack(side="right", padx=(4, 0))
         self.header_chip(chat_actions, "Settings", lambda: self.render_tab("Settings"), hint="OpenAI key & model").pack(
             side="right"
         )
@@ -6937,7 +6945,10 @@ class HelperOverlay:
     def _openai_chat_reply(self, prompt, tools_used=None):
         api_key = self.get_openai_api_key()
         if not api_key:
-            return "Set your OpenAI API key in Settings (or OPENAI_API_KEY env var) and try again."
+            codex_ok, _label = codex_auth_info()
+            if codex_ok and find_codex():
+                return self._quick_codex_reply(prompt)
+            return "Set your OpenAI API key in Settings, set OPENAI_API_KEY, or sign in with Codex."
 
         if tools_used is None:
             tools_used = []
@@ -7002,9 +7013,10 @@ class HelperOverlay:
             self.local_reply(local_reply, elapsed=time.perf_counter() - sent_at)
             return "break"
 
-        if not self.get_openai_api_key():
+        codex_ok, _codex_label = codex_auth_info()
+        if not self.get_openai_api_key() and not codex_ok:
             self.local_reply(
-                "Add your OpenAI API key in Settings or set OPENAI_API_KEY, then try again.",
+                "Add your OpenAI API key in Settings, set OPENAI_API_KEY, or click Login for Codex.",
                 elapsed=time.perf_counter() - sent_at,
             )
             return "break"
@@ -7411,11 +7423,18 @@ class HelperOverlay:
             return
         model_label = self.config.get("chat_model") or "gpt-5-mini"
         key_ok = bool(self.get_openai_api_key())
-        meta = f"{model_label} · {'API key ready' if key_ok else 'No API key'}"
+        codex_ok, codex_label = codex_auth_info()
+        if key_ok:
+            auth_label = "API key ready"
+        elif codex_ok:
+            auth_label = f"Codex {codex_label}"
+        else:
+            auth_label = "No auth"
+        meta = f"{model_label} · {auth_label}"
         try:
             self.chat_account_label.configure(
                 text=meta,
-                fg=self.c("success") if key_ok else self.c("danger"),
+                fg=self.c("success") if (key_ok or codex_ok) else self.c("danger"),
             )
         except tk.TclError:
             pass

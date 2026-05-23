@@ -15,6 +15,12 @@
 ## Run
 
 ```powershell
+.\install-aios.ps1
+```
+
+or manually:
+
+```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
@@ -24,6 +30,7 @@ python helper_overlay.py
 ## Install
 
 ```powershell
+.\install-aios.ps1
 .\install-startup.ps1
 .\install-voice.ps1
 ```
@@ -36,7 +43,7 @@ OPERATOR loads the bundled `agent_clicker` folder from this repo.
 copy agent_clicker\.env.example agent_clicker\.env
 ```
 
-Set `OPENAI_API_KEY` in aiOS Settings, your environment, or `agent_clicker\.env`.
+Use `.\install-aios.ps1` to sign in with Codex, enable OPERATOR Codex mode, and pre-download the Whisper `small` and OPERATOR OCR models. You can also set `OPENAI_API_KEY` in aiOS Settings, your environment, or `agent_clicker\.env`.
 
 ## Local Files
 
