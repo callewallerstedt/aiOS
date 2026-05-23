@@ -1,0 +1,25 @@
+<svg width="900" height="260" viewBox="0 0 900 260" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="OPERATOR logo">
+  <defs>
+    <linearGradient id="scan" x1="140" y1="42" x2="760" y2="218" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFFFFF"/>
+      <stop offset="0.48" stop-color="#A7F3D0"/>
+      <stop offset="1" stop-color="#38BDF8"/>
+    </linearGradient>
+    <filter id="glow" x="-20%" y="-35%" width="140%" height="170%" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="7" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+  <rect x="6" y="6" width="888" height="248" rx="34" fill="#05070A" stroke="#263241" stroke-width="12"/>
+  <path d="M70 84H132L156 58H228L252 84H830" stroke="#344657" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M70 176H160L184 202H252L276 176H830" stroke="#344657" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="101" cy="130" r="42" fill="#0B1118" stroke="url(#scan)" stroke-width="10"/>
+  <path d="M92 110L120 130L92 150V110Z" fill="#FFFFFF"/>
+  <path d="M164 130H236" stroke="url(#scan)" stroke-width="10" stroke-linecap="round" filter="url(#glow)"/>
+  <text x="270" y="155" fill="url(#scan)" font-family="Michroma, Orbitron, Arial, sans-serif" font-size="58" font-weight="700">OPERATOR</text>
+  <path d="M714 112L790 78L756 154L742 132L719 161L704 149L728 120L714 112Z" fill="#FFFFFF"/>
+  <circle cx="808" cy="130" r="12" fill="#38D996"/>
+</svg>

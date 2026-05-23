@@ -1,6 +1,16 @@
-# aiOS
-
-Windows desktop helper with project tools, voice dictation, local chat, startup visuals, and bundled OPERATOR support through Agent Clicker.
+<div align="center">
+  <p>
+    <img src="assets/aios-logo.png" width="112" alt="aiOS logo">
+  </p>
+  <img src="assets/operator-logo.svg" width="560" alt="OPERATOR logo">
+  <h1>aiOS</h1>
+  <p><strong>Windows desktop helper with OPERATOR built in.</strong></p>
+  <p>
+    <img alt="Python" src="https://img.shields.io/badge/Python-3.11%2B-3776AB?style=flat-square&logo=python&logoColor=white">
+    <img alt="Windows" src="https://img.shields.io/badge/Windows-desktop-0078D4?style=flat-square&logo=windows&logoColor=white">
+    <img alt="OPERATOR" src="https://img.shields.io/badge/OPERATOR-Agent%20Clicker-38D996?style=flat-square">
+  </p>
+</div>
 
 ## Run
 
@@ -11,28 +21,23 @@ pip install -r requirements.txt
 python helper_overlay.py
 ```
 
-Optional startup/hotkey install:
+## Install
 
 ```powershell
 .\install-startup.ps1
-```
-
-Voice dictation dependencies can also be installed with:
-
-```powershell
 .\install-voice.ps1
 ```
 
 ## OPERATOR
 
-OPERATOR loads the bundled `agent_clicker` folder from this repo. Configure an OpenAI key either in aiOS Settings, as `OPENAI_API_KEY`, or in:
+OPERATOR loads the bundled `agent_clicker` folder from this repo.
 
 ```powershell
 copy agent_clicker\.env.example agent_clicker\.env
 ```
 
-Then edit `agent_clicker\.env` and run `python helper_overlay.py`.
+Set `OPENAI_API_KEY` in aiOS Settings, your environment, or `agent_clicker\.env`.
 
 ## Local Files
 
-`helper_config.json`, logs, virtual environments, Agent Clicker debug runs, and `.env` files are ignored on purpose. Use `helper_config.example.json` as a clean starting point if needed.
+`helper_config.json`, logs, virtual environments, `.env` files, and Agent Clicker debug runs stay local.
