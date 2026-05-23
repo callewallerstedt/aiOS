@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Agent Clicker</title>
+<link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+<header>
+  <h1>Agent Clicker</h1>
+  <div class="sub">Upload screenshot, type a click target, watch the agent reason.</div>
+</header>
+
+<section class="controls">
+  <form id="form">
+    <label>Screenshot <input type="file" name="image" accept="image/*" required></label>
+    <label>Task <input type="text" name="task" placeholder="e.g. click cell B12  /  click the Chrome icon  /  click the second video" required></label>
+    <label>Model
+      <select name="model">
+        <option value="{{ default_model }}" selected>{{ default_model }} (default)</option>
+        <option value="gpt-5.5">gpt-5.5</option>
+        <option value="gpt-5.5-pro">gpt-5.5-pro</option>
+        <option value="gpt-5.2">gpt-5.2</option>
+        <option value="gpt-5">gpt-5</option>
+        <option value="gpt-4o">gpt-4o</option>
+        <option value="gpt-4o-mini">gpt-4o-mini</option>
+      </select>
+    </label>
+    <label>Max rounds <input type="number" name="max_rounds" value="{{ max_rounds }}" min="1" max="20"></label>
+    <label>Mode
+      <select name="mode" id="mode-sel">
+        <option value="full" selected>Full (all tools)</option>
+        <option value="raw">Raw (model only)</option>
+      </select>
+    </label>
+    <label id="crop-lbl" class="hidden">Allow crop
+      <input type="checkbox" name="allow_crop" value="1" checked>
+    </label>
+    <button type="submit">Run</button>
+  </form>
+  <div id="status" class="status"></div>
+</section>
+
+<main>
+  <div id="rounds" class="rounds"></div>
+  <aside id="final" class="final hidden">
+    <h2>Final click</h2>
+    <div id="final-coords" class="big-coords">(?, ?)</div>
+    <div id="final-info"></div>
+    <div class="img-wrap">
+      <button class="copy-btn" data-copy-target="#final-img" title="Copy image to clipboard">📋</button>
+      <img id="final-img" />
+    </div>
+  </aside>
+</main>
+
+<script src="/static/main.js"></script>
+</body>
+</html>

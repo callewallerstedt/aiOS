@@ -1,0 +1,33 @@
+{
+  "enabled": true,
+  "prefixCorrections": {
+    "teh": "the",
+    "autocorect": "autocorrect",
+    "autocorret": "autocorrect",
+    "constantyl": "constantly",
+    "missspell": "misspell"
+  },
+  "corrections": {
+    "constantyl": "constantly",
+    "missspell": "misspell",
+    "missspelled": "misspelled",
+    "missspelling": "misspelling",
+    "autocorect": "autocorrect",
+    "autocorret": "autocorrect",
+    "teh": "the",
+    "adn": "and",
+    "dont": "don't",
+    "cant": "can't",
+    "wont": "won't",
+    "im": "I'm",
+    "ive": "I've",
+    "ill": "I'll",
+    "intuaive": "intuitive",
+    "intuative": "intuitive",
+    "visulas": "visuals",
+    "becuase": "because",
+    "seperate": "separate",
+    "definately": "definitely",
+    "recieve": "receive"
+  }
+}

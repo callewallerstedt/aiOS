@@ -1,0 +1,41 @@
+{
+  "project_root": "D:\\Projects",
+  "assistant_model": "gpt-4.1-nano",
+  "codex_model": "gpt-4.1-nano",
+  "codex_reasoning": "none",
+  "quick_codex_model": "gpt-5-mini",
+  "quick_codex_reasoning": "none",
+  "chat_model": "gpt-5-mini",
+  "openai_api_key": "",
+  "codex_sandbox": "workspace-write",
+  "window": "1120x720+520+90",
+  "chat_width": 330,
+  "app_usage": {},
+  "chat_history": [],
+  "todos": [],
+  "linked_projects": [],
+  "hidden_projects": [],
+  "ai_operator": {
+    "monitor": "",
+    "model": "gpt-5.5",
+    "reasoning": "medium",
+    "steps": "25",
+    "delay": "0.20",
+    "tts": false,
+    "voice": "nova",
+    "shell": false,
+    "codex_auth": false
+  },
+  "voice_dictation": {
+    "hold_ms": 280,
+    "whisper_model": "small",
+    "language": "auto",
+    "compute_type": "int8",
+    "chunk_seconds": 1.6,
+    "silence_flush_seconds": 0.6,
+    "silence_rms": 0.006,
+    "typing_delay_ms": 0,
+    "discord_mute_enabled": false,
+    "discord_mute_hotkey": ""
+  }
+}
