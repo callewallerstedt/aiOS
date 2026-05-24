@@ -60,6 +60,7 @@ STARTUP_FRAME_DIR = BASE_DIR / "assets" / "startup" / "aios-logo-reveal-frames"
 STARTUP_SOUND_PATH = BASE_DIR / "assets" / "startup" / "aios-startup.wav"
 OPERATOR_SOUND_PATH = BASE_DIR / "assets" / "startup" / "aios-operator.wav"
 APP_ICON_PATH = BASE_DIR / "assets" / "aios-logo.ico"
+TRAY_ICON_PATH = BASE_DIR / "assets" / "rectangle-logo.ico"
 APP_USER_MODEL_ID = "aiOS.Desktop.Helper"
 AGENT_CLICKER_DIR = BASE_DIR / "agent_clicker"
 RECORDINGS_FOLDER_NAME = "aiOS recordings"
@@ -8347,9 +8348,9 @@ class HelperOverlay:
             self.root.update_idletasks()
             hwnd = self.root.winfo_id()
             icon = None
-            if APP_ICON_PATH.exists():
+            if TRAY_ICON_PATH.exists():
                 icon = user32.LoadImageW(
-                    None, str(APP_ICON_PATH), IMAGE_ICON, 0, 0, LR_LOADFROMFILE | LR_DEFAULTSIZE
+                    None, str(TRAY_ICON_PATH), IMAGE_ICON, 0, 0, LR_LOADFROMFILE | LR_DEFAULTSIZE
                 )
             if not icon:
                 icon = user32.LoadIconW(None, IDI_APPLICATION)
