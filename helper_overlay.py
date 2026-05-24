@@ -21,6 +21,7 @@ import urllib.error
 import urllib.request
 from tkinter import colorchooser, filedialog, messagebox, simpledialog
 
+import codex_usage
 from voice_settings import (
     COMPUTE_TYPES,
     DEFAULT_VOICE_DICTATION,
@@ -1138,6 +1139,10 @@ def codex_env():
 
 def codex_auth_info():
     """Return (logged_in: bool, label: str) describing the active codex account."""
+    return codex_usage.codex_auth_info(CODEX_HOME)
+
+
+def _legacy_codex_auth_info_unused():
     auth_path = CODEX_HOME / "auth.json"
     if not auth_path.exists():
         return False, "not signed in"
@@ -1208,6 +1213,10 @@ def tail_lines(path, max_bytes=524288):
 
 
 def latest_codex_rate_limits():
+    return codex_usage.latest_codex_rate_limits(CODEX_HOME)
+
+
+def _legacy_latest_codex_rate_limits_unused():
     sessions = CODEX_HOME / "sessions"
     if not sessions.exists():
         return None
@@ -8237,7 +8246,7 @@ class HelperOverlay:
 
     def _schedule_usage_refresh(self):
         self.update_usage_badges()
-        self.root.after(60000, self._schedule_usage_refresh)
+        self.root.after(10000, self._schedule_usage_refresh)
 
     def _schedule_chat_watchdog(self):
         self._chat_watchdog()
@@ -8295,15 +8304,18 @@ class HelperOverlay:
             pass
 
     def update_usage_badges(self):
-        if not hasattr(self, "usage_5h") or not hasattr(self, "usage_week"):
+        if not hasattr(self, "usage_account_labels"):
             return
-        limits = latest_codex_rate_limits() or {}
-        primary = limits.get("primary") or {}
-        secondary = limits.get("secondary") or {}
-        self.usage_5h.configure(text=usage_text(primary, "5H"))
-        self.usage_week.configure(text=usage_text(secondary, "WEEK"))
-        primary_reset = primary.get("resets_at")
-        secondary_reset = secondary.get("resets_at")
+        usage = codex_usage.codex_usage_payload(CODEX_HOME)
+        accounts = usage.get("accounts") or []
+        for index, label in enumerate(self.usage_account_labels):
+            account = accounts[index] if index < len(accounts) else {}
+            label.configure(text=codex_usage.desktop_account_text(account))
+        active = next((account for account in accounts if account.get("active")), {})
+        primary = active.get("primary") or {}
+        secondary = active.get("secondary") or {}
+        primary_reset = primary.get("reset")
+        secondary_reset = secondary.get("reset")
         tooltip = []
         if primary_reset:
             tooltip.append("5H reset " + datetime.fromtimestamp(float(primary_reset)).strftime("%H:%M"))
@@ -9153,10 +9165,11 @@ class HelperOverlay:
 
         stats = tk.Frame(toolbar, bg=self.c("panel"))
         stats.pack(side="left", padx=(0, 10))
-        self.usage_5h = self.header_stat(stats, "5H --")
-        self.usage_5h.pack(side="left", padx=(0, 6))
-        self.usage_week = self.header_stat(stats, "WEEK --")
-        self.usage_week.pack(side="left")
+        self.usage_account_labels = []
+        for index, text in enumerate(("calle --", "contact --")):
+            label = self.header_stat(stats, text)
+            label.pack(side="left", padx=(0, 6 if index == 0 else 0))
+            self.usage_account_labels.append(label)
 
         tk.Frame(toolbar, bg=self._header_border_color(), width=1).pack(side="left", fill="y", padx=(0, 10), pady=8)
 

@@ -20,6 +20,7 @@ const opStatus = $('op-status');
 const opStream = $('op-stream');
 const opDisclose = $('op-disclose');
 const opBody = $('op-body');
+const codexUsage = $('codex-usage');
 
 const opInputs = {
   model: $('op-model'),
@@ -66,6 +67,7 @@ let chunks = [];
 let mimeType = '';
 let screenTimer = null;
 let heartbeatTimer = null;
+let statusTimer = null;
 let activeMonitor = Number(localStorage.getItem('aiosScreenMonitor') || 1);
 let monitors = [];
 let operatorConfig = null;
@@ -198,6 +200,7 @@ settingsSave.addEventListener('click', () => {
   loadMonitors();
   startScreen(true);
   startHeartbeat();
+  startStatusRefresh();
   if (target === 'operator') startOperatorStream();
   haptic('success');
 });
@@ -231,6 +234,7 @@ async function init() {
   await loadMonitors();
   startScreen();
   startHeartbeat();
+  startStatusRefresh();
   startOperatorStream();
   autoGrowText();
 }
@@ -390,7 +394,22 @@ async function checkStatus() {
       operatorConfig = data.operator;
       applyOperatorConfig(operatorConfig);
     }
+    renderCodexUsage(data.codex_usage);
   } catch (_e) { setState('offline', 'err'); }
+}
+
+function renderCodexUsage(data) {
+  if (!codexUsage || !data || !Array.isArray(data.accounts)) return;
+  codexUsage.innerHTML = '';
+  for (const account of data.accounts.slice(0, 2)) {
+    const pill = document.createElement('div');
+    pill.className = 'usage-pill' + (account.active ? ' active' : '');
+    const name = escapeHtml(account.short || '--');
+    const primary = account.primary ? `${account.primary.remaining}` : '--';
+    const secondary = account.secondary ? `${account.secondary.remaining}` : '--';
+    pill.innerHTML = `<b>${name}</b><span>5h ${primary}</span><span>w ${secondary}</span>`;
+    codexUsage.appendChild(pill);
+  }
 }
 
 async function loadMonitors(verbose = false) {
@@ -520,6 +539,12 @@ function startHeartbeat() {
   if (!apiBase) return;
   phoneStart();
   heartbeatTimer = setInterval(phoneStart, 10000);
+}
+
+function startStatusRefresh() {
+  if (statusTimer) clearInterval(statusTimer);
+  if (!apiBase) return;
+  statusTimer = setInterval(checkStatus, 10000);
 }
 
 function stopScreen() { if (screenTimer) { clearInterval(screenTimer); screenTimer = null; } }

@@ -23,6 +23,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from agent import config
+import codex_usage
 from agent.orchestrator import run_task
 from voice_settings import load_voice_dictation_settings, resolve_transcribe_language
 
@@ -239,6 +240,7 @@ def api_phone_status():
         "helper": helper,
         "monitor_count": len(monitors),
         "operator": operator,
+        "codex_usage": codex_usage.codex_usage_payload(),
     })
 
 
