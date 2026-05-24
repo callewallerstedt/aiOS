@@ -8430,8 +8430,14 @@ class HelperOverlay:
             state["status_var"].set("update failed: " + (result.get("message") or "?"))
             self._updater_set_buttons(busy=False, can_update=True)
             return
-        state["status_var"].set("updated · restarting in 1s…")
-        self._updater_log("restarting aiOS…")
+        staged = bool(result.get("staged"))
+        if staged:
+            state["status_var"].set(
+                "files staged · aiOS will close and reopen with the new version")
+            self._updater_log("closing aiOS to apply staged files…")
+        else:
+            state["status_var"].set("updated · restarting in 1s…")
+            self._updater_log("restarting aiOS…")
         self._updater_set_buttons(busy=False, can_update=False)
         # Stop any operator run first so we don't leave child threads.
         try:

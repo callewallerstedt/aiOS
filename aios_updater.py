@@ -34,6 +34,13 @@ DEFAULT_BRANCH = "main"
 REQUIREMENTS_PATH = BASE_DIR / "requirements.txt"
 USER_AGENT = "aiOS-updater"
 
+# Where the tarball is unpacked before being applied. We can't overwrite
+# the running helper's own files (Windows holds them open), so we stage
+# everything here and let a separate apply process swap them in after the
+# helper exits.
+STAGING_DIR = BASE_DIR / ".aios_update_staging"
+PENDING_SHA_FILE = BASE_DIR / ".aios_update_pending_sha"
+
 
 def load_source(owner: str | None = None, repo: str | None = None,
                 branch: str | None = None) -> dict:
@@ -278,12 +285,22 @@ def _git_update(src: dict, progress) -> tuple[bool, str]:
 
 
 def _tarball_update(src: dict, progress) -> tuple[bool, str]:
+    """Download + extract to a STAGING dir. The actual file swap is deferred
+    to `_spawn_apply_script()` which runs after the helper exits, because
+    Windows won't let us overwrite files held open by the running process."""
     progress(f"downloading tarball ({src['owner']}/{src['repo']}@{src['branch']})…")
     blob = _http_bytes(_tarball_url(src), timeout=180, progress=progress,
                        token=src.get("token", ""))
     if not blob:
         return False, "tarball download failed"
-    progress("extracting…")
+    progress("clearing staging dir…")
+    if STAGING_DIR.exists():
+        try:
+            shutil.rmtree(STAGING_DIR, ignore_errors=True)
+        except Exception:
+            pass
+    STAGING_DIR.mkdir(parents=True, exist_ok=True)
+    progress("extracting to staging…")
     try:
         with tarfile.open(fileobj=io.BytesIO(blob), mode="r:gz") as tf:
             members = tf.getmembers()
@@ -299,11 +316,11 @@ def _tarball_update(src: dict, progress) -> tuple[bool, str]:
                 rel = m.name[len(top):].replace("\\", "/")
                 if not rel:
                     continue
-                # Skip preserved trees.
+                # Skip preserved trees so we don't even stage them.
                 head = rel.split("/", 1)[0]
                 if head in preserve_norm or rel in preserve_norm:
                     continue
-                target = BASE_DIR / rel
+                target = STAGING_DIR / rel
                 if m.isdir():
                     target.mkdir(parents=True, exist_ok=True)
                     continue
@@ -314,21 +331,19 @@ def _tarball_update(src: dict, progress) -> tuple[bool, str]:
                 if fh is None:
                     continue
                 data = fh.read()
-                tmp = target.with_suffix(target.suffix + ".aios-new")
-                tmp.write_bytes(data)
-                tmp.replace(target)
+                target.write_bytes(data)
                 written += 1
-            progress(f"extracted {written} file(s)")
+            progress(f"staged {written} file(s) — will apply on restart")
     except Exception as exc:
         return False, f"extract failed: {exc}"
-    # Persist a SHA marker so future checks know what we last installed.
+    # Remember which SHA was downloaded so we can stamp .aios_sha after apply.
     latest, _err = _remote_latest(src)
     if latest and latest.get("sha"):
         try:
-            (BASE_DIR / ".aios_sha").write_text(latest["sha"], encoding="utf-8")
+            PENDING_SHA_FILE.write_text(latest["sha"], encoding="utf-8")
         except OSError:
             pass
-    return True, "tarball applied"
+    return True, "tarball staged"
 
 
 def _install_deps(progress) -> tuple[bool, str]:
@@ -345,7 +360,9 @@ def _install_deps(progress) -> tuple[bool, str]:
 
 def perform_update(progress=None, owner: str | None = None,
                    repo: str | None = None, branch: str | None = None) -> dict:
-    """Pull latest, install deps. Returns dict with ok/message/restart_needed."""
+    """For git installs: pull + install deps in-place.
+    For tarball installs: stage files for the apply-after-restart flow;
+    deps will be installed by the apply script once files are swapped."""
     progress = progress or (lambda _msg: None)
     src = load_source(owner, repo, branch)
     via_git = _is_git_repo()
@@ -353,24 +370,224 @@ def perform_update(progress=None, owner: str | None = None,
              f"{src['owner']}/{src['repo']}@{src['branch']}…")
     if via_git:
         ok, msg = _git_update(src, progress)
-    else:
-        ok, msg = _tarball_update(src, progress)
+        if not ok:
+            return {"ok": False, "message": msg, "restart_needed": False}
+        deps_ok, deps_msg = _install_deps(progress)
+        progress(deps_msg)
+        return {
+            "ok": True,
+            "message": "updated; ready to restart",
+            "deps_message": deps_msg,
+            "deps_ok": deps_ok,
+            "restart_needed": True,
+            "via": "git",
+            "current": get_current_sha(),
+        }
+    # Tarball: stage now, apply on restart.
+    ok, msg = _tarball_update(src, progress)
     if not ok:
         return {"ok": False, "message": msg, "restart_needed": False}
-    deps_ok, deps_msg = _install_deps(progress)
-    progress(deps_msg)
     return {
         "ok": True,
-        "message": "updated; ready to restart",
-        "deps_message": deps_msg,
-        "deps_ok": deps_ok,
+        "message": "files staged · close aiOS to apply the update",
         "restart_needed": True,
-        "current": get_current_sha(),
+        "via": "tarball",
+        "staged": True,
     }
 
 
+# ---------------------------------------------------------------------------
+# Apply-after-restart helper. This script is dropped into TEMP, run detached,
+# waits for the running helper to release its files, swaps the staged tree in,
+# reinstalls deps, and then relaunches the helper.
+# ---------------------------------------------------------------------------
+
+APPLY_SCRIPT_TEMPLATE = r'''#!/usr/bin/env python3
+"""aiOS update applier — runs from TEMP after the helper exits."""
+import os
+import sys
+import shutil
+import subprocess
+import time
+import traceback
+from pathlib import Path
+
+BASE_DIR = Path(r"__BASE_DIR__")
+STAGING_DIR = BASE_DIR / ".aios_update_staging"
+LOG_PATH = BASE_DIR / "update-apply.log"
+PENDING_SHA_FILE = BASE_DIR / ".aios_update_pending_sha"
+SHA_FILE = BASE_DIR / ".aios_sha"
+HELPER = BASE_DIR / "helper_overlay.py"
+REQUIREMENTS = BASE_DIR / "requirements.txt"
+PARENT_PID = __PARENT_PID__
+
+
+def log(msg):
+    try:
+        with LOG_PATH.open("a", encoding="utf-8") as fh:
+            fh.write(time.strftime("[%Y-%m-%d %H:%M:%S] ") + str(msg) + "\n")
+    except Exception:
+        pass
+
+
+def wait_for_parent():
+    if PARENT_PID <= 0:
+        time.sleep(2.0)
+        return
+    deadline = time.time() + 20.0
+    while time.time() < deadline:
+        try:
+            os.kill(PARENT_PID, 0)
+        except OSError:
+            return  # parent gone
+        time.sleep(0.25)
+    log(f"timed out waiting for parent pid {PARENT_PID}")
+
+
+def copy_with_retry(src_path, dst_path, attempts=20):
+    last_exc = None
+    for i in range(attempts):
+        try:
+            dst_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src_path, dst_path)
+            return
+        except PermissionError as exc:
+            last_exc = exc
+            time.sleep(0.5)
+        except OSError as exc:
+            last_exc = exc
+            time.sleep(0.5)
+    raise last_exc if last_exc else RuntimeError("copy failed")
+
+
+def apply_staging():
+    if not STAGING_DIR.exists():
+        log("no staging dir, nothing to apply")
+        return False
+    # Sweep any leftover *.aios-new temp files from earlier broken update
+    # attempts — they confuse the next install.
+    for stale in BASE_DIR.rglob("*.aios-new"):
+        try:
+            stale.unlink()
+        except OSError:
+            pass
+    copied = 0
+    failed = []
+    for src_path in STAGING_DIR.rglob("*"):
+        if src_path.is_dir():
+            continue
+        rel = src_path.relative_to(STAGING_DIR)
+        dst = BASE_DIR / rel
+        try:
+            copy_with_retry(src_path, dst)
+            copied += 1
+        except Exception as exc:
+            failed.append(f"{rel}: {exc}")
+            log(f"copy failed: {rel}: {exc}")
+    log(f"copied {copied} file(s); {len(failed)} failures")
+    if failed:
+        # Surface a brief summary in a sentinel file so the next launch can
+        # show it.
+        try:
+            (BASE_DIR / "update-failures.log").write_text(
+                "\n".join(failed), encoding="utf-8")
+        except OSError:
+            pass
+    # Promote pending SHA → current SHA marker.
+    if PENDING_SHA_FILE.exists():
+        try:
+            SHA_FILE.write_text(PENDING_SHA_FILE.read_text(encoding="utf-8").strip(),
+                                encoding="utf-8")
+            PENDING_SHA_FILE.unlink()
+        except OSError:
+            pass
+    # Clean up staging.
+    shutil.rmtree(STAGING_DIR, ignore_errors=True)
+    return not failed
+
+
+def install_deps():
+    if not REQUIREMENTS.exists():
+        return
+    log("pip install -r requirements.txt …")
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "--disable-pip-version-check",
+             "--quiet", "-r", str(REQUIREMENTS)],
+            capture_output=True, text=True, timeout=600,
+        )
+        log(f"pip rc={proc.returncode}")
+        if proc.returncode != 0:
+            log(proc.stdout[-2000:] + "\n" + proc.stderr[-2000:])
+    except Exception as exc:
+        log(f"pip install error: {exc}")
+
+
+def relaunch_helper():
+    if not HELPER.exists():
+        log("helper_overlay.py missing — cannot relaunch")
+        return
+    log("relaunching helper")
+    kwargs = {"cwd": str(BASE_DIR), "close_fds": True}
+    if os.name == "nt":
+        DETACHED = 0x00000008
+        NEW_GROUP = 0x00000200
+        kwargs["creationflags"] = DETACHED | NEW_GROUP
+    try:
+        subprocess.Popen([sys.executable, str(HELPER)], **kwargs)
+    except Exception as exc:
+        log(f"relaunch failed: {exc}")
+
+
+def main():
+    log("== apply start ==")
+    try:
+        wait_for_parent()
+        ok = apply_staging()
+        if ok:
+            install_deps()
+        relaunch_helper()
+        log("== apply done ==")
+    except Exception:
+        log("apply crashed:\n" + traceback.format_exc())
+
+
+if __name__ == "__main__":
+    main()
+'''
+
+
+def _write_apply_script(parent_pid: int) -> Path:
+    import tempfile
+    body = (APPLY_SCRIPT_TEMPLATE
+            .replace("__BASE_DIR__", str(BASE_DIR))
+            .replace("__PARENT_PID__", str(int(parent_pid))))
+    fd, path = tempfile.mkstemp(prefix="aios_apply_", suffix=".py")
+    os.close(fd)
+    Path(path).write_text(body, encoding="utf-8")
+    return Path(path)
+
+
+def _spawn_apply_script() -> bool:
+    try:
+        script = _write_apply_script(os.getpid())
+        kwargs = {"close_fds": True}
+        if os.name == "nt":
+            DETACHED_PROCESS = 0x00000008
+            CREATE_NEW_PROCESS_GROUP = 0x00000200
+            kwargs["creationflags"] = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+        subprocess.Popen([sys.executable, str(script)], **kwargs)
+        return True
+    except Exception:
+        return False
+
+
 def restart_aios(extra_args: list[str] | None = None) -> None:
-    """Spawn a fresh helper process and exit the current one.
+    """Restart the helper.
+
+    If there's a staged update in `.aios_update_staging`, spawn the apply
+    script (which will wait for us to exit, swap files in, install deps,
+    and relaunch the helper). Otherwise just relaunch the helper directly.
 
     Safe to call from the Tk thread — we launch detached then os._exit.
     """
@@ -378,6 +595,19 @@ def restart_aios(extra_args: list[str] | None = None) -> None:
     helper_path = BASE_DIR / "helper_overlay.py"
     if not helper_path.exists():
         return
+    # If files were staged, hand off to the apply script and exit.
+    if STAGING_DIR.exists():
+        if _spawn_apply_script():
+            threading.Timer(0.5, lambda: os._exit(0)).start()
+            return
+        # If we couldn't spawn the apply script for some reason, fall through
+        # to a plain relaunch and surface a notice via the failures log.
+        try:
+            (BASE_DIR / "update-failures.log").write_text(
+                "could not spawn apply script — staged files remain in "
+                ".aios_update_staging\n", encoding="utf-8")
+        except OSError:
+            pass
     cmd = [sys.executable, str(helper_path), *extra_args]
     kwargs = {"cwd": str(BASE_DIR), "close_fds": True}
     if os.name == "nt":
@@ -388,7 +618,6 @@ def restart_aios(extra_args: list[str] | None = None) -> None:
         subprocess.Popen(cmd, **kwargs)
     except Exception:
         return
-    # Give the new process a beat to claim resources, then bail.
     threading.Timer(0.6, lambda: os._exit(0)).start()
 
 

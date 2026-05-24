@@ -385,6 +385,19 @@ class Installer(tk.Tk):
             self._append(f"saved → {owner}/{repo}@{branch}\n")
         else:
             self._append("could not write helper_config.json\n")
+        # Stamp the current remote SHA into .aios_sha so the updater knows
+        # what version this install corresponds to (only for non-git installs).
+        if not (BASE_DIR / ".git").exists():
+            sha_file = BASE_DIR / ".aios_sha"
+            if not sha_file.exists():
+                try:
+                    info = aios_updater.check_for_update(owner, repo, branch)
+                    latest = info.get("latest") or ""
+                    if latest:
+                        sha_file.write_text(latest, encoding="utf-8")
+                        self._append(f"version marker set: {latest}\n")
+                except Exception as exc:
+                    self._append(f"could not stamp version marker: {exc}\n")
 
     def _install_deps(self) -> None:
         self._run([sys.executable, "-m", "pip", "install", "--upgrade", "pip"])
