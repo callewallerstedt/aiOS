@@ -21,6 +21,14 @@ const opStream = $('op-stream');
 const opDisclose = $('op-disclose');
 const opBody = $('op-body');
 const codexUsage = $('codex-usage');
+const opFollowupBanner = $('op-followup-banner');
+const opFollowupMode = $('op-followup-mode');
+const opFollowupQuestion = $('op-followup-question');
+const opFollowupClear = $('op-followup-clear');
+const opClearPersistent = $('op-clear-persistent');
+const attachBtn = $('attach-btn');
+const attachInput = $('attach-input');
+const attachStrip = $('attach-strip');
 
 const opInputs = {
   model: $('op-model'),
@@ -80,12 +88,14 @@ let operatorStreamStarting = false;
 let stepEntries = new Map(); // n -> element
 let lastEntryEl = null;
 let recordingStartedAt = 0;
+let operatorState = { running: false, asking: false, last_question: '' };
+let pendingAttachments = []; // {id, localUrl, uploading}
 
 function loadPrefs() {
   let raw = {};
   try { raw = JSON.parse(localStorage.getItem('aiosPrefs') || '{}'); } catch (_e) {}
   return {
-    refreshMs: clamp(Number(raw.refreshMs) || 900, 400, 10000),
+    refreshMs: clamp(Number(raw.refreshMs) || 500, 400, 10000),
     quality: clamp(Number(raw.quality) || 78, 20, 95),
     maxSize: clamp(Number(raw.maxSize) || 1600, 400, 3840),
     stream: raw.stream !== false,
@@ -353,15 +363,26 @@ async function uploadRecording() {
 async function sendTranscript() {
   const text = textEl.value.trim();
   if (!apiBase) { openSettings(); return; }
-  if (!text) { setState('empty'); return; }
+  const readyAttachments = pendingAttachments.filter(a => a.id && !a.uploading).map(a => a.id);
+  const stillUploading = pendingAttachments.some(a => a.uploading);
+  if (stillUploading) { setState('uploading…', 'warn'); return; }
+  if (!text && !readyAttachments.length) { setState('empty'); return; }
   setState('sending', 'warn');
+  const isFollowup = target === 'operator' && operatorState.running;
   const body = { target, text };
+  if (readyAttachments.length) body.attachments = readyAttachments;
   if (target === 'operator') {
-    body.options = collectOperatorOptions();
-    opStatus.textContent = 'booting...';
-    opStatus.classList.add('live');
-    startOperatorStream();
-    appendUserPrompt(text);
+    if (isFollowup) {
+      body.intent = 'followup';
+      appendUserFollowup(text, operatorState.asking);
+    } else {
+      body.intent = 'new';
+      body.options = collectOperatorOptions();
+      opStatus.textContent = 'booting...';
+      opStatus.classList.add('live');
+      startOperatorStream();
+      appendUserPrompt(text);
+    }
   }
   try {
     await phoneStart();
@@ -373,12 +394,157 @@ async function sendTranscript() {
     const data = await r.json();
     if (!r.ok || !data.ok) throw new Error(data.error || 'failed');
     setState('sent', 'live');
-    if (target === 'operator') {
+    if (target === 'operator' && !isFollowup) {
       opStatus.textContent = 'booting…';
       opStatus.classList.add('live');
     }
+    if (isFollowup) {
+      // Optimistically clear asking flag locally; status poll will confirm.
+      operatorState.asking = false;
+      renderFollowupBanner();
+    }
+    textEl.value = '';
+    updateCharCount();
+    pendingAttachments.forEach(a => { try { URL.revokeObjectURL(a.localUrl); } catch (_e) {} });
+    pendingAttachments = [];
+    renderAttachStrip();
   } catch (_e) {
     setState('offline', 'err');
+    haptic('err');
+  }
+}
+
+function appendUserFollowup(text, answeringAsk) {
+  const el = document.createElement('div');
+  el.className = 'entry';
+  const label = answeringAsk ? 'answer' : 'follow-up';
+  const color = answeringAsk ? 'rgba(244,201,93,.22)' : 'rgba(110,168,255,.18)';
+  el.innerHTML = `<div class="row"><span class="badge" style="background:${color};color:#fff;">${label}</span><span class="ts">now</span></div><div class="body">${escapeHtml(text)}</div>`;
+  opStream.appendChild(el);
+  scrollOpToBottom();
+}
+
+function renderFollowupBanner() {
+  if (!opFollowupBanner) return;
+  if (target !== 'operator' || !operatorState.running) {
+    opFollowupBanner.hidden = true;
+    opFollowupBanner.classList.remove('asking');
+    textEl.placeholder = 'tap mic, or type here…';
+    return;
+  }
+  opFollowupBanner.hidden = false;
+  if (operatorState.asking) {
+    opFollowupBanner.classList.add('asking');
+    opFollowupMode.textContent = 'Operator is asking';
+    if (operatorState.last_question) {
+      opFollowupQuestion.hidden = false;
+      opFollowupQuestion.textContent = operatorState.last_question;
+    } else {
+      opFollowupQuestion.hidden = true;
+    }
+    textEl.placeholder = 'type your answer…';
+  } else {
+    opFollowupBanner.classList.remove('asking');
+    opFollowupMode.textContent = 'Operator running · follow-up';
+    opFollowupQuestion.hidden = true;
+    textEl.placeholder = 'add an instruction…';
+  }
+}
+
+async function clearOperator() {
+  if (!apiBase) return;
+  try {
+    await fetch(apiUrl('/api/phone/operator/clear'), { method: 'POST' });
+  } catch (_e) {}
+  operatorState = { running: false, asking: false, last_question: '' };
+  renderFollowupBanner();
+  opStream.innerHTML = '';
+  stepEntries.clear();
+  lastEntryEl = null;
+  opStatus.textContent = 'idle';
+  opStatus.classList.remove('live');
+  haptic('light');
+}
+
+if (opFollowupClear) opFollowupClear.addEventListener('click', clearOperator);
+if (opClearPersistent) opClearPersistent.addEventListener('click', clearOperator);
+
+if (attachBtn) attachBtn.addEventListener('click', () => attachInput && attachInput.click());
+if (attachInput) attachInput.addEventListener('change', (e) => {
+  const files = Array.from(e.target.files || []);
+  files.forEach(uploadAttachment);
+  attachInput.value = '';
+});
+
+textEl.addEventListener('paste', (e) => {
+  const items = (e.clipboardData && e.clipboardData.items) || [];
+  for (const it of items) {
+    if (it.kind === 'file') {
+      const file = it.getAsFile();
+      if (file && file.type.startsWith('image/')) {
+        e.preventDefault();
+        uploadAttachment(file);
+      }
+    }
+  }
+});
+
+['dragover', 'drop'].forEach((evtName) => {
+  document.body.addEventListener(evtName, (e) => {
+    if (evtName === 'dragover') { e.preventDefault(); return; }
+    if (evtName === 'drop') {
+      e.preventDefault();
+      const files = Array.from((e.dataTransfer && e.dataTransfer.files) || []);
+      files.filter(f => f.type.startsWith('image/')).forEach(uploadAttachment);
+    }
+  });
+});
+
+function renderAttachStrip() {
+  if (!attachStrip) return;
+  attachStrip.innerHTML = '';
+  if (!pendingAttachments.length) { attachStrip.hidden = true; return; }
+  attachStrip.hidden = false;
+  pendingAttachments.forEach((att, i) => {
+    const chip = document.createElement('div');
+    chip.className = 'attach-chip' + (att.uploading ? ' uploading' : '');
+    chip.innerHTML = `<img src="${att.localUrl}" alt="" />
+      <button class="attach-chip-x" type="button" aria-label="Remove">×</button>`;
+    chip.querySelector('.attach-chip-x').addEventListener('click', () => {
+      pendingAttachments.splice(i, 1);
+      try { URL.revokeObjectURL(att.localUrl); } catch (_e) {}
+      renderAttachStrip();
+    });
+    attachStrip.appendChild(chip);
+  });
+}
+
+async function uploadAttachment(file) {
+  if (!apiBase) { openSettings(); return; }
+  const localUrl = URL.createObjectURL(file);
+  const slot = { id: null, localUrl, uploading: true };
+  pendingAttachments.push(slot);
+  renderAttachStrip();
+  try {
+    const fd = new FormData();
+    fd.append('files', file, file.name || 'image.png');
+    const r = await fetch(apiUrl('/api/phone/operator/upload'), {
+      method: 'POST', body: fd,
+    });
+    const data = await r.json();
+    if (!r.ok || !data.ok || !data.attachments || !data.attachments[0]) {
+      throw new Error(data.error || 'upload failed');
+    }
+    slot.id = data.attachments[0].id;
+    slot.uploading = false;
+    renderAttachStrip();
+    haptic('success');
+  } catch (_e) {
+    const idx = pendingAttachments.indexOf(slot);
+    if (idx >= 0) pendingAttachments.splice(idx, 1);
+    try { URL.revokeObjectURL(localUrl); } catch (_e2) {}
+    renderAttachStrip();
+    setState('upload err', 'err');
     haptic('err');
   }
 }
@@ -393,6 +559,14 @@ async function checkStatus() {
     if (data.operator && !operatorConfig) {
       operatorConfig = data.operator;
       applyOperatorConfig(operatorConfig);
+    }
+    if (data.operator_state) {
+      operatorState = {
+        running: !!data.operator_state.running,
+        asking: !!data.operator_state.asking,
+        last_question: String(data.operator_state.last_question || ''),
+      };
+      renderFollowupBanner();
     }
     renderCodexUsage(data.codex_usage);
   } catch (_e) { setState('offline', 'err'); }
@@ -544,7 +718,7 @@ function startHeartbeat() {
 function startStatusRefresh() {
   if (statusTimer) clearInterval(statusTimer);
   if (!apiBase) return;
-  statusTimer = setInterval(checkStatus, 10000);
+  statusTimer = setInterval(checkStatus, 2500);
 }
 
 function stopScreen() { if (screenTimer) { clearInterval(screenTimer); screenTimer = null; } }
@@ -657,6 +831,47 @@ function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
+const THINKING_FLAVORS = [
+  'looking at the screen…',
+  'parsing what changed…',
+  'considering options…',
+  'planning next move…',
+  'estimating click targets…',
+  'checking if it worked…',
+  'reading the UI text…',
+  'figuring out where to click…',
+  'reasoning about layout…',
+  'matching task to screen…',
+];
+
+function startThinkingAnimation(el) {
+  const start = performance.now();
+  const elapsedEl = el.querySelector('[data-elapsed]');
+  const flavorEl = el.querySelector('[data-flavor]');
+  let flavorIndex = Math.floor(Math.random() * THINKING_FLAVORS.length);
+  const tick = () => {
+    if (!el.isConnected) return;
+    const sec = (performance.now() - start) / 1000;
+    if (elapsedEl) elapsedEl.textContent = `${sec.toFixed(1)}s`;
+    el._raf = requestAnimationFrame(tick);
+  };
+  el._raf = requestAnimationFrame(tick);
+  el._flavorTimer = setInterval(() => {
+    if (!el.isConnected || !flavorEl) return;
+    flavorIndex = (flavorIndex + 1) % THINKING_FLAVORS.length;
+    flavorEl.style.opacity = '0';
+    setTimeout(() => {
+      flavorEl.textContent = THINKING_FLAVORS[flavorIndex];
+      flavorEl.style.opacity = '';
+    }, 180);
+  }, 1600);
+}
+
+function stopThinkingAnimation(el) {
+  if (el._raf) cancelAnimationFrame(el._raf);
+  if (el._flavorTimer) clearInterval(el._flavorTimer);
+}
+
 function renderEvent(evt) {
   if (!evt || !evt.type) return;
   const ts = fmtTs(evt.ts);
@@ -671,7 +886,27 @@ function renderEvent(evt) {
     opStream.appendChild(el);
     opStatus.textContent = 'running';
     opStatus.classList.add('live');
+    operatorState.running = true;
+    operatorState.asking = false;
+    operatorState.last_question = '';
+    renderFollowupBanner();
     scrollOpToBottom();
+    return;
+  }
+
+  if (evt.type === 'follow_up') {
+    appendUserFollowup(evt.text || '', !!evt.answering_ask);
+    return;
+  }
+
+  if (evt.type === 'cleared') {
+    opStream.innerHTML = '';
+    stepEntries.clear();
+    lastEntryEl = null;
+    operatorState = { running: false, asking: false, last_question: '' };
+    renderFollowupBanner();
+    opStatus.textContent = 'cleared';
+    opStatus.classList.remove('live');
     return;
   }
 
@@ -683,18 +918,37 @@ function renderEvent(evt) {
     opStream.appendChild(el);
     stepEntries.set(evt.n, el);
     lastEntryEl = el;
+    // Animated "thinking" placeholder until the thought arrives.
+    const think = document.createElement('div');
+    think.className = 'entry thinking';
+    think.dataset.thinkingFor = evt.n;
+    think.innerHTML = `
+      <div class="row"><span class="badge thinking-badge">thinking</span><span class="ts" data-elapsed>0.0s</span></div>
+      <div class="thinking-body">
+        <span class="thinking-dots"><span></span><span></span><span></span></span>
+        <span class="thinking-flavor" data-flavor>looking at the screen…</span>
+      </div>`;
+    opStream.appendChild(think);
+    startThinkingAnimation(think);
     scrollOpToBottom();
     return;
   }
 
   if (evt.type === 'screenshot') {
     if (!evt.frame) return;
+    const frameUrl = apiUrl(`/api/phone/operator/frame/${evt.frame}`);
+    // Piggyback: update the main screen preview with the operator's own
+    // freshly-captured frame so we don't wait for the next poll tick.
+    if (screenEl && !screenCollapsed) {
+      screenEl.src = frameUrl;
+      screenWrap.classList.add('live');
+    }
     const wrap = document.createElement('div');
     wrap.className = 'frame-wrap';
     const img = document.createElement('img');
     img.loading = 'lazy';
     img.alt = 'operator frame';
-    img.src = apiUrl(`/api/phone/operator/frame/${evt.frame}`);
+    img.src = frameUrl;
     img.addEventListener('click', (e) => { e.stopPropagation(); openZoom(img.src, { showLoading: false }); });
     wrap.appendChild(img);
     const target = lastEntryEl || opStream.lastElementChild;
@@ -712,6 +966,11 @@ function renderEvent(evt) {
   }
 
   if (evt.type === 'thought') {
+    // Kill the thinking placeholder for whatever step just thought.
+    document.querySelectorAll('.entry.thinking').forEach((node) => {
+      stopThinkingAnimation(node);
+      node.remove();
+    });
     const el = document.createElement('div');
     el.className = 'entry thought';
     const thought = (evt.thought || '').trim();
@@ -746,6 +1005,9 @@ function renderEvent(evt) {
   }
 
   if (evt.type === 'done') {
+    document.querySelectorAll('.entry.thinking').forEach((node) => {
+      stopThinkingAnimation(node); node.remove();
+    });
     const el = document.createElement('div');
     el.className = 'entry done' + (evt.ok ? '' : ' fail');
     el.innerHTML = `<div class="row"><span class="badge">done</span><span class="ts">${ts}</span></div>
@@ -754,6 +1016,10 @@ function renderEvent(evt) {
     opStatus.textContent = evt.ok ? 'done' : 'failed';
     opStatus.classList.remove('live');
     if (!evt.ok) opStatus.classList.add('err'); else opStatus.classList.remove('err');
+    operatorState.running = false;
+    operatorState.asking = false;
+    operatorState.last_question = '';
+    renderFollowupBanner();
     haptic(evt.ok ? 'success' : 'err');
     scrollOpToBottom();
     return;
@@ -766,6 +1032,10 @@ function renderEvent(evt) {
       <div class="body">${escapeHtml(evt.message || '')}</div>`;
     opStream.appendChild(el);
     lastEntryEl = el;
+    operatorState.asking = true;
+    operatorState.last_question = evt.message || '';
+    renderFollowupBanner();
+    haptic('heavy');
     scrollOpToBottom();
     return;
   }

@@ -24,14 +24,15 @@ AC_SRC_ALPHA = 0x01
 BI_RGB = 0
 TRANSPARENT = "#010203"
 
-PAD_X = 56
-PAD_Y = 44
-CORNER_RADIUS = 28
+PAD_X = 64
+PAD_Y = 52
+CORNER_RADIUS = 22
 LOGO_DARK_THRESHOLD = 26
-PANEL_TOP = (16, 23, 34)
-PANEL_BOTTOM = (8, 13, 21)
-PANEL_ALPHA = 228
+PANEL_TOP = (14, 18, 26)
+PANEL_BOTTOM = (9, 12, 18)
+PANEL_ALPHA = 255
 ACCENT = (110, 231, 200)
+CHROMA_KEY = (1, 2, 3)
 
 
 class POINT(ctypes.Structure):
@@ -95,7 +96,7 @@ def _lerp(a, b, t):
 def _rounded_rect_alpha(width, height, radius):
     mask = Image.new("L", (width, height), 0)
     ImageDraw.Draw(mask).rounded_rectangle((0, 0, width - 1, height - 1), radius=radius, fill=255)
-    return mask.filter(ImageFilter.GaussianBlur(radius=1.4))
+    return mask.point(lambda v: 255 if v >= 128 else 0)
 
 
 def build_splash_panel(logo_width, logo_height):
@@ -103,58 +104,25 @@ def build_splash_panel(logo_width, logo_height):
     height = logo_height + PAD_Y * 2
     panel = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     pixels = panel.load()
-    cx = width / 2.0
-    cy = height / 2.0
-    max_dist = (cx * cx + cy * cy) ** 0.5
 
     for y in range(height):
         vertical = y / max(height - 1, 1)
-        base_r = _lerp(PANEL_TOP[0], PANEL_BOTTOM[0], vertical)
-        base_g = _lerp(PANEL_TOP[1], PANEL_BOTTOM[1], vertical)
-        base_b = _lerp(PANEL_TOP[2], PANEL_BOTTOM[2], vertical)
-
+        r = _lerp(PANEL_TOP[0], PANEL_BOTTOM[0], vertical)
+        g = _lerp(PANEL_TOP[1], PANEL_BOTTOM[1], vertical)
+        b = _lerp(PANEL_TOP[2], PANEL_BOTTOM[2], vertical)
         for x in range(width):
-            dist = ((x - cx) ** 2 + (y - cy) ** 2) ** 0.5 / max_dist
-            glow = max(0.0, 1.0 - dist * 1.18)
-            accent = max(0.0, 1.0 - dist * 2.4) * 0.22
-            r = min(255, base_r + int(6 * glow) + int(ACCENT[0] * accent * 0.08))
-            g = min(255, base_g + int(8 * glow) + int(ACCENT[1] * accent * 0.08))
-            b = min(255, base_b + int(10 * glow) + int(ACCENT[2] * accent * 0.08))
-
-            edge_x = min(x, width - 1 - x) / max(width * 0.42, 1)
-            edge_y = min(y, height - 1 - y) / max(height * 0.42, 1)
-            edge = min(1.0, min(edge_x, edge_y) * 1.35)
-            alpha = int(PANEL_ALPHA * edge)
-            pixels[x, y] = (r, g, b, alpha)
+            pixels[x, y] = (r, g, b, PANEL_ALPHA)
 
     rounded = _rounded_rect_alpha(width, height, CORNER_RADIUS)
-    panel.putalpha(ImageChops.multiply(panel.split()[3], rounded))
+    panel.putalpha(rounded)
 
     draw = ImageDraw.Draw(panel)
     draw.rounded_rectangle(
-        (1.5, 1.5, width - 2.5, height - 2.5),
+        (0, 0, width - 1, height - 1),
         radius=CORNER_RADIUS,
-        outline=(255, 255, 255, 34),
+        outline=(255, 255, 255, 28),
         width=1,
     )
-    draw.rounded_rectangle(
-        (4, 4, width - 5, height - 5),
-        radius=max(CORNER_RADIUS - 3, 8),
-        outline=(ACCENT[0], ACCENT[1], ACCENT[2], 36),
-        width=1,
-    )
-    draw.line([(CORNER_RADIUS + 16, 7), (width - CORNER_RADIUS - 16, 7)], fill=(255, 255, 255, 42), width=1)
-
-    for offset in (18, height - 19):
-        draw.line([(CORNER_RADIUS + 24, offset), (width - CORNER_RADIUS - 24, offset)], fill=(255, 255, 255, 10), width=1)
-
-    for x, y in (
-        (CORNER_RADIUS + 10, CORNER_RADIUS + 10),
-        (width - CORNER_RADIUS - 10, CORNER_RADIUS + 10),
-        (CORNER_RADIUS + 10, height - CORNER_RADIUS - 10),
-        (width - CORNER_RADIUS - 10, height - CORNER_RADIUS - 10),
-    ):
-        draw.ellipse((x - 2, y - 2, x + 2, y + 2), fill=(ACCENT[0], ACCENT[1], ACCENT[2], 48))
 
     return panel, (PAD_X, PAD_Y)
 
@@ -172,17 +140,47 @@ def compose_splash_frame(logo, panel, offset):
     return composed
 
 
-def flatten_for_display(frame, bg=PANEL_BOTTOM):
+def flatten_for_display(frame, bg=CHROMA_KEY):
     base = Image.new("RGBA", frame.size, (*bg, 255))
     return Image.alpha_composite(base, frame).convert("RGB")
+
+
+REVEAL_FRAMES = 48
+REVEAL_FEATHER = 80
+
+
+def _wipe_mask(width, height, progress, feather=REVEAL_FEATHER):
+    edge = progress * (width + feather)
+    row = Image.new("L", (width, 1), 0)
+    pixels = row.load()
+    for x in range(width):
+        if x <= edge - feather:
+            pixels[x, 0] = 255
+        elif x >= edge:
+            pixels[x, 0] = 0
+        else:
+            t = (edge - x) / feather
+            pixels[x, 0] = max(0, min(255, int(255 * t)))
+    return row.resize((width, height))
 
 
 def prepare_splash_frames(frame_paths):
     logos = [Image.open(path).convert("RGBA") for path in frame_paths]
     if not logos:
         return []
-    panel, offset = build_splash_panel(*logos[0].size)
-    return [compose_splash_frame(logo, panel, offset) for logo in logos]
+    final_logo = max(logos, key=lambda im: im.convert("L").getextrema()[1])
+    panel, offset = build_splash_panel(*final_logo.size)
+    base_logo_mask = _logo_mask(final_logo)
+    frames = []
+    for i in range(REVEAL_FRAMES):
+        progress = (i + 1) / REVEAL_FRAMES
+        eased = 1 - (1 - progress) ** 2
+        wipe = _wipe_mask(final_logo.size[0], final_logo.size[1], eased)
+        combined = ImageChops.multiply(base_logo_mask, wipe)
+        composed = panel.copy()
+        composed.paste(final_logo, offset, combined)
+        frames.append(composed)
+    return frames
 
 
 def update_layered_window(hwnd, image, x, y):
@@ -313,10 +311,14 @@ def run_tk_fallback(frames):
     root.withdraw()
     root.overrideredirect(True)
     root.attributes("-topmost", True)
-    bg = "#{:02x}{:02x}{:02x}".format(*PANEL_BOTTOM)
-    root.configure(bg=bg)
+    chroma = "#{:02x}{:02x}{:02x}".format(*CHROMA_KEY)
+    root.configure(bg=chroma)
+    try:
+        root.attributes("-transparentcolor", chroma)
+    except tk.TclError:
+        pass
     images = [ImageTk.PhotoImage(flatten_for_display(frame), master=root) for frame in frames]
-    label = tk.Label(root, image=images[0], bg=bg, bd=0, highlightthickness=0)
+    label = tk.Label(root, image=images[0], bg=chroma, bd=0, highlightthickness=0)
     label.pack()
     width = images[0].width()
     height = images[0].height()

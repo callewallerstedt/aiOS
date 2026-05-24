@@ -1466,8 +1466,10 @@ class HelperOverlay:
         self.agent_operator_canvas = None
         self.agent_operator_log = None
         self.agent_operator_run_btn = None
+        self.agent_operator_followup_btn = None
         self.agent_operator_pause_btn = None
         self.agent_operator_stop_btn = None
+        self.agent_operator_clear_run_btn = None
         self.agent_operator_control_overlay = None
         self.agent_operator_control_canvas = None
         self.agent_operator_control_after = None
@@ -4512,10 +4514,14 @@ class HelperOverlay:
         actions.pack(side="right", padx=(10, 0))
         self.agent_operator_run_btn = self.button(actions, "Run", self.agent_operator_run, compact=True)
         self.agent_operator_run_btn.pack(side="left", padx=(0, 6))
+        self.agent_operator_followup_btn = self.button(actions, "Send follow-up", self.agent_operator_send_followup, compact=True)
+        self.agent_operator_followup_btn.pack(side="left", padx=(0, 6))
         self.agent_operator_pause_btn = self.button(actions, "Pause", self.agent_operator_toggle_pause, compact=True)
         self.agent_operator_pause_btn.pack(side="left", padx=(0, 6))
         self.agent_operator_stop_btn = self.button(actions, "Stop", self.agent_operator_stop, compact=True)
         self.agent_operator_stop_btn.pack(side="left")
+        self.agent_operator_clear_run_btn = self.button(actions, "Clear operator", self.agent_operator_clear_run, compact=True)
+        self.agent_operator_clear_run_btn.pack(side="left", padx=(6, 0))
         self.agent_operator_task = tk.Text(
             task_panel,
             height=4,
@@ -4936,6 +4942,9 @@ class HelperOverlay:
     def agent_operator_task_enter(self, event):
         if event and (event.state & 0x0001):
             return None
+        loop = self.agent_operator_loop
+        if loop and loop.is_running():
+            return self.agent_operator_send_followup()
         return self.agent_operator_run()
 
     def agent_operator_task_paste(self, _event):
@@ -5542,6 +5551,13 @@ class HelperOverlay:
         self._phone_mirror_seq = 0
         # Marker event so the phone knows a fresh run started
         self._phone_mirror_write({"type": "run_start", "ts": time.time()})
+        try:
+            (root / "status.json").write_text(
+                json.dumps({"ts": time.time(), "running": True, "asking": False,
+                            "last_question": ""}),
+                encoding="utf-8")
+        except OSError:
+            pass
 
     def _phone_mirror_write(self, payload):
         root = self._phone_mirror_dir()
@@ -5626,6 +5642,9 @@ class HelperOverlay:
             record["message"] = event.get("message", "")
         elif kind == "ask":
             record["message"] = event.get("message", "")
+        elif kind == "follow_up_received":
+            record["text"] = event.get("text", "")
+            record["answering_ask"] = bool(event.get("answering_ask"))
         elif kind == "log":
             record["msg"] = event.get("msg", "")
         else:
@@ -5637,6 +5656,33 @@ class HelperOverlay:
         try:
             self._phone_mirror_event(event)
         except Exception:
+            pass
+        try:
+            self._phone_mirror_state(event)
+        except Exception:
+            pass
+
+    def _phone_mirror_state(self, event):
+        kind = event.get("type") if isinstance(event, dict) else None
+        if kind not in {"step_begin", "done", "ask", "follow_up_received", "log"}:
+            return
+        loop = self.agent_operator_loop
+        state = {
+            "ts": time.time(),
+            "running": bool(loop and loop.is_running()),
+            "asking": bool(loop and loop.is_awaiting_answer()),
+            "last_question": "",
+        }
+        if kind == "ask":
+            state["last_question"] = event.get("message", "")
+            state["asking"] = True
+        if kind == "done":
+            state["running"] = False
+            state["asking"] = False
+        try:
+            path = self._phone_mirror_dir() / "status.json"
+            path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+        except OSError:
             pass
 
     def _poll_agent_operator_events(self):
@@ -5725,11 +5771,14 @@ class HelperOverlay:
     def _agent_operator_sync_buttons(self):
         running = bool(self.agent_operator_loop and self.agent_operator_loop.is_running())
         paused = bool(self.agent_operator_loop and self.agent_operator_loop.is_paused())
+        asking = bool(self.agent_operator_loop and self.agent_operator_loop.is_awaiting_answer())
         stopping = bool(self.agent_operator_stop_requested and running)
         for button, enabled in (
             (self.agent_operator_run_btn, not running),
+            (self.agent_operator_followup_btn, running),
             (self.agent_operator_pause_btn, running and not stopping),
             (self.agent_operator_stop_btn, running),
+            (self.agent_operator_clear_run_btn, True),
         ):
             if not button:
                 continue
@@ -5739,9 +5788,40 @@ class HelperOverlay:
                 pass
         if self.agent_operator_pause_btn:
             try:
-                self.agent_operator_pause_btn.configure(text="Resume" if paused else "Pause")
+                label = "Resume" if (paused and not asking) else "Pause"
+                self.agent_operator_pause_btn.configure(text=label)
             except tk.TclError:
                 pass
+        if self.agent_operator_followup_btn:
+            try:
+                self.agent_operator_followup_btn.configure(
+                    text="Answer" if asking else "Send follow-up")
+            except tk.TclError:
+                pass
+
+    def agent_operator_send_followup(self):
+        if not self.agent_operator_task:
+            return "break"
+        text = self.agent_operator_task.get("1.0", "end").strip()
+        if not text:
+            return "break"
+        loop = self.agent_operator_loop
+        if not loop or not loop.is_running():
+            return self.agent_operator_run()
+        if loop.add_follow_up(text):
+            self._agent_operator_log_line("ts", f"\n[{self._ts()}] ")
+            self._agent_operator_log_line("status", f"FOLLOW-UP: {text}\n")
+            self._phone_mirror_write({"type": "follow_up", "ts": time.time(),
+                                       "text": text,
+                                       "answering_ask": bool(loop.is_awaiting_answer())})
+            self.agent_operator_task.delete("1.0", "end")
+            if self.agent_operator_status_var:
+                self.agent_operator_status_var.set("Follow-up sent")
+        return "break"
+
+    def agent_operator_clear_run(self):
+        self._remote_operator_clear()
+        return "break"
 
     def _agent_operator_log_line(self, tag, text):
         self.agent_operator_log_buffer.append((tag, text))
@@ -5979,6 +6059,8 @@ class HelperOverlay:
         self.page_title("Settings")
         scroll = ScrollFrame(self.page, self.c("panel"))
         scroll.pack(fill="both", expand=True)
+
+        self._render_update_card(scroll.inner)
 
         self.settings_color_rows = {}
         colors = self.card(scroll.inner)
@@ -8047,6 +8129,234 @@ class HelperOverlay:
             "Restart voice dictation to load a new model. Discord mute applies after reloading AHK."
         )
 
+    def _render_update_card(self, parent):
+        try:
+            import aios_updater
+        except Exception as exc:
+            err = self.card(parent)
+            err.pack(fill="x", pady=(0, 12))
+            self.section(err, "Update aiOS")
+            tk.Label(err, text=f"updater unavailable: {exc}",
+                     bg=self.c("surface"), fg=self.c("danger"),
+                     font=self.font(9)).pack(anchor="w", padx=12, pady=(0, 12))
+            return
+        card = self.card(parent)
+        card.pack(fill="x", pady=(0, 12))
+        self.section(card, "Update aiOS")
+
+        src = aios_updater.load_source()
+        current = aios_updater.get_current_sha() or "(unknown)"
+        info_var = tk.StringVar(value=f"current {current}  ·  press Check to compare with GitHub")
+        status_var = tk.StringVar(value="")
+        log_var = tk.StringVar(value="")
+        owner_var = tk.StringVar(value=src["owner"])
+        repo_var = tk.StringVar(value=src["repo"])
+        branch_var = tk.StringVar(value=src["branch"])
+        token_var = tk.StringVar(value="••••••••" if src.get("token") else "")
+        self._update_state = {
+            "info_var": info_var, "status_var": status_var, "log_var": log_var,
+            "owner_var": owner_var, "repo_var": repo_var,
+            "branch_var": branch_var, "token_var": token_var,
+            "busy": False, "last_check": None,
+            "token_present": bool(src.get("token")),
+        }
+
+        tk.Label(card, textvariable=info_var, bg=self.c("surface"),
+                 fg=self.c("text"), font=self.font(9), anchor="w",
+                 justify="left", wraplength=620).pack(fill="x", padx=12, pady=(0, 4))
+        tk.Label(card, textvariable=status_var, bg=self.c("surface"),
+                 fg=self.c("muted"), font=self.font(8), anchor="w",
+                 justify="left", wraplength=620).pack(fill="x", padx=12, pady=(0, 4))
+
+        # Source config grid: owner / repo / branch / token.
+        grid = tk.Frame(card, bg=self.c("surface"))
+        grid.pack(fill="x", padx=12, pady=(6, 6))
+
+        def add_row(row_idx, label, var, *, masked=False, hint=""):
+            tk.Label(grid, text=label, bg=self.c("surface"), fg=self.c("muted"),
+                     font=self.font(8, "bold"), width=10, anchor="w").grid(
+                row=row_idx, column=0, sticky="w", pady=2)
+            entry = tk.Entry(
+                grid, textvariable=var,
+                bg="#080d14", fg=self.c("text"),
+                insertbackground=self.c("text"),
+                relief="flat", bd=0, font=self.font(9),
+                show="*" if masked else "",
+            )
+            entry.grid(row=row_idx, column=1, sticky="ew", padx=(8, 0), pady=2, ipady=3, ipadx=6)
+            if hint:
+                tk.Label(grid, text=hint, bg=self.c("surface"),
+                         fg=self.c("muted"), font=self.font(7)).grid(
+                    row=row_idx, column=2, sticky="w", padx=(8, 0))
+            return entry
+
+        grid.columnconfigure(1, weight=1)
+        add_row(0, "Owner", owner_var, hint="GitHub user/org")
+        add_row(1, "Repo", repo_var)
+        add_row(2, "Branch", branch_var, hint="usually main")
+        add_row(3, "Token", token_var, masked=True,
+                hint="GitHub PAT · required for private repos")
+
+        log_frame = tk.Frame(card, bg="#080d14")
+        log_frame.pack(fill="x", padx=12, pady=(4, 8))
+        log_label = tk.Label(log_frame, textvariable=log_var, bg="#080d14",
+                              fg=self.c("muted"), font=self.font(8),
+                              anchor="w", justify="left", wraplength=620,
+                              padx=8, pady=6)
+        log_label.pack(fill="x")
+
+        actions = tk.Frame(card, bg=self.c("surface"))
+        actions.pack(fill="x", padx=12, pady=(0, 12))
+        save_btn = self.button(actions, "Save source",
+                                lambda: self._updater_save_source(), compact=True)
+        save_btn.pack(side="left")
+        check_btn = self.button(actions, "Check for updates",
+                                 lambda: self._updater_check(), compact=True)
+        check_btn.pack(side="left", padx=(8, 0))
+        update_btn = self.button(actions, "Update & restart",
+                                  lambda: self._updater_update_and_restart(), compact=True)
+        update_btn.pack(side="left", padx=(8, 0))
+        update_btn.configure(state="disabled")
+        self._update_state["check_btn"] = check_btn
+        self._update_state["update_btn"] = update_btn
+        self._update_state["save_btn"] = save_btn
+
+        # Kick off an initial check in the background so the user sees status
+        # without having to click.
+        self._updater_check(silent=True)
+
+    def _updater_save_source(self):
+        import aios_updater
+        state = self._update_state
+        owner = state["owner_var"].get().strip()
+        repo = state["repo_var"].get().strip()
+        branch = state["branch_var"].get().strip() or "main"
+        raw_token = state["token_var"].get()
+        # Treat the masked placeholder as "keep existing token". An empty
+        # string means "clear the token". Anything else replaces it.
+        if raw_token == "" + ("•" * 8):
+            token = None  # keep
+        elif raw_token.strip() == "":
+            token = ""  # clear
+        else:
+            token = raw_token.strip()
+        if not owner or not repo:
+            state["status_var"].set("Owner and Repo are required")
+            return
+        ok = aios_updater.save_source(owner, repo, branch, token)
+        if ok:
+            if token is not None and token:
+                state["token_var"].set("••••••••")
+                state["token_present"] = True
+            elif token == "":
+                state["token_present"] = False
+            state["status_var"].set("source saved · re-checking…")
+            self._updater_check(silent=False)
+        else:
+            state["status_var"].set("could not save (check helper_config.json)")
+
+    def _updater_set_buttons(self, busy: bool, can_update: bool):
+        state = self._update_state
+        try:
+            state["check_btn"].configure(
+                state="disabled" if busy else "normal")
+        except Exception:
+            pass
+        try:
+            state["update_btn"].configure(
+                state="normal" if (not busy and can_update) else "disabled")
+        except Exception:
+            pass
+
+    def _updater_log(self, text):
+        state = self._update_state
+        prev = state["log_var"].get()
+        line = text.strip()
+        if not line:
+            return
+        lines = (prev + "\n" + line).splitlines() if prev else [line]
+        state["log_var"].set("\n".join(lines[-6:]))
+
+    def _updater_check(self, silent: bool = False):
+        import aios_updater
+        state = self._update_state
+        if state["busy"]:
+            return
+        state["busy"] = True
+        self._updater_set_buttons(busy=True, can_update=False)
+        if not silent:
+            state["status_var"].set("checking GitHub…")
+
+        def worker():
+            result = aios_updater.check_for_update()
+            self.root.after(0, lambda: self._updater_check_done(result))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _updater_check_done(self, result):
+        state = self._update_state
+        state["busy"] = False
+        state["last_check"] = result
+        if not result.get("ok"):
+            state["status_var"].set(result.get("error") or "could not check for updates")
+            self._updater_set_buttons(busy=False, can_update=False)
+            return
+        current = result.get("current") or "(unknown)"
+        latest = result.get("latest") or "?"
+        behind = bool(result.get("behind"))
+        msg = (result.get("message") or "").strip()
+        author = (result.get("author") or "").strip()
+        if behind:
+            state["info_var"].set(
+                f"update available · current {current} → latest {latest}"
+                + (f"\n“{msg}” — {author}" if msg else "")
+            )
+            state["status_var"].set("press Update & restart to install")
+        else:
+            state["info_var"].set(f"up to date · {current}")
+            state["status_var"].set("")
+        self._updater_set_buttons(busy=False, can_update=behind)
+
+    def _updater_update_and_restart(self):
+        import aios_updater
+        state = self._update_state
+        if state["busy"]:
+            return
+        if not (state.get("last_check") and state["last_check"].get("behind")):
+            return
+        state["busy"] = True
+        self._updater_set_buttons(busy=True, can_update=False)
+        state["status_var"].set("updating…")
+        state["log_var"].set("")
+
+        def emit(msg):
+            self.root.after(0, lambda m=msg: self._updater_log(m))
+
+        def worker():
+            result = aios_updater.perform_update(progress=emit)
+            self.root.after(0, lambda: self._updater_update_done(result))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _updater_update_done(self, result):
+        import aios_updater
+        state = self._update_state
+        state["busy"] = False
+        if not result.get("ok"):
+            state["status_var"].set("update failed: " + (result.get("message") or "?"))
+            self._updater_set_buttons(busy=False, can_update=True)
+            return
+        state["status_var"].set("updated · restarting in 1s…")
+        self._updater_log("restarting aiOS…")
+        self._updater_set_buttons(busy=False, can_update=False)
+        # Stop any operator run first so we don't leave child threads.
+        try:
+            if self.agent_operator_loop and self.agent_operator_loop.is_running():
+                self.agent_operator_loop.stop()
+        except Exception:
+            pass
+        self.root.after(900, lambda: aios_updater.restart_aios())
+
     def save_project_root(self):
         raw = self.root_entry.get("1.0", "end").strip()
         if not raw:
@@ -8841,6 +9151,14 @@ class HelperOverlay:
             self.root.after(0, lambda opts=options: self._remote_apply_operator_options(opts or {}))
         elif action == "operator_stop":
             self.root.after(0, self._remote_operator_stop)
+        elif action == "operator_followup":
+            self.root.after(0, lambda value=text: self._remote_operator_followup(value))
+        elif action == "operator_clear":
+            self.root.after(0, self._remote_operator_clear)
+        elif action == "operator_attach":
+            self.root.after(0, lambda value=text: self._remote_operator_attach(value))
+        elif action == "operator_clear_attachments":
+            self.root.after(0, self._remote_operator_clear_attachments)
 
     def _remote_submit_chat(self, text):
         self._phone_control_show("AIOS")
@@ -8880,6 +9198,107 @@ class HelperOverlay:
         try:
             if self.agent_operator_loop and self.agent_operator_loop.is_running():
                 self.agent_operator_stop()
+        except Exception:
+            pass
+
+    def _remote_operator_followup(self, text):
+        text = (text or "").strip()
+        if not text:
+            return
+        try:
+            self._ensure_agent_operator()
+        except Exception:
+            return
+        loop = self.agent_operator_loop
+        if not loop or not loop.is_running():
+            # Nothing running → treat as a fresh task.
+            self._remote_submit_operator(text, None)
+            return
+        try:
+            loop.add_follow_up(text)
+            self._agent_operator_log_line("ts", f"\n[{self._ts()}] ")
+            self._agent_operator_log_line("status", f"FOLLOW-UP: {text}\n")
+            self._phone_mirror_write({"type": "follow_up", "ts": time.time(),
+                                       "text": text,
+                                       "answering_ask": bool(loop.is_awaiting_answer())})
+            if self.agent_operator_status_var:
+                self.agent_operator_status_var.set("Follow-up received")
+        except Exception as exc:
+            self._agent_operator_log_line("err", f"follow-up failed: {exc}\n")
+
+    def _remote_operator_attach(self, payload_text):
+        try:
+            self._ensure_agent_operator()
+        except Exception:
+            return
+        if not self.agent_operator_Image:
+            return
+        try:
+            payload = json.loads(payload_text or "{}")
+        except json.JSONDecodeError:
+            return
+        paths = payload.get("paths") if isinstance(payload, dict) else None
+        if not isinstance(paths, list):
+            return
+        loop = self.agent_operator_loop
+        running = bool(loop and loop.is_running())
+        loaded = []
+        for path in paths:
+            try:
+                img = self.agent_operator_Image.open(path).convert("RGBA")
+                loaded.append((os.path.basename(path), img))
+            except Exception:
+                continue
+        if not loaded:
+            return
+        if running:
+            # Live run: inject as a follow-up image (no text — adds context only).
+            loop.add_follow_up("", images=[img for _, img in loaded])
+            for name, _ in loaded:
+                self._agent_operator_log_line("status", f"FOLLOW-UP IMAGE: {name}\n")
+        else:
+            # Idle: queue for the next Run() call.
+            for name, img in loaded:
+                self._agent_operator_add_image_attachment(img.convert("RGB"), name)
+
+    def _remote_operator_clear_attachments(self):
+        try:
+            self.agent_operator_attachments.clear()
+            self._agent_operator_render_attachments()
+        except Exception:
+            pass
+
+    def _remote_operator_clear(self):
+        try:
+            self._ensure_agent_operator()
+        except Exception:
+            return
+        loop = self.agent_operator_loop
+        try:
+            if loop and loop.is_running():
+                self.agent_operator_stop_requested = True
+                loop.stop()
+        except Exception:
+            pass
+        try:
+            if self.agent_operator_task:
+                self.agent_operator_task.delete("1.0", "end")
+        except Exception:
+            pass
+        try:
+            self.agent_operator_clear_log()
+        except Exception:
+            pass
+        self.agent_operator_attachments = []
+        try:
+            self._agent_operator_render_attachments()
+        except Exception:
+            pass
+        self._phone_mirror_write({"type": "cleared", "ts": time.time()})
+        if self.agent_operator_status_var:
+            self.agent_operator_status_var.set("Cleared")
+        try:
+            self._agent_operator_sync_buttons()
         except Exception:
             pass
 

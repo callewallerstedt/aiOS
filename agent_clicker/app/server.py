@@ -55,8 +55,26 @@ SCREEN_CACHE: dict[tuple, dict] = {}
 OPERATOR_EVENTS_DIR = REPO_ROOT / "phone_operator_events"
 OPERATOR_EVENTS_FILE = OPERATOR_EVENTS_DIR / "events.jsonl"
 OPERATOR_FRAMES_DIR = OPERATOR_EVENTS_DIR / "frames"
+OPERATOR_STATUS_FILE = OPERATOR_EVENTS_DIR / "status.json"
+OPERATOR_UPLOADS_DIR = OPERATOR_EVENTS_DIR / "uploads"
 OPERATOR_EVENTS_DIR.mkdir(exist_ok=True)
 OPERATOR_FRAMES_DIR.mkdir(exist_ok=True)
+OPERATOR_UPLOADS_DIR.mkdir(exist_ok=True)
+
+
+def _load_operator_state():
+    if not OPERATOR_STATUS_FILE.exists():
+        return {"running": False, "asking": False, "last_question": ""}
+    try:
+        with OPERATOR_STATUS_FILE.open("r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        return {
+            "running": bool(data.get("running")),
+            "asking": bool(data.get("asking")),
+            "last_question": str(data.get("last_question") or ""),
+        }
+    except (OSError, json.JSONDecodeError):
+        return {"running": False, "asking": False, "last_question": ""}
 
 
 class PhoneTranscriber:
@@ -155,7 +173,10 @@ DEFAULT_OPERATOR_CONFIG = {
 def forward_helper(action, text="", options=None):
     action = str(action or "").strip().lower()
     text = str(text or "").strip()
-    if action not in {"chat", "operator", "phone_start", "phone_stop", "reload_operator_settings", "operator_stop"}:
+    if action not in {"chat", "operator", "phone_start", "phone_stop",
+                       "reload_operator_settings", "operator_stop",
+                       "operator_followup", "operator_clear",
+                       "operator_attach", "operator_clear_attachments"}:
         return {"ok": True, "sent": False}
     if action in {"chat", "operator"} and not text:
         return {"ok": True, "sent": False}
@@ -240,6 +261,7 @@ def api_phone_status():
         "helper": helper,
         "monitor_count": len(monitors),
         "operator": operator,
+        "operator_state": _load_operator_state(),
         "codex_usage": codex_usage.codex_usage_payload(),
     })
 
@@ -270,29 +292,121 @@ def api_phone_send():
     text = (data.get("text") or "").strip()
     target = (data.get("target") or "chat").strip().lower()
     options = data.get("options") if isinstance(data.get("options"), dict) else None
-    if not text:
+    if not text and not (data.get("attachments")):
         return jsonify({"error": "text required"}), 400
-    if target == "operator" and options:
-        cfg = _load_helper_config()
-        operator = dict(DEFAULT_OPERATOR_CONFIG)
-        operator.update(cfg.get("ai_operator") or {})
-        for key, value in options.items():
-            if key not in DEFAULT_OPERATOR_CONFIG:
-                continue
-            default = DEFAULT_OPERATOR_CONFIG[key]
-            if isinstance(default, bool):
-                operator[key] = bool(value)
-            else:
-                operator[key] = "" if value is None else str(value)
-        cfg["ai_operator"] = operator
-        try:
-            _save_helper_config(cfg)
-        except OSError:
-            pass
-        result = forward_helper(target, text, operator)
-    else:
-        result = forward_helper(target, text)
+    intent = (data.get("intent") or "").strip().lower()  # "", "new", "followup"
+    attachment_ids = data.get("attachments") or []
+    attachment_paths = []
+    for aid in attachment_ids:
+        safe = "".join(c for c in str(aid) if c.isalnum())
+        if not safe:
+            continue
+        for ext in _UPLOAD_EXTS:
+            cand = OPERATOR_UPLOADS_DIR / f"{safe}{ext}"
+            if cand.exists():
+                attachment_paths.append(str(cand))
+                break
+    if target == "operator":
+        state = _load_operator_state()
+        is_followup = (
+            intent == "followup"
+            or (intent != "new" and state.get("running"))
+        )
+        # Always push attachments to the helper first if we have any.
+        if attachment_paths:
+            forward_helper("operator_attach",
+                           json.dumps({"paths": attachment_paths},
+                                       ensure_ascii=False),
+                           options=None)
+        if is_followup:
+            if not text and not attachment_paths:
+                return jsonify({"ok": False, "error": "empty"}), 400
+            result = forward_helper("operator_followup", text or "")
+            if result.get("ok"):
+                result["mode"] = "followup"
+                result["answering_ask"] = bool(state.get("asking"))
+            return jsonify(result), 200 if result.get("ok") else 503
+        # New operator run — apply options first.
+        if options:
+            cfg = _load_helper_config()
+            operator = dict(DEFAULT_OPERATOR_CONFIG)
+            operator.update(cfg.get("ai_operator") or {})
+            for key, value in options.items():
+                if key not in DEFAULT_OPERATOR_CONFIG:
+                    continue
+                default = DEFAULT_OPERATOR_CONFIG[key]
+                if isinstance(default, bool):
+                    operator[key] = bool(value)
+                else:
+                    operator[key] = "" if value is None else str(value)
+            cfg["ai_operator"] = operator
+            try:
+                _save_helper_config(cfg)
+            except OSError:
+                pass
+            result = forward_helper(target, text, operator)
+        else:
+            result = forward_helper(target, text)
+        if result.get("ok"):
+            result["mode"] = "new"
+        return jsonify(result), 200 if result.get("ok") else 503
+    result = forward_helper(target, text)
     return jsonify(result), 200 if result.get("ok") else 503
+
+
+@app.route("/api/phone/operator/clear", methods=["POST", "OPTIONS"])
+def api_phone_operator_clear():
+    if request.method == "OPTIONS":
+        return "", 204
+    result = forward_helper("operator_clear", "")
+    return jsonify(result), 200 if result.get("ok") else 503
+
+
+_UPLOAD_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"}
+
+
+@app.route("/api/phone/operator/upload", methods=["POST", "OPTIONS"])
+def api_phone_operator_upload():
+    if request.method == "OPTIONS":
+        return "", 204
+    saved = []
+    files = request.files.getlist("files") or list(request.files.values())
+    for fs in files:
+        if not fs or not fs.filename:
+            continue
+        name = os.path.basename(fs.filename)
+        ext = os.path.splitext(name)[1].lower() or ".png"
+        if ext not in _UPLOAD_EXTS:
+            # Allow other formats but try to convert via PIL.
+            ext = ".png"
+        uid = uuid.uuid4().hex[:12]
+        target = OPERATOR_UPLOADS_DIR / f"{uid}{ext}"
+        try:
+            raw = fs.read()
+            # Normalize through PIL so the helper always opens it.
+            img = Image.open(io.BytesIO(raw))
+            if img.mode not in ("RGB", "RGBA"):
+                img = img.convert("RGBA")
+            img.save(target)
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"could not decode {name}: {exc}"}), 400
+        saved.append({"id": uid, "name": name, "path": str(target)})
+    if not saved:
+        return jsonify({"ok": False, "error": "no files"}), 400
+    return jsonify({"ok": True, "attachments": saved})
+
+
+@app.route("/api/phone/operator/upload/<uid>")
+def api_phone_operator_upload_get(uid):
+    safe = "".join(c for c in uid if c.isalnum())
+    if not safe:
+        return jsonify({"error": "bad id"}), 400
+    for ext in _UPLOAD_EXTS:
+        path = OPERATOR_UPLOADS_DIR / f"{safe}{ext}"
+        if path.exists():
+            return Response(path.read_bytes(),
+                            mimetype="image/" + ext.lstrip(".").replace("jpg", "jpeg"))
+    return jsonify({"error": "not found"}), 404
 
 
 @app.route("/api/phone/monitors")
@@ -342,9 +456,9 @@ def api_phone_operator_events():
                         idle_ticks += 1
                 else:
                     idle_ticks += 1
-                if idle_ticks % 10 == 0:
+                if idle_ticks % 30 == 0:
                     yield ": ping\n\n"
-                time.sleep(0.35)
+                time.sleep(0.12)
             except GeneratorExit:
                 return
             except Exception:

@@ -57,8 +57,23 @@
   </section>
 
   <section class="transcript-wrap">
+    <div class="op-followup-banner" id="op-followup-banner" hidden>
+      <div class="op-followup-row">
+        <span class="op-followup-mode" id="op-followup-mode">running</span>
+        <button id="op-followup-clear" class="op-followup-clear" type="button">Clear</button>
+      </div>
+      <div class="op-followup-question" id="op-followup-question" hidden></div>
+    </div>
     <textarea id="text" class="text" rows="2" placeholder="tap mic, or type here…" autocomplete="off" autocorrect="on" autocapitalize="sentences" spellcheck="true"></textarea>
-    <div class="char-count" id="char-count"></div>
+    <div class="attach-strip" id="attach-strip" hidden></div>
+    <div class="attach-row">
+      <button id="attach-btn" class="attach-btn" type="button" aria-label="Attach image">
+        <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M21.44 11.05 12.25 20.24a6 6 0 1 1-8.49-8.49l9.19-9.19a4 4 0 1 1 5.66 5.66l-9.2 9.19a2 2 0 1 1-2.83-2.83l8.49-8.48 1.41 1.41-8.49 8.49a.5.5 0 1 0 .71.71l9.19-9.19a2 2 0 1 0-2.83-2.83L4.17 13.17a4 4 0 1 0 5.66 5.66l9.19-9.19 1.42 1.41Z"/></svg>
+        <span>Attach</span>
+      </button>
+      <input id="attach-input" type="file" accept="image/*" multiple hidden />
+      <div class="char-count" id="char-count"></div>
+    </div>
   </section>
 
   <section class="operator-panel" id="operator-panel" hidden>
@@ -124,6 +139,10 @@
     <div class="op-stream-head">
       <span class="stream-title">Live operator</span>
       <span class="stream-status" id="op-status">idle</span>
+      <button id="op-clear-persistent" class="op-clear-mini" type="button" aria-label="Clear operator" title="Clear operator">
+        <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path fill="currentColor" d="M9 3h6l1 2h4v2H4V5h4l1-2zM6 8h12l-1 13a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L6 8z"/></svg>
+        <span>Clear</span>
+      </button>
     </div>
     <div class="op-stream" id="op-stream"></div>
   </section>
@@ -157,7 +176,7 @@
     <div class="modal-row">
       <label class="modal-field">
         <span>Refresh (ms)</span>
-        <input id="settings-refresh" type="number" inputmode="numeric" min="400" max="10000" step="100" value="900" />
+        <input id="settings-refresh" type="number" inputmode="numeric" min="400" max="10000" step="100" value="500" />
       </label>
       <label class="modal-field">
         <span>Quality</span>

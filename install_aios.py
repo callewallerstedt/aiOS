@@ -58,6 +58,19 @@ class Installer(tk.Tk):
         self.add_startup = tk.BooleanVar(value=True)
         self.start_now = tk.BooleanVar(value=False)
 
+        # Update source — prefill from existing helper_config (if user is
+        # re-installing) or sane defaults otherwise.
+        try:
+            import aios_updater as _au
+            existing = _au.load_source()
+        except Exception:
+            existing = {"owner": "callewallerstedt", "repo": "aiOS",
+                        "branch": "main", "token": ""}
+        self.update_owner = tk.StringVar(value=existing["owner"])
+        self.update_repo = tk.StringVar(value=existing["repo"])
+        self.update_branch = tk.StringVar(value=existing["branch"])
+        self.update_token = tk.StringVar(value=existing.get("token") or "")
+
         self.total_steps = 0
         self.done_steps = 0
         self._build()
@@ -115,6 +128,42 @@ class Installer(tk.Tk):
         self._option(body, self.install_autohotkey, "Install AutoHotkey v2 with winget", "Only if missing")
         self._option(body, self.add_startup, "Add aiOS hotkey launcher to Windows startup", "Asks before changing startup")
         self._option(body, self.start_now, "Start aiOS after install", "Optional")
+
+        # ---- Update source -------------------------------------------------
+        src_row = tk.Frame(body, bg="#0d1218")
+        src_row.pack(fill="x", padx=16, pady=(18, 10))
+        tk.Label(src_row, text="Update source", bg="#0d1218", fg="#edf5ff",
+                 font=("Segoe UI", 10, "bold")).pack(anchor="w")
+        tk.Label(src_row,
+                 text="GitHub repo aiOS pulls future updates from. Token is "
+                       "required if the repo is private.",
+                 bg="#0d1218", fg="#8ea0b5", font=("Segoe UI", 9),
+                 wraplength=620, justify="left").pack(anchor="w", pady=(2, 8))
+
+        grid = tk.Frame(body, bg="#0d1218")
+        grid.pack(fill="x", padx=16, pady=(0, 12))
+
+        def _src_row(row_idx, label, var, *, masked=False, hint=""):
+            tk.Label(grid, text=label, bg="#0d1218", fg="#8ea0b5",
+                     font=("Segoe UI", 9, "bold"), width=10, anchor="w").grid(
+                row=row_idx, column=0, sticky="w", pady=2)
+            entry = tk.Entry(grid, textvariable=var, bg="#080b0f",
+                              fg="#edf5ff", insertbackground="#edf5ff",
+                              relief="flat", bd=0, font=("Segoe UI", 10),
+                              show="*" if masked else "")
+            entry.grid(row=row_idx, column=1, sticky="ew", padx=(8, 0),
+                       pady=2, ipady=4, ipadx=6)
+            if hint:
+                tk.Label(grid, text=hint, bg="#0d1218", fg="#5d7588",
+                         font=("Segoe UI", 8)).grid(
+                    row=row_idx, column=2, sticky="w", padx=(8, 0))
+
+        grid.columnconfigure(1, weight=1)
+        _src_row(0, "Owner", self.update_owner, hint="GitHub user/org")
+        _src_row(1, "Repo", self.update_repo)
+        _src_row(2, "Branch", self.update_branch, hint="usually main")
+        _src_row(3, "Token", self.update_token, masked=True,
+                  hint="leave blank for public repo")
 
         self.install_page = tk.Frame(self, bg="#080b0f")
         progress_box = tk.Frame(self.install_page, bg="#080b0f")
@@ -251,7 +300,7 @@ class Installer(tk.Tk):
                 self._append("Startup skipped because AutoHotkey is missing.\n")
         self.install_btn.configure(state="disabled")
         self.done_steps = 0
-        self.total_steps = sum(
+        self.total_steps = 1 + sum(  # +1 for "Saving update source"
             bool(v.get())
             for v in (
                 self.install_deps,
@@ -272,6 +321,7 @@ class Installer(tk.Tk):
 
     def _run_install(self) -> None:
         try:
+            self._step("Saving update source", self._save_update_source)
             if self.install_deps.get():
                 self._step("Installing Python dependencies", self._install_deps)
             if self.download_whisper.get():
@@ -299,6 +349,26 @@ class Installer(tk.Tk):
         self.queue.put(("log", f"\n== {label} ==\n"))
         fn()
         self.queue.put(("progress", None))
+
+    def _save_update_source(self) -> None:
+        owner = self.update_owner.get().strip()
+        repo = self.update_repo.get().strip()
+        branch = self.update_branch.get().strip() or "main"
+        token = self.update_token.get().strip() or None
+        if not owner or not repo:
+            self._append("skipped: owner/repo blank — keeping previous settings\n")
+            return
+        try:
+            import aios_updater
+        except Exception as exc:
+            self._append(f"updater module unavailable: {exc}\n")
+            return
+        ok = aios_updater.save_source(owner, repo, branch, token)
+        if ok:
+            self._append(f"saved → {owner}/{repo}@{branch}"
+                          + (" (with token)" if token else "") + "\n")
+        else:
+            self._append("could not write helper_config.json\n")
 
     def _install_deps(self) -> None:
         self._run([sys.executable, "-m", "pip", "install", "--upgrade", "pip"])

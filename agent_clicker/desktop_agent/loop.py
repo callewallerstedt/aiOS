@@ -10,9 +10,41 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Callable
 
+import getpass
+import locale
+import platform
+import socket
+from datetime import datetime, timezone
+
 from PIL import Image
 
 from agent import vlm
+
+
+def _system_info_block() -> str:
+    try:
+        host = socket.gethostname()
+    except Exception:
+        host = "?"
+    try:
+        user = getpass.getuser()
+    except Exception:
+        user = "?"
+    try:
+        lang = locale.getdefaultlocale()[0] or "?"
+    except Exception:
+        lang = "?"
+    now = datetime.now(timezone.utc).astimezone()
+    tz = now.strftime("%Z") or now.strftime("%z")
+    return (
+        "--- SYSTEM INFO ---\n"
+        f"OS: {platform.system()} {platform.release()} ({platform.version()})\n"
+        f"Machine: {platform.machine()}\n"
+        f"User: {user}@{host}\n"
+        f"Locale: {lang}\n"
+        f"Local time: {now.strftime('%Y-%m-%d %H:%M:%S')} {tz}\n"
+        "--- END SYSTEM INFO ---\n"
+    )
 from agent.config import MODEL as DEFAULT_MODEL
 from .prompts import SYSTEM_PROMPT
 from .screen import Monitor, capture
@@ -115,6 +147,9 @@ class AgentLoop:
         self._stop = threading.Event()
         self._pause = threading.Event()
         self._pause.set()  # set = not paused
+        self._follow_ups: list[str] = []
+        self._follow_ups_lock = threading.Lock()
+        self._awaiting_answer = False
 
     def is_running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
@@ -133,6 +168,33 @@ class AgentLoop:
 
     def is_paused(self) -> bool:
         return not self._pause.is_set()
+
+    def is_awaiting_answer(self) -> bool:
+        return self._awaiting_answer
+
+    def add_follow_up(self, text: str, images: list | None = None) -> bool:
+        text = (text or "").strip()
+        images = images or []
+        if not self.is_running():
+            return False
+        if not text and not images:
+            return False
+        with self._follow_ups_lock:
+            self._follow_ups.append({"text": text, "images": list(images)})
+        self.on_event({"type": "follow_up_received", "text": text,
+                       "answering_ask": self._awaiting_answer,
+                       "images": len(images)})
+        # If we were paused waiting for an ASK answer, resume the loop.
+        if self._awaiting_answer:
+            self._awaiting_answer = False
+            self._pause.set()
+        return True
+
+    def _drain_follow_ups(self) -> list[dict]:
+        with self._follow_ups_lock:
+            items = list(self._follow_ups)
+            self._follow_ups.clear()
+        return items
 
     def start(self, task: str, monitor: Monitor, model: str = DEFAULT_MODEL,
               max_steps: int = 25, action_delay: float = 0.20,
@@ -185,15 +247,16 @@ class AgentLoop:
              user_context=""):
         attachments = attachments or []
         user_context = (user_context or "").strip()
-        effective_system = SYSTEM_PROMPT
+        effective_system = SYSTEM_PROMPT + "\n\n" + _system_info_block()
         if user_context:
             effective_system = (
-                SYSTEM_PROMPT
-                + "\n\n--- USER CONTEXT (persistent settings from the UI) ---\n"
+                effective_system
+                + "\n--- USER CONTEXT (persistent settings from the UI) ---\n"
                 + user_context
                 + "\n--- END USER CONTEXT ---\n"
             )
         history_msgs: list[dict] = []
+        last_was_ask = False
         # Mid-step trail: screenshots captured AFTER actions in the prior step,
         # attached to the NEXT user message so the model sees the process.
         # Each entry: (PIL.Image, label_text). Capped at MID_TRAIL_MAX (newest kept).
@@ -318,6 +381,31 @@ class AgentLoop:
                 # 2) Build user message for this step
                 data_url, _ = vlm.encode_image(img)
                 user_content: list[dict] = []
+                # 2.-1) User follow-ups injected since last step (or as ASK answers).
+                pending_followups = self._drain_follow_ups()
+                if pending_followups:
+                    header = ("ANSWER from user to your previous ASK:"
+                              if last_was_ask else
+                              "NEW INSTRUCTION from user (treat as updated/added "
+                              "context — keep working on the original task unless "
+                              "this clearly supersedes it):")
+                    parts = [header]
+                    for f in pending_followups:
+                        if f.get("text"):
+                            parts.append(f["text"])
+                    blob = "\n".join(parts) if len(parts) > 1 else header + " (image only)"
+                    user_content.append(vlm.text_part(blob))
+                    for f in pending_followups:
+                        for im in (f.get("images") or []):
+                            try:
+                                im_url, _ = vlm.encode_image(im)
+                                user_content.append(vlm.text_part("[user attached image]"))
+                                user_content.append(vlm.image_part(im_url, detail="high"))
+                            except Exception:
+                                pass
+                    # Persist text into history so subsequent steps still see it.
+                    history_msgs.append({"role": "user", "content": blob})
+                    last_was_ask = False
                 # 2.0) First-turn user attachments (images / text files).
                 if n == 1 and attachments:
                     user_content.append(vlm.text_part(
@@ -426,13 +514,16 @@ class AgentLoop:
                                    "message": rec.message, "steps": n})
                     return
                 if rec.status == "ask":
+                    history_msgs.append({"role": "assistant", "content": rec.raw or ""})
                     self.on_event({"type": "step_end", "n": n, "record": _rec_dict(rec)})
                     self.on_event({"type": "ask", "message": rec.message})
-                    # Loop pauses awaiting external resume w/ injected answer.
-                    # For now we just wait for resume; user can provide answer
-                    # by stopping and re-running with a new task.
+                    # Wait for the user to either inject a follow-up (which
+                    # auto-resumes via add_follow_up) or stop the run.
+                    self._awaiting_answer = True
                     self._pause.clear()
+                    last_was_ask = True
                     self._wait_unpaused()
+                    self._awaiting_answer = False
                     if self._stop.is_set():
                         self.on_event({"type": "done", "ok": False, "message": "stopped", "steps": n})
                         return
