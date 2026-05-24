@@ -20,7 +20,50 @@ DEFAULT_VOICE_DICTATION = {
     "typing_delay_ms": 0,
     "discord_mute_enabled": False,
     "discord_mute_hotkey": "",
+    "voice_hotkey": "Insert",
 }
+
+
+# AHK key names that are safe to use as a tap-and-hold trigger (won't block
+# normal typing or modifier-only). Display name → canonical AHK key.
+SAFE_HOTKEYS = {
+    "Insert": "Insert",
+    "Home": "Home",
+    "End": "End",
+    "PageUp": "PgUp",
+    "PageDown": "PgDn",
+    "Delete": "Delete",
+    "ScrollLock": "ScrollLock",
+    "Pause": "Pause",
+    "AppsKey": "AppsKey",  # the menu/context key
+    "F1": "F1", "F2": "F2", "F3": "F3", "F4": "F4", "F5": "F5", "F6": "F6",
+    "F7": "F7", "F8": "F8", "F9": "F9", "F10": "F10", "F11": "F11", "F12": "F12",
+    "F13": "F13", "F14": "F14", "F15": "F15", "F16": "F16", "F17": "F17",
+    "F18": "F18", "F19": "F19", "F20": "F20", "F21": "F21", "F22": "F22",
+    "F23": "F23", "F24": "F24",
+}
+
+
+def normalize_voice_hotkey(raw):
+    """Resolve a user-supplied key name to a canonical AHK key. Falls back to
+    Insert if the input is empty or unsafe."""
+    text = str(raw or "").strip()
+    if not text:
+        return "Insert"
+    # Accept already-canonical AHK names case-insensitively, and common aliases.
+    aliases = {
+        "pgup": "PageUp", "pageup": "PageUp",
+        "pgdn": "PageDown", "pagedown": "PageDown",
+        "del": "Delete",
+        "ins": "Insert",
+        "menu": "AppsKey", "apps": "AppsKey",
+    }
+    lookup = aliases.get(text.lower(), text)
+    # Case-insensitive match against SAFE_HOTKEYS keys.
+    for display, ahk in SAFE_HOTKEYS.items():
+        if display.lower() == lookup.lower() or ahk.lower() == lookup.lower():
+            return display
+    return "Insert"
 
 WHISPER_MODELS = (
     "tiny.en",
@@ -88,6 +131,7 @@ def merge_voice_dictation(raw):
     merged["typing_delay_ms"] = max(0, min(50, int(merged.get("typing_delay_ms", 0))))
     merged["discord_mute_enabled"] = bool(merged.get("discord_mute_enabled"))
     merged["discord_mute_hotkey"] = normalize_discord_hotkey(merged.get("discord_mute_hotkey"))
+    merged["voice_hotkey"] = normalize_voice_hotkey(merged.get("voice_hotkey"))
     language = str(merged.get("language") or "auto").strip().lower()
     merged["language"] = language if language in WHISPER_LANGUAGES else "auto"
     merged["whisper_model"] = normalize_whisper_model(merged.get("whisper_model"), merged["language"])

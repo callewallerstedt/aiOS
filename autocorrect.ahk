@@ -13,8 +13,12 @@ global VoiceSettingsCheckedAt := 0
 global DiscordMuteEnabled := false
 global DiscordMuteExplicit := ""
 global DiscordMuteSendDelayMs := 35
+global VoiceHotkey := "Insert"          ; current hotkey name (AHK key syntax)
+global VoiceHotkeyRegistered := ""      ; what we actually registered last
+global VoiceHotkeyDown := ""            ; the "$<key>" string we registered
+global VoiceHotkeyUp := ""              ; the "$<key> up" string we registered
 
-$Insert:: {
+VoiceHotkeyDownHandler(*) {
     global InsertDownAt, InsertHoldActive, InsertLongFired
     if (InsertHoldActive) {
         return
@@ -26,7 +30,7 @@ $Insert:: {
     SetTimer(InsertHoldThreshold, -VoiceHoldMs)
 }
 
-$Insert up:: {
+VoiceHotkeyUpHandler(*) {
     global InsertHoldActive, InsertLongFired
     SetTimer(InsertHoldThreshold, 0)
     if (!InsertHoldActive) {
@@ -51,8 +55,40 @@ InsertHoldThreshold() {
     VoiceStartFast()
 }
 
+RegisterVoiceHotkey(keyName) {
+    global VoiceHotkeyRegistered, VoiceHotkeyDown, VoiceHotkeyUp
+    if (keyName = "") {
+        keyName := "Insert"
+    }
+    if (VoiceHotkeyRegistered = keyName) {
+        return
+    }
+    ; Tear down any previous registration cleanly.
+    if (VoiceHotkeyDown != "") {
+        try Hotkey VoiceHotkeyDown, "Off"
+    }
+    if (VoiceHotkeyUp != "") {
+        try Hotkey VoiceHotkeyUp, "Off"
+    }
+    newDown := "$" . keyName
+    newUp := "$" . keyName . " up"
+    try {
+        Hotkey newDown, VoiceHotkeyDownHandler
+        Hotkey newUp, VoiceHotkeyUpHandler
+        VoiceHotkeyRegistered := keyName
+        VoiceHotkeyDown := newDown
+        VoiceHotkeyUp := newUp
+    } catch as err {
+        ; If the new key is invalid, fall back to Insert so the user can
+        ; always recover.
+        if (keyName != "Insert") {
+            RegisterVoiceHotkey("Insert")
+        }
+    }
+}
+
 LoadVoiceConfig() {
-    global VoiceHoldMs, VoiceSettingsCheckedAt, DiscordMuteEnabled, DiscordMuteExplicit
+    global VoiceHoldMs, VoiceSettingsCheckedAt, DiscordMuteEnabled, DiscordMuteExplicit, VoiceHotkey
     now := A_TickCount
     if (now - VoiceSettingsCheckedAt < 1500) {
         return
@@ -62,6 +98,7 @@ LoadVoiceConfig() {
     holdMs := 280
     discordEnabled := false
     discordHotkey := ""
+    voiceHotkey := "Insert"
     if FileExist(path) {
         try {
             txt := FileRead(path, "UTF-8")
@@ -76,6 +113,9 @@ LoadVoiceConfig() {
             if RegExMatch(txt, '"discord_mute_hotkey"\s*:\s*"([^"]*)"', &m) {
                 discordHotkey := m[1]
             }
+            if RegExMatch(txt, '"voice_hotkey"\s*:\s*"([^"]*)"', &m) {
+                voiceHotkey := m[1]
+            }
         } catch {
         }
     }
@@ -88,6 +128,8 @@ LoadVoiceConfig() {
     VoiceHoldMs := holdMs
     DiscordMuteEnabled := discordEnabled
     DiscordMuteExplicit := HotkeyToExplicitSendSequence(discordHotkey)
+    VoiceHotkey := voiceHotkey = "" ? "Insert" : voiceHotkey
+    RegisterVoiceHotkey(VoiceHotkey)
 }
 
 LoadDiscordMuteSettings() {
@@ -168,14 +210,15 @@ HotkeyToExplicitSendSequence(hotkey) {
     return down . keySend . up
 }
 
-SendDiscordHotkey(clearInsert := true) {
-    global DiscordMuteExplicit, DiscordMuteSendDelayMs
+SendDiscordHotkey(clearVoiceKey := true) {
+    global DiscordMuteExplicit, DiscordMuteSendDelayMs, VoiceHotkey
     if (DiscordMuteExplicit = "") {
         return
     }
-    if (clearInsert) {
-        ; Insert is still physically down during hold-to-dictate — clear it so Discord sees Alt+M cleanly.
-        SendEvent("{Insert up}")
+    if (clearVoiceKey) {
+        ; The voice hotkey is still physically held during hold-to-dictate —
+        ; release it virtually so Discord sees the mute chord cleanly.
+        SendEvent("{" . VoiceHotkey . " up}")
         Sleep(DiscordMuteSendDelayMs)
     }
     SetKeyDelay(DiscordMuteSendDelayMs, DiscordMuteSendDelayMs)
@@ -278,6 +321,12 @@ VoiceStartFast() {
 VoiceStopFast() {
     SendToVoice("stop")
 }
+
+; Initial config load registers the hotkey before the user does anything.
+LoadVoiceConfig()
+; Poll the config so Settings → Voice hotkey changes take effect within 2s
+; even when the user hasn't pressed the current hotkey.
+SetTimer(LoadVoiceConfig, 1700)
 
 ::constantyl::constantly
 ::missspell::misspell

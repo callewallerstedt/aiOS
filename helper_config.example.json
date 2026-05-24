@@ -36,6 +36,7 @@
     "silence_rms": 0.006,
     "typing_delay_ms": 0,
     "discord_mute_enabled": false,
-    "discord_mute_hotkey": ""
+    "discord_mute_hotkey": "",
+    "voice_hotkey": "Insert"
   }
 }

@@ -6135,11 +6135,30 @@ class HelperOverlay:
         voice = self.card(scroll.inner)
         voice.pack(fill="x", pady=(0, 12))
         self.section(voice, "Voice Dictation")
+        voice_cfg = self.config.get("voice_dictation") or dict(DEFAULT_VOICE_DICTATION)
+        current_key = voice_cfg.get("voice_hotkey") or "Insert"
         self.muted(
             voice,
-            "Short Insert opens aiOS on release. Hold Insert to dictate — release to stop and type.",
+            f"Short {current_key} opens aiOS on release. Hold {current_key} to dictate — "
+            "release to stop and type.",
         ).pack(anchor="w", padx=12, pady=(0, 8))
-        voice_cfg = self.config.get("voice_dictation") or dict(DEFAULT_VOICE_DICTATION)
+
+        # Editable hotkey row.
+        key_row = tk.Frame(voice, bg=self.c("surface"))
+        key_row.pack(fill="x", padx=12, pady=(0, 8))
+        tk.Label(key_row, text="Hotkey", bg=self.c("surface"), fg=self.c("muted"),
+                 font=self.font(9, "bold"), width=16, anchor="w").pack(side="left")
+        self.voice_hotkey_var = tk.StringVar(value=current_key)
+        tk.Label(key_row, textvariable=self.voice_hotkey_var,
+                 bg="#080d14", fg=self.c("text"), font=self.font(9, "bold"),
+                 padx=10, pady=4).pack(side="left", padx=(0, 8))
+        self.button(key_row, "Change…",
+                     self._capture_voice_hotkey, compact=True).pack(side="left")
+        self.muted(key_row,
+                    "Press the key you want to use. Function keys, Insert, "
+                    "PageUp/Down, Home/End, Pause, ScrollLock all work."
+                    ).pack(side="left", padx=(10, 0))
+
         hold_ms = int(voice_cfg.get("hold_ms", voice_cfg.get("double_press_ms", 280)))
         self.scale_row(
             voice,
@@ -8101,6 +8120,89 @@ class HelperOverlay:
     def set_voice_hold_ms(self, value):
         self._voice_cfg()["hold_ms"] = int(float(value))
         self._save_voice_cfg()
+
+    def _capture_voice_hotkey(self):
+        """Modal that grabs the next key the user presses and saves it as
+        the new voice/dictation hotkey."""
+        from voice_settings import SAFE_HOTKEYS
+        top = tk.Toplevel(self.root)
+        top.title("Set voice hotkey")
+        top.configure(bg=self.c("panel"))
+        top.transient(self.root)
+        top.grab_set()
+        try:
+            top.attributes("-topmost", True)
+        except tk.TclError:
+            pass
+        # Center
+        try:
+            w, h = 420, 180
+            x = self.root.winfo_rootx() + (self.root.winfo_width() - w) // 2
+            y = self.root.winfo_rooty() + (self.root.winfo_height() - h) // 2
+            top.geometry(f"{w}x{h}+{max(0, x)}+{max(0, y)}")
+        except tk.TclError:
+            pass
+
+        tk.Label(top, text="Press the key you want to use",
+                 bg=self.c("panel"), fg=self.c("text"),
+                 font=self.font(11, "bold")).pack(pady=(22, 6))
+        info = tk.StringVar(value="Insert · Home · End · PgUp/PgDn · F1-F24 · "
+                                   "Delete · Pause · ScrollLock")
+        tk.Label(top, textvariable=info, bg=self.c("panel"),
+                 fg=self.c("muted"), font=self.font(8),
+                 wraplength=380, justify="center").pack(pady=(0, 14))
+        result = tk.StringVar(value="(waiting…)")
+        result_lbl = tk.Label(top, textvariable=result,
+                               bg="#080d14", fg=self.c("text"),
+                               font=self.font(10, "bold"),
+                               padx=18, pady=6)
+        result_lbl.pack(pady=(0, 6))
+
+        actions = tk.Frame(top, bg=self.c("panel"))
+        actions.pack(pady=(8, 0))
+
+        # Map common tk keysyms to AHK names.
+        keysym_to_ahk = {
+            "Insert": "Insert", "Delete": "Delete", "Home": "Home", "End": "End",
+            "Prior": "PageUp", "Next": "PageDown", "Pause": "Pause",
+            "Scroll_Lock": "ScrollLock", "Menu": "AppsKey",
+        }
+        for i in range(1, 25):
+            keysym_to_ahk[f"F{i}"] = f"F{i}"
+
+        chosen = {"key": None}
+
+        def on_key(event):
+            ahk = keysym_to_ahk.get(event.keysym)
+            if not ahk:
+                info.set(f"'{event.keysym}' is not safe to use as a hotkey — "
+                          "pick a function key, Insert, PageUp/Down, etc.")
+                result.set("(waiting…)")
+                return "break"
+            chosen["key"] = ahk
+            result.set(ahk)
+            info.set("Press OK to save, or pick another key.")
+            return "break"
+
+        top.bind("<KeyPress>", on_key)
+        top.focus_set()
+
+        def commit():
+            if not chosen["key"]:
+                return
+            self._voice_cfg()["voice_hotkey"] = chosen["key"]
+            self._save_voice_cfg()
+            try:
+                self.voice_hotkey_var.set(chosen["key"])
+            except Exception:
+                pass
+            top.destroy()
+            # Re-render Settings so the hint above reflects the new key.
+            if self.active_tab == "Settings":
+                self.render_tab("Settings")
+
+        self.button(actions, "OK", commit, compact=True).pack(side="left", padx=(0, 8))
+        self.button(actions, "Cancel", top.destroy, compact=True).pack(side="left")
 
     def set_voice_mic_sensitivity(self, value):
         self._voice_cfg()["silence_rms"] = round(max(1, min(50, int(float(value)))) / 10000.0, 4)
