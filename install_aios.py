@@ -14,6 +14,7 @@ from tkinter import messagebox
 from voice_settings import DEFAULT_VOICE_DICTATION, merge_voice_dictation
 
 
+MIN_PYTHON = (3, 10)
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "helper_config.json"
 REQUIREMENTS_PATH = BASE_DIR / "requirements.txt"
@@ -65,11 +66,10 @@ class Installer(tk.Tk):
             existing = _au.load_source()
         except Exception:
             existing = {"owner": "callewallerstedt", "repo": "aiOS",
-                        "branch": "main", "token": ""}
+                        "branch": "main"}
         self.update_owner = tk.StringVar(value=existing["owner"])
         self.update_repo = tk.StringVar(value=existing["repo"])
         self.update_branch = tk.StringVar(value=existing["branch"])
-        self.update_token = tk.StringVar(value=existing.get("token") or "")
 
         self.total_steps = 0
         self.done_steps = 0
@@ -135,8 +135,8 @@ class Installer(tk.Tk):
         tk.Label(src_row, text="Update source", bg="#0d1218", fg="#edf5ff",
                  font=("Segoe UI", 10, "bold")).pack(anchor="w")
         tk.Label(src_row,
-                 text="GitHub repo aiOS pulls future updates from. Token is "
-                       "required if the repo is private.",
+                 text="GitHub repo aiOS pulls future updates from. Leave the "
+                       "defaults unless you forked.",
                  bg="#0d1218", fg="#8ea0b5", font=("Segoe UI", 9),
                  wraplength=620, justify="left").pack(anchor="w", pady=(2, 8))
 
@@ -162,8 +162,6 @@ class Installer(tk.Tk):
         _src_row(0, "Owner", self.update_owner, hint="GitHub user/org")
         _src_row(1, "Repo", self.update_repo)
         _src_row(2, "Branch", self.update_branch, hint="usually main")
-        _src_row(3, "Token", self.update_token, masked=True,
-                  hint="leave blank for public repo")
 
         self.install_page = tk.Frame(self, bg="#080b0f")
         progress_box = tk.Frame(self.install_page, bg="#080b0f")
@@ -320,27 +318,47 @@ class Installer(tk.Tk):
         self.worker.start()
 
     def _run_install(self) -> None:
+        # Critical steps abort install on failure. Optional ones log and continue.
+        critical = [
+            ("Saving update source", self._save_update_source, True),
+            ("Installing Python dependencies", self._install_deps, self.install_deps.get()),
+            ("Preparing Agent Clicker .env", self._create_agent_env, self.create_agent_env.get()),
+        ]
+        optional = [
+            ("Downloading Whisper small model", self._download_whisper, self.download_whisper.get()),
+            ("Downloading OPERATOR OCR models", self._download_ocr, self.download_ocr.get()),
+            ("Writing voice defaults", self._configure_voice_defaults, self.configure_voice.get()),
+            ("Signing in with Codex", self._codex_auth_flow, self.codex_auth.get()),
+            ("Installing AutoHotkey", self._install_autohotkey, self.install_autohotkey.get()),
+            ("Adding startup launcher", self._add_startup, self.add_startup.get()),
+        ]
+        failures: list[str] = []
         try:
-            self._step("Saving update source", self._save_update_source)
-            if self.install_deps.get():
-                self._step("Installing Python dependencies", self._install_deps)
-            if self.download_whisper.get():
-                self._step("Downloading Whisper small model", self._download_whisper)
-            if self.download_ocr.get():
-                self._step("Downloading OPERATOR OCR models", self._download_ocr)
-            if self.configure_voice.get():
-                self._step("Writing voice defaults", self._configure_voice_defaults)
-            if self.codex_auth.get():
-                self._step("Signing in with Codex", self._codex_auth_flow)
-            if self.create_agent_env.get():
-                self._step("Preparing Agent Clicker .env", self._create_agent_env)
-            if self.install_autohotkey.get():
-                self._step("Installing AutoHotkey", self._install_autohotkey)
-            if self.add_startup.get():
-                self._step("Adding startup launcher", self._add_startup)
+            for label, fn, enabled in critical:
+                if not enabled:
+                    continue
+                self._step(label, fn)
+            for label, fn, enabled in optional:
+                if not enabled:
+                    continue
+                try:
+                    self._step(label, fn)
+                except Exception as exc:
+                    failures.append(f"{label}: {exc}")
+                    self.queue.put(("log", f"\n!! optional step failed (continuing): {exc}\n"))
+            # Always run a post-install verification.
+            try:
+                self._step("Verifying install", self._verify_install)
+            except Exception as exc:
+                failures.append(f"verify: {exc}")
+                self.queue.put(("log", f"\n!! verify warning: {exc}\n"))
             if self.start_now.get():
-                self._step("Starting aiOS", self._start_aios)
-            self.queue.put(("done", None))
+                try:
+                    self._step("Starting aiOS", self._start_aios)
+                except Exception as exc:
+                    failures.append(f"start: {exc}")
+                    self.queue.put(("log", f"\n!! could not start aiOS: {exc}\n"))
+            self.queue.put(("done", failures))
         except Exception as exc:
             self.queue.put(("error", str(exc)))
 
@@ -354,7 +372,6 @@ class Installer(tk.Tk):
         owner = self.update_owner.get().strip()
         repo = self.update_repo.get().strip()
         branch = self.update_branch.get().strip() or "main"
-        token = self.update_token.get().strip() or None
         if not owner or not repo:
             self._append("skipped: owner/repo blank — keeping previous settings\n")
             return
@@ -363,10 +380,9 @@ class Installer(tk.Tk):
         except Exception as exc:
             self._append(f"updater module unavailable: {exc}\n")
             return
-        ok = aios_updater.save_source(owner, repo, branch, token)
+        ok = aios_updater.save_source(owner, repo, branch)
         if ok:
-            self._append(f"saved → {owner}/{repo}@{branch}"
-                          + (" (with token)" if token else "") + "\n")
+            self._append(f"saved → {owner}/{repo}@{branch}\n")
         else:
             self._append("could not write helper_config.json\n")
 
@@ -450,6 +466,23 @@ class Installer(tk.Tk):
         if not self._find_autohotkey():
             raise RuntimeError("AutoHotkey v2 is required before startup can be added.")
         self._run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(BASE_DIR / "install-startup.ps1")])
+
+    def _verify_install(self) -> None:
+        """Spot-check that the critical Python deps actually import."""
+        probe = (
+            "import importlib, sys\n"
+            "mods = ['PIL', 'numpy', 'flask', 'openai', 'pyautogui', 'mss',\n"
+            "        'sounddevice', 'cv2', 'easyocr', 'faster_whisper',\n"
+            "        'httpx', 'dotenv', 'pyperclip', 'keyboard']\n"
+            "bad = []\n"
+            "for m in mods:\n"
+            "    try: importlib.import_module(m)\n"
+            "    except Exception as exc: bad.append(f'{m}: {exc}')\n"
+            "if bad:\n"
+            "    print('MISSING:'); [print(' -', b) for b in bad]; sys.exit(2)\n"
+            "print('all critical modules importable')\n"
+        )
+        self._run([sys.executable, "-c", probe])
 
     def _start_aios(self) -> None:
         subprocess.Popen(
@@ -552,10 +585,25 @@ class Installer(tk.Tk):
                 )
                 self.codex_login_event.set()
             elif kind == "done":
-                self._set_status("Done")
-                self.install_btn.configure(state="normal")
-                self._append("\nInstall complete.\n")
-                messagebox.showinfo("aiOS Installer", "Install complete.")
+                failures = value if isinstance(value, list) else []
+                if failures:
+                    self._set_status("Done with warnings")
+                    self.install_btn.configure(state="normal")
+                    self._append("\nInstall complete with warnings:\n")
+                    for f in failures:
+                        self._append(f"  - {f}\n")
+                    messagebox.showwarning(
+                        "aiOS Installer",
+                        "Install finished, but some optional steps failed:\n\n"
+                        + "\n".join(f"• {f}" for f in failures)
+                        + "\n\naiOS should still launch — fix or retry the "
+                        "failed steps later from the installer.",
+                    )
+                else:
+                    self._set_status("Done")
+                    self.install_btn.configure(state="normal")
+                    self._append("\nInstall complete.\n")
+                    messagebox.showinfo("aiOS Installer", "Install complete.")
             elif kind == "error":
                 self._set_status("Failed")
                 self.install_btn.configure(state="normal")
@@ -579,5 +627,31 @@ class Installer(tk.Tk):
         self.progress.coords(self.progress_fill, 0, 0, int(width * fraction), 12)
 
 
+def _preflight() -> None:
+    """Block obviously-bad environments before showing the GUI."""
+    if sys.version_info < MIN_PYTHON:
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showerror(
+            "aiOS Installer",
+            f"Python {MIN_PYTHON[0]}.{MIN_PYTHON[1]}+ is required.\n"
+            f"You are running {sys.version.split()[0]}.\n\n"
+            "Install a newer Python from python.org and retry.",
+        )
+        sys.exit(1)
+    if os.name != "nt":
+        # aiOS is Windows-only right now (helper uses Win32 APIs).
+        root = tk.Tk()
+        root.withdraw()
+        if not messagebox.askyesno(
+            "aiOS Installer",
+            "aiOS is Windows-only — many features rely on Win32 APIs and "
+            "AutoHotkey. Continue anyway?",
+        ):
+            sys.exit(0)
+        root.destroy()
+
+
 if __name__ == "__main__":
+    _preflight()
     Installer().mainloop()

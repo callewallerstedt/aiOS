@@ -8152,13 +8152,11 @@ class HelperOverlay:
         owner_var = tk.StringVar(value=src["owner"])
         repo_var = tk.StringVar(value=src["repo"])
         branch_var = tk.StringVar(value=src["branch"])
-        token_var = tk.StringVar(value="••••••••" if src.get("token") else "")
         self._update_state = {
             "info_var": info_var, "status_var": status_var, "log_var": log_var,
             "owner_var": owner_var, "repo_var": repo_var,
-            "branch_var": branch_var, "token_var": token_var,
+            "branch_var": branch_var,
             "busy": False, "last_check": None,
-            "token_present": bool(src.get("token")),
         }
 
         tk.Label(card, textvariable=info_var, bg=self.c("surface"),
@@ -8194,8 +8192,6 @@ class HelperOverlay:
         add_row(0, "Owner", owner_var, hint="GitHub user/org")
         add_row(1, "Repo", repo_var)
         add_row(2, "Branch", branch_var, hint="usually main")
-        add_row(3, "Token", token_var, masked=True,
-                hint="GitHub PAT · required for private repos")
 
         log_frame = tk.Frame(card, bg="#080d14")
         log_frame.pack(fill="x", padx=12, pady=(4, 8))
@@ -8231,25 +8227,11 @@ class HelperOverlay:
         owner = state["owner_var"].get().strip()
         repo = state["repo_var"].get().strip()
         branch = state["branch_var"].get().strip() or "main"
-        raw_token = state["token_var"].get()
-        # Treat the masked placeholder as "keep existing token". An empty
-        # string means "clear the token". Anything else replaces it.
-        if raw_token == "" + ("•" * 8):
-            token = None  # keep
-        elif raw_token.strip() == "":
-            token = ""  # clear
-        else:
-            token = raw_token.strip()
         if not owner or not repo:
             state["status_var"].set("Owner and Repo are required")
             return
-        ok = aios_updater.save_source(owner, repo, branch, token)
+        ok = aios_updater.save_source(owner, repo, branch)
         if ok:
-            if token is not None and token:
-                state["token_var"].set("••••••••")
-                state["token_present"] = True
-            elif token == "":
-                state["token_present"] = False
             state["status_var"].set("source saved · re-checking…")
             self._updater_check(silent=False)
         else:

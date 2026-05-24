@@ -157,12 +157,9 @@ def _http_json(url: str, timeout: float = 8.0, token: str = "") -> tuple[dict | 
         except Exception:
             pass
         if exc.code == 404:
-            hint = " (private repo? set update_source.token to a GitHub PAT with `repo` scope)"
-            return None, f"HTTP 404 from GitHub — repo or branch not found{hint}"
-        if exc.code == 401:
-            return None, "HTTP 401 from GitHub — token invalid or missing"
+            return None, "HTTP 404 from GitHub — repo or branch not found"
         if exc.code == 403:
-            return None, f"HTTP 403 from GitHub — rate limited or token missing scope: {body or exc.reason}"
+            return None, f"HTTP 403 from GitHub — rate limited: {body or exc.reason}"
         return None, f"HTTP {exc.code} from GitHub: {body or exc.reason}"
     except urllib.error.URLError as exc:
         return None, f"network error reaching {url}: {exc.reason}"
