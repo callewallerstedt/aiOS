@@ -11,6 +11,7 @@ KNOWN_CODEX_EMAILS = (
     "calle.wallerstedt@gmail.com",
     "contact.wallerstedt@gmail.com",
 )
+USAGE_CACHE_FILE = "aios-codex-usage-cache.json"
 
 
 def _decode_id_token(token):
@@ -149,9 +150,34 @@ def _limit_payload(limit):
     }
 
 
-def _account_payload(email, auth, event):
+def _usage_cache_path(home):
+    return Path(home) / USAGE_CACHE_FILE
+
+
+def _load_usage_cache(home):
+    try:
+        return json.loads(_usage_cache_path(home).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _save_usage_cache(home, cache):
+    try:
+        _usage_cache_path(home).write_text(json.dumps(cache, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _cached_event_for(email, cache):
+    record = cache.get(email) if email else None
+    if not isinstance(record, dict) or not record.get("limits"):
+        return None
+    return {"limits": record.get("limits"), "timestamp": record.get("timestamp")}
+
+
+def _account_payload(email, auth, event, cached=False):
     active = bool(email and email.casefold() == str(auth.get("email", "")).casefold())
-    limits = event.get("limits") if active and event else None
+    limits = event.get("limits") if event else None
     primary = _limit_payload((limits or {}).get("primary"))
     secondary = _limit_payload((limits or {}).get("secondary"))
     return {
@@ -163,17 +189,30 @@ def _account_payload(email, auth, event):
         "primary": primary,
         "secondary": secondary,
         "updated_at": event.get("timestamp") if limits and event else None,
+        "cached": bool(cached),
     }
 
 
 def codex_usage_payload(home=CODEX_HOME):
     auth = codex_auth_details(home)
     event = latest_codex_rate_limit_event(home)
-    emails = list(KNOWN_CODEX_EMAILS)
+    cache = _load_usage_cache(home)
     active_email = auth.get("email")
+    if active_email and event and event.get("limits"):
+        cache[active_email] = {
+            "limits": event.get("limits"),
+            "timestamp": event.get("timestamp"),
+            "saved_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        _save_usage_cache(home, cache)
+    emails = list(KNOWN_CODEX_EMAILS)
     if active_email and all(active_email.casefold() != email.casefold() for email in emails):
         emails.insert(0, active_email)
-    accounts = [_account_payload(email, auth, event) for email in emails]
+    accounts = []
+    for email in emails:
+        active = bool(email and email.casefold() == str(active_email or "").casefold())
+        account_event = event if active else _cached_event_for(email, cache)
+        accounts.append(_account_payload(email, auth, account_event, cached=not active and bool(account_event)))
     return {
         "ok": True,
         "active": active_email or "",
@@ -190,4 +229,3 @@ def desktop_account_text(account):
         mark = "*" if account.get("active") else ""
         return f"{short}{mark} {primary['remaining']}/{secondary['remaining']}"
     return f"{short} --"
-
