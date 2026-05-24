@@ -2,7 +2,7 @@
 app.displayDialogs = DialogModes.NO;
 
 (function () {
-    var outFolder = new Folder('C:/CODEX/Computer helper/assets');
+    var outFolder = new Folder(File($.fileName).parent.fsName);
     if (!outFolder.exists) outFolder.create();
 
     if (app.documents.length === 0) {
