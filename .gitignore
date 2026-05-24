@@ -16,8 +16,12 @@ voice-*.log
 autocorrect.log
 
 helper_config.json
+phone-bridge-url.txt
+phone_operator_events/
+tools/cloudflared.exe
 debug_runs/
 agent_clicker/debug_runs/
+agent_clicker/user_context/
 agent_clicker/_tts_test.wav
 
 .idea/

@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
+<title>aiOS</title>
+<meta name="theme-color" content="#05060a" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-title" content="aiOS" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<link rel="manifest" href="/manifest.webmanifest" />
+<link rel="apple-touch-icon" href="/icons/aios-icon-180.png" />
+<link rel="icon" sizes="192x192" href="/icons/aios-icon-192.png" />
+<link rel="preconnect" href="https://rsms.me/" />
+<link rel="stylesheet" href="https://rsms.me/inter/inter.css" />
+<link rel="stylesheet" href="/phone.css" />
+</head>
+<body>
+<div class="bg-gradient" aria-hidden="true"></div>
+
+<main class="shell">
+  <header class="top">
+    <div class="brand">
+      <img class="logo" src="/icons/aios-logo.png" alt="aiOS" />
+    </div>
+    <div class="top-meta">
+      <button id="state" class="pill" type="button" aria-label="status">
+        <span class="dot"></span><span id="state-text">ready</span>
+      </button>
+      <button id="settings-btn" class="icon-mini" type="button" aria-label="Settings">
+        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+          <path fill="currentColor" d="M19.14 12.94a7.86 7.86 0 0 0 0-1.88l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96a7.6 7.6 0 0 0-1.63-.95l-.36-2.54a.5.5 0 0 0-.5-.42h-3.84a.5.5 0 0 0-.5.42l-.36 2.54c-.59.23-1.14.55-1.63.95l-2.39-.96a.5.5 0 0 0-.6.22L2.66 8.84a.5.5 0 0 0 .12.64l2.03 1.58a7.86 7.86 0 0 0 0 1.88L2.78 14.5a.5.5 0 0 0-.12.64l1.92 3.32c.14.24.43.34.6.22l2.39-.96c.5.4 1.04.72 1.63.95l.36 2.54c.05.24.26.42.5.42h3.84c.24 0 .45-.18.5-.42l.36-2.54c.59-.23 1.13-.55 1.63-.95l2.39.96c.27.1.46 0 .6-.22l1.92-3.32a.5.5 0 0 0-.12-.64ZM12 15.5A3.5 3.5 0 1 1 15.5 12 3.5 3.5 0 0 1 12 15.5Z"/>
+        </svg>
+      </button>
+    </div>
+  </header>
+
+
+  <section class="screen" id="screen-wrap">
+    <div class="screen-toolbar">
+      <select id="monitor-select" class="chip-select" aria-label="Monitor">
+        <option value="1">Monitor 1</option>
+      </select>
+      <button id="screen-zoom" class="chip-btn" type="button" aria-label="Fullscreen" title="Fullscreen">
+        <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M5 5h5V3H3v7h2Zm14 0v5h2V3h-7v2Zm0 14h-5v2h7v-7h-2ZM5 14H3v7h7v-2H5Z"/></svg>
+      </button>
+      <button id="screen-collapse" class="chip-btn" type="button" aria-label="Collapse" title="Collapse">
+        <svg id="screen-collapse-icon" viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M5 11h14v2H5z"/></svg>
+      </button>
+    </div>
+    <div class="screen-stage" id="screen-stage">
+      <img id="screen" alt="" draggable="false" />
+    </div>
+    <div class="screen-empty">no signal · check backend</div>
+  </section>
+
+  <section class="transcript-wrap">
+    <textarea id="text" class="text" rows="2" placeholder="tap mic, or type here…" autocomplete="off" autocorrect="on" autocapitalize="sentences" spellcheck="true"></textarea>
+    <div class="char-count" id="char-count"></div>
+  </section>
+
+  <section class="operator-panel" id="operator-panel" hidden>
+    <button class="op-disclose" id="op-disclose" type="button">
+      <span>Operator settings</span>
+      <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="m7 10 5 5 5-5z"/></svg>
+    </button>
+    <div class="op-body" id="op-body">
+      <div class="op-grid">
+        <label class="op-field">
+          <span>Model</span>
+          <input id="op-model" type="text" inputmode="text" autocomplete="off" placeholder="gpt-5.5" />
+        </label>
+        <label class="op-field">
+          <span>Reasoning</span>
+          <select id="op-reasoning">
+            <option value="minimal">minimal</option>
+            <option value="low">low</option>
+            <option value="medium" selected>medium</option>
+            <option value="high">high</option>
+          </select>
+        </label>
+        <label class="op-field">
+          <span>Max steps</span>
+          <input id="op-steps" type="number" inputmode="numeric" min="1" max="200" value="25" />
+        </label>
+        <label class="op-field">
+          <span>Action delay</span>
+          <input id="op-delay" type="number" inputmode="decimal" step="0.05" min="0" max="3" value="0.20" />
+        </label>
+        <label class="op-field span-2">
+          <span>Run on monitor</span>
+          <select id="op-monitor">
+            <option value="">auto</option>
+          </select>
+        </label>
+        <label class="op-field span-2">
+          <span>Voice</span>
+          <select id="op-voice">
+            <option value="nova">nova</option>
+            <option value="alloy">alloy</option>
+            <option value="echo">echo</option>
+            <option value="fable">fable</option>
+            <option value="onyx">onyx</option>
+            <option value="shimmer">shimmer</option>
+            <option value="coral">coral</option>
+            <option value="sage">sage</option>
+            <option value="ash">ash</option>
+          </select>
+        </label>
+      </div>
+      <div class="op-toggles">
+        <label class="op-toggle"><input id="op-tts" type="checkbox" /><span>TTS</span></label>
+        <label class="op-toggle"><input id="op-shell" type="checkbox" /><span>Shell</span></label>
+        <label class="op-toggle"><input id="op-codex" type="checkbox" /><span>Codex</span></label>
+      </div>
+      <div class="op-actions">
+        <button id="op-save" class="op-btn" type="button">Save</button>
+        <button id="op-stop" class="op-btn danger" type="button">Safety stop</button>
+      </div>
+    </div>
+
+    <div class="op-stream-head">
+      <span class="stream-title">Live operator</span>
+      <span class="stream-status" id="op-status">idle</span>
+    </div>
+    <div class="op-stream" id="op-stream"></div>
+  </section>
+
+  <footer class="dock">
+    <button id="clear" class="icon-btn" type="button" aria-label="Clear">
+      <svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M18.3 5.71a1 1 0 0 0-1.41 0L12 10.59 7.11 5.7A1 1 0 0 0 5.7 7.11L10.59 12 5.7 16.89a1 1 0 1 0 1.41 1.41L12 13.41l4.89 4.89a1 1 0 0 0 1.41-1.41L13.41 12l4.89-4.89a1 1 0 0 0 0-1.4Z"/></svg>
+    </button>
+    <button id="mic" class="mic" type="button" aria-label="Microphone">
+      <span class="mic-pulse"></span>
+      <span class="mic-pulse delayed"></span>
+      <span class="mic-glyph">
+        <svg viewBox="0 0 24 24" width="30" height="30" aria-hidden="true">
+          <path fill="currentColor" d="M12 14a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v5a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11Z"/>
+        </svg>
+      </span>
+    </button>
+    <button id="send" class="icon-btn send" type="button" aria-label="Send">
+      <svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="m4 21 18-9L4 3v7l13 2-13 2Z"/></svg>
+    </button>
+  </footer>
+</main>
+
+<div class="modal" id="settings-modal" hidden>
+  <div class="modal-card">
+    <h2>Settings</h2>
+    <label class="modal-field">
+      <span>Backend URL</span>
+      <input id="settings-backend" type="url" autocomplete="off" placeholder="https://your-tunnel.example.com" />
+    </label>
+    <div class="modal-row">
+      <label class="modal-field">
+        <span>Refresh (ms)</span>
+        <input id="settings-refresh" type="number" inputmode="numeric" min="400" max="10000" step="100" value="900" />
+      </label>
+      <label class="modal-field">
+        <span>Quality</span>
+        <input id="settings-quality" type="number" inputmode="numeric" min="20" max="95" step="5" value="78" />
+      </label>
+      <label class="modal-field">
+        <span>Max size</span>
+        <input id="settings-size" type="number" inputmode="numeric" min="400" max="3840" step="100" value="1600" />
+      </label>
+    </div>
+    <label class="modal-toggle"><input id="settings-stream" type="checkbox" checked /><span>Live screen mirroring</span></label>
+    <label class="modal-toggle"><input id="settings-autosend" type="checkbox" /><span>Auto-send after voice</span></label>
+    <label class="modal-toggle"><input id="settings-haptics" type="checkbox" checked /><span>Haptics</span></label>
+    <div class="modal-actions">
+      <button id="settings-cancel" class="op-btn" type="button">Close</button>
+      <button id="settings-save" class="op-btn primary" type="button">Save</button>
+    </div>
+  </div>
+</div>
+
+<div class="zoom-modal" id="zoom-modal" hidden>
+  <button class="zoom-close" id="zoom-close" type="button" aria-label="Close">×</button>
+  <div class="zoom-loading" id="zoom-loading">capturing high-res frame…</div>
+  <div class="zoom-stage" id="zoom-stage">
+    <img id="zoom-img" alt="" draggable="false" />
+  </div>
+</div>
+
+<script src="/phone.js"></script>
+</body>
+</html>

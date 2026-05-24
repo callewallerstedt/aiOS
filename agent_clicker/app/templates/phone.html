@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>aiOS Phone</title>
+<meta name="theme-color" content="#070808" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-title" content="aiOS" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<link rel="manifest" href="/static/manifest.webmanifest" />
+<link rel="apple-touch-icon" href="/static/pwa/aios-icon-180.png" />
+<link rel="icon" sizes="192x192" href="/static/pwa/aios-icon-192.png" />
+<link rel="stylesheet" href="/static/phone.css" />
+</head>
+<body>
+<main class="shell">
+  <header class="top">
+    <img class="logo" src="/static/pwa/rectangle-logo.png" alt="aiOS" />
+    <div id="state" class="state">ready</div>
+  </header>
+
+  <nav class="target" aria-label="target">
+    <button class="target-btn active" type="button" data-target="chat">AIOS</button>
+    <button class="target-btn" type="button" data-target="operator">OPERATOR</button>
+  </nav>
+
+  <section class="screen">
+    <img id="screen" alt="" />
+  </section>
+
+  <section class="transcript" aria-live="polite">
+    <div id="text" class="text"></div>
+  </section>
+
+  <footer class="dock">
+    <button id="clear" class="icon-btn" type="button" aria-label="Clear">×</button>
+    <button id="mic" class="mic" type="button" aria-label="Microphone">
+      <span></span>
+    </button>
+    <button id="send" class="icon-btn send" type="button" aria-label="Send">↑</button>
+  </footer>
+</main>
+<script src="/static/phone.js"></script>
+</body>
+</html>

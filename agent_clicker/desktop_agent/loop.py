@@ -140,7 +140,8 @@ class AgentLoop:
               shell_enabled: bool = False, shell_cwd: str | None = None,
               backend: str = "api", reasoning_effort: str | None = None,
               mid_screenshots: str = "key",
-              attachments: list[dict] | None = None):
+              attachments: list[dict] | None = None,
+              user_context: str = ""):
         """mid_screenshots: 'off' | 'key' — capture an extra screenshot after
         each state-changing action so the next round sees the process trail.
 
@@ -158,7 +159,7 @@ class AgentLoop:
             target=self._run,
             args=(task, monitor, model, max_steps, action_delay, settle_after_step,
                   shell_enabled, shell_cwd, backend, reasoning_effort, mid_screenshots,
-                  attachments or []),
+                  attachments or [], user_context),
             daemon=True,
         )
         self._thread.start()
@@ -180,8 +181,18 @@ class AgentLoop:
 
     def _run(self, task, monitor, model, max_steps, action_delay, settle_after_step,
              shell_enabled=False, shell_cwd=None, backend="api",
-             reasoning_effort=None, mid_screenshots="key", attachments=None):
+             reasoning_effort=None, mid_screenshots="key", attachments=None,
+             user_context=""):
         attachments = attachments or []
+        user_context = (user_context or "").strip()
+        effective_system = SYSTEM_PROMPT
+        if user_context:
+            effective_system = (
+                SYSTEM_PROMPT
+                + "\n\n--- USER CONTEXT (persistent settings from the UI) ---\n"
+                + user_context
+                + "\n--- END USER CONTEXT ---\n"
+            )
         history_msgs: list[dict] = []
         # Mid-step trail: screenshots captured AFTER actions in the prior step,
         # attached to the NEXT user message so the model sees the process.
@@ -197,7 +208,7 @@ class AgentLoop:
             os.makedirs(run_dir, exist_ok=True)
             with open(os.path.join(run_dir, "system_prompt.txt"), "w",
                       encoding="utf-8") as f:
-                f.write(SYSTEM_PROMPT)
+                f.write(effective_system)
             with open(os.path.join(run_dir, "meta.json"), "w", encoding="utf-8") as f:
                 json.dump({
                     "task": task,
@@ -214,6 +225,7 @@ class AgentLoop:
                                      "size": (a["image"].size if a.get("image") else
                                               len(a.get("text") or ""))}
                                     for a in attachments],
+                    "user_context_chars": len(user_context),
                     "start": run_start.isoformat(timespec="seconds"),
                     "status": "running",
                 }, f, indent=2)
@@ -368,7 +380,7 @@ class AgentLoop:
                         pass
                 t0 = time.time()
                 try:
-                    raw = vlm.chat_raw(SYSTEM_PROMPT, msgs, model=model, backend=backend,
+                    raw = vlm.chat_raw(effective_system, msgs, model=model, backend=backend,
                                        reasoning_effort=reasoning_effort)
                     rec.raw = raw
                     if sd:

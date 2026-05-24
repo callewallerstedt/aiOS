@@ -19,7 +19,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 import urllib.error
 import urllib.request
-from tkinter import colorchooser, filedialog, messagebox
+from tkinter import colorchooser, filedialog, messagebox, simpledialog
 
 from voice_settings import (
     COMPUTE_TYPES,
@@ -58,6 +58,7 @@ BRAND_FONT_PATH = BASE_DIR / "assets" / "fonts" / "Michroma-Regular.ttf"
 BRAND_FONT_FAMILY = "Michroma"
 STARTUP_FRAME_DIR = BASE_DIR / "assets" / "startup" / "aios-logo-reveal-frames"
 STARTUP_SOUND_PATH = BASE_DIR / "assets" / "startup" / "aios-startup.wav"
+OPERATOR_SOUND_PATH = BASE_DIR / "assets" / "startup" / "aios-operator.wav"
 APP_ICON_PATH = BASE_DIR / "assets" / "aios-logo.ico"
 APP_USER_MODEL_ID = "aiOS.Desktop.Helper"
 AGENT_CLICKER_DIR = BASE_DIR / "agent_clicker"
@@ -153,11 +154,14 @@ class RGBQUAD(ctypes.Structure):
 class NativeOperatorOverlay:
     CLASS_NAME = "aiOSOperatorOverlay"
 
-    def __init__(self, owner):
+    def __init__(self, owner, title_text="aiOPERATOR controlling computer", log_title="aiOPERATOR LOG", class_name=None):
         self.owner = owner
+        self.class_name = class_name or self.CLASS_NAME
         self.windows = {}
         self.labels = {}
         self.log_text = ""
+        self.title_text = title_text
+        self.log_title = log_title
         self.enabled = sys.platform.startswith("win")
         self._wndproc = None
         if self.enabled:
@@ -200,7 +204,7 @@ class NativeOperatorOverlay:
         wc = WNDCLASSW()
         wc.lpfnWndProc = self._wndproc
         wc.hInstance = self.hinstance
-        wc.lpszClassName = self.CLASS_NAME
+        wc.lpszClassName = self.class_name
         try:
             self.user32.RegisterClassW(ctypes.byref(wc))
         except OSError:
@@ -213,7 +217,7 @@ class NativeOperatorOverlay:
         for name in ("top", "bottom", "left", "right", "label", "log"):
             hwnd = self.user32.CreateWindowExW(
                 exstyle,
-                self.CLASS_NAME,
+                self.class_name,
                 name,
                 WS_POPUP,
                 0,
@@ -336,7 +340,7 @@ class NativeOperatorOverlay:
         font = self.gdi32.CreateFontW(-16, 0, 0, 0, 700, 0, 0, 0, 0, 0, 0, 5, 0, getattr(self.owner, "brand_font_family", "Segoe UI"))
         old = self.gdi32.SelectObject(hdc, font)
         try:
-            self.user32.DrawTextW(hdc, "aiOPERATOR controlling computer", -1, ctypes.byref(rect), 0x00000001 | 0x00000004 | 0x00000020)
+            self.user32.DrawTextW(hdc, self.title_text, -1, ctypes.byref(rect), 0x00000001 | 0x00000004 | 0x00000020)
         finally:
             self.gdi32.SelectObject(hdc, old)
             self.gdi32.DeleteObject(font)
@@ -357,7 +361,7 @@ class NativeOperatorOverlay:
         title_font = self.gdi32.CreateFontW(-13, 0, 0, 0, 700, 0, 0, 0, 0, 0, 0, 5, 0, getattr(self.owner, "brand_font_family", "Segoe UI"))
         old = self.gdi32.SelectObject(hdc, title_font)
         try:
-            self.user32.DrawTextW(hdc, "aiOPERATOR LOG", -1, ctypes.byref(title_rect), 0x00000000 | 0x00000020)
+            self.user32.DrawTextW(hdc, self.log_title, -1, ctypes.byref(title_rect), 0x00000000 | 0x00000020)
         finally:
             self.gdi32.SelectObject(hdc, old)
             self.gdi32.DeleteObject(title_font)
@@ -1375,6 +1379,7 @@ class HelperOverlay:
         self._tray_open = False
         self._tray_target_h = 66
         self._tray_peek_h = 10
+        self._operator_sound_last_at = 0.0
         self.screen_record_process = None
         self.screen_record_path = None
         self.screen_record_started_at = 0.0
@@ -1427,6 +1432,13 @@ class HelperOverlay:
         self.agent_operator_attach_strip = None
         self.agent_operator_attach_placeholder = None
         self.agent_operator_ImageGrab = None
+        self.agent_operator_context_list = None
+        self.agent_operator_context_editor = None
+        self.agent_operator_context_file_var = None
+        self.agent_operator_context_status_var = None
+        self.agent_operator_context_current = None
+        self.agent_operator_context_loading = False
+        self.agent_operator_context_save_after = None
         self.agent_operator_monitor_var = None
         self.agent_operator_model_var = None
         self.agent_operator_reason_var = None
@@ -1453,6 +1465,12 @@ class HelperOverlay:
         self.agent_operator_control_monitor = None
         self.agent_operator_control_visible = False
         self.agent_operator_native_overlay = None
+        self.phone_control_native_overlay = None
+        self.phone_control_visible = False
+        self.phone_control_after = None
+        self.phone_control_deadline = 0.0
+        self.phone_control_pulse = 0
+        self.phone_control_log = "connected"
 
         self.root = tk.Tk()
         self.root.title("aiOS")
@@ -1472,6 +1490,12 @@ class HelperOverlay:
         self.root.withdraw()
         self.brand_font_family = self._init_brand_font()
         self.agent_operator_native_overlay = NativeOperatorOverlay(self)
+        self.phone_control_native_overlay = NativeOperatorOverlay(
+            self,
+            "Phone Control",
+            "PHONE CONTROL",
+            class_name="aiOSPhoneControlOverlay",
+        )
         self._init_tray_icon()
 
         self._clamp_window_to_screen()
@@ -1745,6 +1769,7 @@ class HelperOverlay:
         self.send_button.pack(side="right", fill="y", padx=(8, 0))
 
     def render_tab(self, tab):
+        previous_tab = self.active_tab
         self.active_tab = tab
         self.page_view = None
         self._build_nav()
@@ -1760,6 +1785,8 @@ class HelperOverlay:
         elif tab == "Drop":
             self.render_drop()
         elif tab == "AI Operator":
+            if previous_tab != "AI Operator":
+                self._play_operator_sound()
             self.render_ai_operator()
         elif tab == "Settings":
             self.render_settings()
@@ -4504,6 +4531,55 @@ class HelperOverlay:
         self.agent_operator_attach_strip.pack(fill="x", padx=8, pady=(0, 8))
         self._agent_operator_render_attachments()
 
+        prompt_panel = tk.Frame(controls, bg=self.c("surface"))
+        prompt_panel.pack(fill="x", padx=12, pady=(0, 12))
+        prompt_head = tk.Frame(prompt_panel, bg=self.c("surface"))
+        prompt_head.pack(fill="x", pady=(0, 6))
+        tk.Label(prompt_head, text="Prompts", bg=self.c("surface"), fg=self.c("text"), font=self.font(10, "bold")).pack(side="left")
+        self.agent_operator_context_status_var = tk.StringVar(value="")
+        tk.Label(prompt_head, textvariable=self.agent_operator_context_status_var, bg=self.c("surface"), fg=self.c("muted"), font=self.font(8)).pack(side="left", padx=(10, 0))
+        self.button(prompt_head, "New", self.agent_operator_context_new, compact=True).pack(side="right", padx=(6, 0))
+        self.button(prompt_head, "Rename", self.agent_operator_context_rename, compact=True).pack(side="right", padx=(6, 0))
+        self.button(prompt_head, "Delete", self.agent_operator_context_delete, compact=True).pack(side="right", padx=(6, 0))
+        prompt_body = tk.Frame(prompt_panel, bg=self.c("surface"))
+        prompt_body.pack(fill="x")
+        self.agent_operator_context_list = tk.Listbox(
+            prompt_body,
+            height=5,
+            bg="#080d14",
+            fg=self.c("text"),
+            selectbackground=self.c("accent"),
+            selectforeground="#061018",
+            borderwidth=0,
+            highlightthickness=0,
+            activestyle="none",
+            font=self.font(9),
+        )
+        self.agent_operator_context_list.pack(side="left", fill="y", padx=(0, 8))
+        self.agent_operator_context_list.bind("<<ListboxSelect>>", self.agent_operator_context_select)
+        editor_wrap = tk.Frame(prompt_body, bg="#080d14", highlightbackground="#1c2b3d", highlightthickness=1, bd=0)
+        editor_wrap.pack(side="left", fill="both", expand=True)
+        self.agent_operator_context_file_var = tk.StringVar(value="")
+        tk.Label(editor_wrap, textvariable=self.agent_operator_context_file_var, bg="#080d14", fg=self.c("muted"), font=self.font(8, "bold")).pack(anchor="w", padx=8, pady=(6, 0))
+        self.agent_operator_context_editor = tk.Text(
+            editor_wrap,
+            height=5,
+            bg="#080d14",
+            fg=self.c("text"),
+            insertbackground=self.c("text"),
+            selectbackground="#29415d",
+            relief="flat",
+            bd=0,
+            padx=8,
+            pady=6,
+            wrap="word",
+            undo=True,
+            font=self.font(9),
+        )
+        self.agent_operator_context_editor.pack(fill="both", expand=True)
+        self.agent_operator_context_editor.bind("<<Modified>>", self.agent_operator_context_modified)
+        self._agent_operator_context_refresh()
+
         split = tk.Frame(self.page, bg=self.c("panel"))
         split.pack(fill="both", expand=True)
         preview_card = self.card(split)
@@ -4982,6 +5058,207 @@ class HelperOverlay:
             snapshot.append(item)
         return snapshot
 
+    def _agent_operator_context_dir(self):
+        return Path(self.agent_clicker_dir) / "user_context"
+
+    def _agent_operator_context_files(self):
+        folder = self._agent_operator_context_dir()
+        if not folder.exists():
+            return []
+        return sorted(
+            path.name for path in folder.iterdir()
+            if path.is_file() and not path.name.startswith(".")
+        )
+
+    def _agent_operator_context_path(self, name):
+        folder = self._agent_operator_context_dir()
+        safe = os.path.basename(str(name or "").strip())
+        if not safe or safe.startswith("."):
+            raise ValueError("Bad file name")
+        return folder / safe
+
+    def _agent_operator_context_read(self, name):
+        try:
+            return self._agent_operator_context_path(name).read_text(encoding="utf-8")
+        except Exception:
+            return ""
+
+    def _agent_operator_context_write(self, name, text):
+        folder = self._agent_operator_context_dir()
+        folder.mkdir(parents=True, exist_ok=True)
+        self._agent_operator_context_path(name).write_text(text, encoding="utf-8")
+
+    def _agent_operator_seed_context_files(self):
+        folder = self._agent_operator_context_dir()
+        if self._agent_operator_context_files():
+            return
+        external = Path(r"C:\Claude code\Agent Clicker\user_context")
+        if external.exists() and external.resolve() != folder.resolve():
+            for source in external.iterdir():
+                if source.is_file() and not source.name.startswith("."):
+                    target = folder / source.name
+                    if not target.exists():
+                        try:
+                            shutil.copy2(source, target)
+                        except OSError:
+                            pass
+        if not self._agent_operator_context_files():
+            self._agent_operator_context_write("human.md", "")
+
+    def _agent_operator_context_refresh(self, select=None):
+        if not self.agent_operator_context_list or not self.agent_operator_context_editor:
+            return
+        folder = self._agent_operator_context_dir()
+        folder.mkdir(parents=True, exist_ok=True)
+        self._agent_operator_seed_context_files()
+        files = self._agent_operator_context_files()
+        current = select or self.agent_operator_context_current
+        self.agent_operator_context_list.delete(0, "end")
+        for name in files:
+            self.agent_operator_context_list.insert("end", name)
+        if current not in files:
+            current = files[0] if files else None
+        if current:
+            index = files.index(current)
+            self.agent_operator_context_list.selection_clear(0, "end")
+            self.agent_operator_context_list.selection_set(index)
+            self.agent_operator_context_list.see(index)
+            self._agent_operator_context_load(current)
+        else:
+            self.agent_operator_context_current = None
+            self.agent_operator_context_file_var.set("")
+            self.agent_operator_context_loading = True
+            self.agent_operator_context_editor.delete("1.0", "end")
+            self.agent_operator_context_loading = False
+
+    def _agent_operator_context_load(self, name):
+        self.agent_operator_context_current = name
+        self.agent_operator_context_file_var.set(name)
+        if self.agent_operator_context_status_var:
+            self.agent_operator_context_status_var.set("")
+        self.agent_operator_context_loading = True
+        self.agent_operator_context_editor.delete("1.0", "end")
+        self.agent_operator_context_editor.insert("1.0", self._agent_operator_context_read(name))
+        self.agent_operator_context_editor.edit_modified(False)
+        self.agent_operator_context_loading = False
+
+    def agent_operator_context_select(self, _event=None):
+        if not self.agent_operator_context_list:
+            return
+        selection = self.agent_operator_context_list.curselection()
+        if not selection:
+            return
+        name = self.agent_operator_context_list.get(selection[0])
+        if name != self.agent_operator_context_current:
+            self._agent_operator_context_flush()
+            self._agent_operator_context_load(name)
+
+    def agent_operator_context_modified(self, _event=None):
+        editor = self.agent_operator_context_editor
+        if not editor:
+            return
+        if self.agent_operator_context_loading or not self.agent_operator_context_current:
+            editor.edit_modified(False)
+            return
+        if self.agent_operator_context_status_var:
+            self.agent_operator_context_status_var.set("editing")
+        if self.agent_operator_context_save_after is not None:
+            try:
+                self.root.after_cancel(self.agent_operator_context_save_after)
+            except tk.TclError:
+                pass
+        self.agent_operator_context_save_after = self.root.after(400, self._agent_operator_context_flush)
+        editor.edit_modified(False)
+
+    def _agent_operator_context_flush(self):
+        self.agent_operator_context_save_after = None
+        if not self.agent_operator_context_current or not self.agent_operator_context_editor:
+            return
+        text = self.agent_operator_context_editor.get("1.0", "end-1c")
+        try:
+            self._agent_operator_context_write(self.agent_operator_context_current, text)
+            if self.agent_operator_context_status_var:
+                self.agent_operator_context_status_var.set(f"saved {datetime.now().strftime('%H:%M:%S')}")
+        except Exception as exc:
+            if self.agent_operator_context_status_var:
+                self.agent_operator_context_status_var.set(f"save failed: {exc}")
+
+    def agent_operator_context_new(self):
+        name = simpledialog.askstring("New prompt", "File name:", parent=self.root)
+        if not name:
+            return
+        name = name.strip()
+        if not name:
+            return
+        if "/" in name or "\\" in name or name.startswith("."):
+            messagebox.showerror("Bad name", "Use a simple file name.")
+            return
+        if "." not in name:
+            name += ".md"
+        try:
+            path = self._agent_operator_context_path(name)
+            if path.exists():
+                messagebox.showerror("Exists", f"{name} already exists.")
+                return
+            self._agent_operator_context_write(name, "")
+            self._agent_operator_context_refresh(select=name)
+        except Exception as exc:
+            messagebox.showerror("Create failed", str(exc))
+
+    def agent_operator_context_rename(self):
+        current = self.agent_operator_context_current
+        if not current:
+            return
+        new = simpledialog.askstring("Rename prompt", "File name:", initialvalue=current, parent=self.root)
+        if not new or new == current:
+            return
+        new = new.strip()
+        if "/" in new or "\\" in new or new.startswith("."):
+            messagebox.showerror("Bad name", "Use a simple file name.")
+            return
+        if "." not in new:
+            new += ".md"
+        try:
+            self._agent_operator_context_flush()
+            src = self._agent_operator_context_path(current)
+            dst = self._agent_operator_context_path(new)
+            if dst.exists():
+                messagebox.showerror("Exists", f"{new} already exists.")
+                return
+            src.rename(dst)
+            self.agent_operator_context_current = new
+            self._agent_operator_context_refresh(select=new)
+        except Exception as exc:
+            messagebox.showerror("Rename failed", str(exc))
+
+    def agent_operator_context_delete(self):
+        current = self.agent_operator_context_current
+        if not current:
+            return
+        if not messagebox.askyesno("Delete prompt", f"Delete {current}?"):
+            return
+        try:
+            self._agent_operator_context_path(current).unlink()
+            self.agent_operator_context_current = None
+            if self.agent_operator_context_save_after is not None:
+                try:
+                    self.root.after_cancel(self.agent_operator_context_save_after)
+                except tk.TclError:
+                    pass
+                self.agent_operator_context_save_after = None
+            self._agent_operator_context_refresh()
+        except Exception as exc:
+            messagebox.showerror("Delete failed", str(exc))
+
+    def _agent_operator_user_context_text(self):
+        self._agent_operator_context_flush()
+        chunks = []
+        for name in self._agent_operator_context_files():
+            text = self._agent_operator_context_read(name).strip()
+            if text:
+                chunks.append(f"# {name}\n{text}")
+        return "\n\n".join(chunks)
+
     def agent_operator_preview_monitor(self):
         if not self._ensure_agent_operator():
             return
@@ -5062,6 +5339,8 @@ class HelperOverlay:
         model = self._agent_operator_model()
         reasoning = (self.agent_operator_reason_var.get() if self.agent_operator_reason_var else "medium").strip().lower() or None
         attachments = self._agent_operator_attachment_snapshot()
+        user_context = self._agent_operator_user_context_text()
+        context_count = len([name for name in self._agent_operator_context_files() if self._agent_operator_context_read(name).strip()])
         shell_enabled = bool(self.agent_operator_shell_var and self.agent_operator_shell_var.get())
         codex_enabled = bool(self.agent_operator_codex_var and self.agent_operator_codex_var.get())
         if codex_enabled:
@@ -5075,7 +5354,7 @@ class HelperOverlay:
         self._agent_operator_log_line("step", f"[{self._ts()}] START\n")
         self._agent_operator_log_line(
             "dim",
-            f"task={task!r} monitor={monitor.label} model={model} reasoning={reasoning} max_steps={steps} attachments={len(attachments)} shell={'on' if shell_enabled else 'off'} backend={backend}\n\n",
+            f"task={task!r} monitor={monitor.label} model={model} reasoning={reasoning} max_steps={steps} attachments={len(attachments)} prompts={context_count} shell={'on' if shell_enabled else 'off'} backend={backend}\n\n",
         )
         self.agent_operator_status_var.set("Running")
         self.agent_operator_stop_requested = False
@@ -5093,12 +5372,29 @@ class HelperOverlay:
                 reasoning_effort=reasoning,
                 mid_screenshots="key",
                 attachments=attachments,
+                user_context=user_context,
             )
             self._agent_operator_sync_buttons()
         except TypeError:
-            self._agent_operator_control_show(monitor)
-            self.agent_operator_loop.start(task, monitor, model=model, max_steps=steps, action_delay=delay)
-            self._agent_operator_sync_buttons()
+            try:
+                self._agent_operator_control_show(monitor)
+                self.agent_operator_loop.start(
+                    task,
+                    monitor,
+                    model=model,
+                    max_steps=steps,
+                    action_delay=delay,
+                    shell_enabled=shell_enabled,
+                    backend=backend,
+                    reasoning_effort=reasoning,
+                    mid_screenshots="key",
+                    attachments=attachments,
+                )
+                self._agent_operator_sync_buttons()
+            except TypeError:
+                self._agent_operator_control_show(monitor)
+                self.agent_operator_loop.start(task, monitor, model=model, max_steps=steps, action_delay=delay)
+                self._agent_operator_sync_buttons()
         except Exception as exc:
             self.agent_operator_stop_requested = False
             self._agent_operator_control_stop()
@@ -5203,9 +5499,135 @@ class HelperOverlay:
             self.agent_operator_log.configure(state="disabled")
         except tk.TclError:
             pass
+        try:
+            self._phone_mirror_reset()
+        except Exception:
+            pass
+
+    def _phone_mirror_dir(self):
+        path = BASE_DIR / "phone_operator_events"
+        try:
+            path.mkdir(exist_ok=True)
+            (path / "frames").mkdir(exist_ok=True)
+        except OSError:
+            pass
+        return path
+
+    def _phone_mirror_reset(self):
+        root = self._phone_mirror_dir()
+        events = root / "events.jsonl"
+        frames = root / "frames"
+        try:
+            events.write_bytes(b"")
+        except OSError:
+            pass
+        try:
+            for child in frames.glob("frame-*.jpg"):
+                try:
+                    child.unlink()
+                except OSError:
+                    pass
+        except OSError:
+            pass
+        self._phone_mirror_seq = 0
+        # Marker event so the phone knows a fresh run started
+        self._phone_mirror_write({"type": "run_start", "ts": time.time()})
+
+    def _phone_mirror_write(self, payload):
+        root = self._phone_mirror_dir()
+        line = json.dumps(payload, ensure_ascii=False, default=str) + "\n"
+        try:
+            with (root / "events.jsonl").open("ab") as fh:
+                fh.write(line.encode("utf-8", "ignore"))
+        except OSError:
+            pass
+
+    def _phone_mirror_save_frame(self, image):
+        if image is None:
+            return None
+        try:
+            seq = getattr(self, "_phone_mirror_seq", 0) + 1
+            self._phone_mirror_seq = seq
+            path = self._phone_mirror_dir() / "frames" / f"frame-{seq}.jpg"
+            img = image
+            try:
+                if img.mode != "RGB":
+                    img = img.convert("RGB")
+            except Exception:
+                pass
+            # Cap dimension so frames stay servable
+            try:
+                w, h = img.size
+                cap = 1800
+                if max(w, h) > cap:
+                    if w >= h:
+                        img = img.resize((cap, int(h * cap / w)))
+                    else:
+                        img = img.resize((int(w * cap / h), cap))
+            except Exception:
+                pass
+            img.save(path, format="JPEG", quality=80, optimize=True)
+            return seq
+        except Exception:
+            return None
+
+    def _phone_mirror_event(self, event):
+        kind = event.get("type") if isinstance(event, dict) else None
+        if not kind:
+            return
+        record = {"type": kind, "ts": time.time()}
+        if kind == "step_begin":
+            record["n"] = event.get("n")
+        elif kind == "screenshot":
+            seq = self._phone_mirror_save_frame(event.get("image"))
+            if seq is None:
+                return
+            record["frame"] = seq
+        elif kind == "thought":
+            record["thought"] = (event.get("thought") or "").strip()
+            record["say"] = (event.get("say") or "").strip()
+            record["message"] = (event.get("message") or "").strip()
+            record["actions"] = len(event.get("actions") or [])
+            record["status"] = event.get("status")
+            record["elapsed_ms"] = event.get("elapsed_ms")
+        elif kind == "action_done":
+            result = event.get("result") or {}
+            atype = (result.get("action") or {}).get("type") or "?"
+            record["ok"] = bool(result.get("ok"))
+            record["action"] = atype
+            record["detail"] = (result.get("detail") or "")[:600]
+            record["elapsed_ms"] = result.get("elapsed_ms")
+            output = (result.get("output") or "")[:1200]
+            if output:
+                record["output"] = output
+        elif kind == "click_fx":
+            record["x"] = event.get("x")
+            record["y"] = event.get("y")
+            record["button"] = event.get("button", "left")
+        elif kind == "step_end":
+            r = event.get("record") or {}
+            record["n"] = r.get("n")
+            record["think_ms"] = r.get("think_ms")
+            record["act_ms"] = r.get("act_ms")
+            record["actions"] = len(r.get("results") or [])
+        elif kind == "done":
+            record["ok"] = bool(event.get("ok"))
+            record["steps"] = event.get("steps")
+            record["message"] = event.get("message", "")
+        elif kind == "ask":
+            record["message"] = event.get("message", "")
+        elif kind == "log":
+            record["msg"] = event.get("msg", "")
+        else:
+            return
+        self._phone_mirror_write(record)
 
     def _agent_operator_enqueue(self, event):
         self.agent_operator_event_q.put(event)
+        try:
+            self._phone_mirror_event(event)
+        except Exception:
+            pass
 
     def _poll_agent_operator_events(self):
         try:
@@ -7697,6 +8119,7 @@ class HelperOverlay:
         self.update_usage_badges()
 
     def _stop_background_work(self):
+        self._agent_operator_context_flush()
         if self.screen_record_process and self.screen_record_process.poll() is None:
             self.stop_screen_recording()
         if self.quick_process and self.quick_process.poll() is None:
@@ -8028,6 +8451,7 @@ class HelperOverlay:
 
     def _on_root_destroy(self, event):
         if event.widget is self.root:
+            self._agent_operator_context_flush()
             if self.agent_operator_loop and self.agent_operator_loop.is_running():
                 try:
                     self.agent_operator_loop.stop()
@@ -8066,10 +8490,20 @@ class HelperOverlay:
             pass
 
     def _play_startup_sound(self):
-        if not STARTUP_SOUND_PATH.exists() or not sys.platform.startswith("win"):
+        self._play_wav_async(STARTUP_SOUND_PATH)
+
+    def _play_operator_sound(self):
+        now = time.perf_counter()
+        if now - self._operator_sound_last_at < 1.5:
+            return
+        self._operator_sound_last_at = now
+        self._play_wav_async(OPERATOR_SOUND_PATH)
+
+    def _play_wav_async(self, path):
+        if not path.exists() or not sys.platform.startswith("win"):
             return
         try:
-            escaped = str(STARTUP_SOUND_PATH).replace("'", "''")
+            escaped = str(path).replace("'", "''")
             command = (
                 f"$p = New-Object System.Media.SoundPlayer -ArgumentList '{escaped}'; "
                 "$p.PlaySync()"
@@ -8347,15 +8781,197 @@ class HelperOverlay:
             while True:
                 conn, _addr = server.accept()
                 with conn:
-                    command = conn.recv(128).decode("utf-8", "ignore").strip()
-                if command == "toggle":
-                    self.root.after(0, self.toggle)
-                elif command == "show":
-                    self.root.after(0, self.show)
-                elif command == "hide":
-                    self.root.after(0, self.hide)
-                elif command == "quit":
-                    self.root.after(0, self.root.destroy)
+                    chunks = []
+                    while True:
+                        chunk = conn.recv(4096)
+                        if not chunk:
+                            break
+                        chunks.append(chunk)
+                        if sum(len(part) for part in chunks) > 65536:
+                            break
+                    command = b"".join(chunks).decode("utf-8", "ignore").strip()
+                self._handle_remote_command(command)
+
+    def _handle_remote_command(self, command):
+        if not command:
+            return
+        if command == "toggle":
+            self.root.after(0, self.toggle)
+            return
+        if command == "show":
+            self.root.after(0, self.show)
+            return
+        if command == "hide":
+            self.root.after(0, self.hide)
+            return
+        if command == "quit":
+            self.root.after(0, self.root.destroy)
+            return
+        try:
+            payload = json.loads(command)
+        except json.JSONDecodeError:
+            return
+        action = str(payload.get("action") or "").strip().lower()
+        text = str(payload.get("text") or "").strip()
+        options = payload.get("options") if isinstance(payload.get("options"), dict) else None
+        if not text and action not in {"phone_start", "phone_stop", "reload_operator_settings"}:
+            return
+        if action == "chat":
+            self.root.after(0, lambda value=text: self._remote_submit_chat(value))
+        elif action == "operator":
+            self.root.after(0, lambda value=text, opts=options: self._remote_submit_operator(value, opts))
+        elif action == "phone_start":
+            self.root.after(0, lambda value=text: self._phone_control_show(value))
+        elif action == "phone_stop":
+            self.root.after(0, self._phone_control_hide)
+        elif action == "reload_operator_settings":
+            self.root.after(0, lambda opts=options: self._remote_apply_operator_options(opts or {}))
+        elif action == "operator_stop":
+            self.root.after(0, self._remote_operator_stop)
+
+    def _remote_submit_chat(self, text):
+        self._phone_control_show("AIOS")
+        self.show()
+        if hasattr(self, "input"):
+            self.input.delete("1.0", "end")
+            self.input.insert("1.0", text)
+            self.send()
+
+    def _remote_submit_operator(self, text, options=None):
+        self._phone_control_show("OPERATOR")
+        self.show()
+        self.render_tab("AI Operator")
+        self._remote_submit_operator_attempt(text, options, attempts_left=80)
+
+    def _remote_submit_operator_attempt(self, text, options, attempts_left):
+        ready = False
+        try:
+            ready = bool(self._ensure_agent_operator()) and bool(getattr(self, "agent_operator_task", None))
+        except Exception:
+            ready = False
+        if not ready and attempts_left > 0:
+            self.root.after(150, lambda: self._remote_submit_operator_attempt(text, options, attempts_left - 1))
+            return
+        if not ready:
+            return
+        try:
+            if options:
+                self._remote_apply_operator_options(options, run=False)
+            self.agent_operator_task.delete("1.0", "end")
+            self.agent_operator_task.insert("1.0", text)
+            self.agent_operator_run()
+        except Exception:
+            pass
+
+    def _remote_operator_stop(self):
+        try:
+            if self.agent_operator_loop and self.agent_operator_loop.is_running():
+                self.agent_operator_stop()
+        except Exception:
+            pass
+
+    def _remote_apply_operator_options(self, options, run=False):
+        if not isinstance(options, dict):
+            return
+        try:
+            self._ensure_agent_operator()
+        except Exception:
+            return
+        settings = dict(self.config.get("ai_operator") or DEFAULT_CONFIG["ai_operator"])
+        mapping = {
+            "monitor": ("agent_operator_monitor_var", str),
+            "model": ("agent_operator_model_var", str),
+            "reasoning": ("agent_operator_reason_var", str),
+            "steps": ("agent_operator_steps_var", str),
+            "delay": ("agent_operator_delay_var", str),
+            "tts": ("agent_operator_tts_var", bool),
+            "voice": ("agent_operator_voice_var", str),
+            "shell": ("agent_operator_shell_var", bool),
+            "codex_auth": ("agent_operator_codex_var", bool),
+        }
+        for key, (attr, cast) in mapping.items():
+            if key not in options:
+                continue
+            value = options[key]
+            try:
+                value = cast(value) if cast is not bool else bool(value)
+            except Exception:
+                continue
+            settings[key] = value
+            var = getattr(self, attr, None)
+            if var is not None:
+                try:
+                    var.set(value)
+                except Exception:
+                    pass
+        self.config["ai_operator"] = merge_dict(DEFAULT_CONFIG["ai_operator"], settings)
+        try:
+            self.agent_operator_settings = self.config["ai_operator"]
+        except Exception:
+            pass
+        try:
+            save_config(self.config)
+        except Exception:
+            pass
+
+    def _phone_control_monitor(self):
+        try:
+            if self._ensure_agent_operator():
+                monitor = self._agent_operator_selected_monitor()
+                if monitor:
+                    return monitor
+        except Exception:
+            pass
+
+        class MonitorBounds:
+            pass
+
+        monitor = MonitorBounds()
+        monitor.left = 0
+        monitor.top = 0
+        monitor.width = max(1, self.root.winfo_screenwidth())
+        monitor.height = max(1, self.root.winfo_screenheight())
+        return monitor
+
+    def _phone_control_show(self, target=""):
+        target = str(target or "").strip().upper()
+        if target:
+            self.phone_control_log = f"iPhone connected\nTarget: {target}"
+        else:
+            self.phone_control_log = "iPhone connected"
+        self.phone_control_deadline = time.perf_counter() + 18.0
+        self.phone_control_visible = True
+        monitor = self._phone_control_monitor()
+        if self.phone_control_native_overlay:
+            self.phone_control_native_overlay.show(monitor)
+            self.phone_control_native_overlay.set_log(self.phone_control_log)
+        if self.phone_control_after is None:
+            self._phone_control_tick()
+
+    def _phone_control_tick(self):
+        self.phone_control_after = None
+        if not self.phone_control_visible:
+            return
+        if time.perf_counter() > self.phone_control_deadline:
+            self._phone_control_hide()
+            return
+        self.phone_control_pulse = (self.phone_control_pulse + 1) % 80
+        wave = abs(40 - self.phone_control_pulse) / 40
+        if self.phone_control_native_overlay:
+            self.phone_control_native_overlay.update(wave)
+            self.phone_control_native_overlay.set_log(self.phone_control_log)
+        self.phone_control_after = self.root.after(110, self._phone_control_tick)
+
+    def _phone_control_hide(self):
+        self.phone_control_visible = False
+        if self.phone_control_native_overlay:
+            self.phone_control_native_overlay.hide()
+        if self.phone_control_after is not None:
+            try:
+                self.root.after_cancel(self.phone_control_after)
+            except tk.TclError:
+                pass
+            self.phone_control_after = None
 
     def _enable_file_drop(self):
         if os.name != "nt":
