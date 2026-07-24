@@ -2611,25 +2611,9 @@ $("#stopBtn").addEventListener("click", async () => {
 });
 
 $("#clearChatBtn").addEventListener("click", async () => {
-  const machine = currentMachine();
-  if (!machine || !window.confirm("Clear this computer's activity?")) return;
-  const button = $("#clearChatBtn");
-  button.disabled = true;
-  try {
-    await api(`/api/machines/${encodeURIComponent(machine.id)}/events`, { method: "DELETE" });
-    state.feedVersion += 1;
-    state.cursor = 0;
-    saveCursor();
-    closeRun("ended");
-    state.viewingRunId = "";
-    $("#historyBanner").classList.add("hidden");
-    resetTimeline("Cleared. Ask your computer to do something.");
-    toast("Timeline cleared — earlier runs are still in History");
-  } catch (error) {
-    toast(error.message);
-  } finally {
-    button.disabled = false;
-  }
+  if (!currentMachine()) return;
+  buzz();
+  await beginSession(true);
 });
 
 $("#historyBtn").addEventListener("click", () => {
