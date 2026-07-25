@@ -639,13 +639,17 @@ async function refreshFrame() {
     if (!response.ok) { updateLive(); return; }
     const updatedAt = Number(response.headers.get("x-aios-updated-at") || 0);
     const sequence = Number(response.headers.get("x-aios-frame-seq") || 0);
-    const stamp = `${updatedAt || ""}:${sequence}`;
-    if (stamp && stamp === state.frameStamp) { updateLive(); return; }
-    if (sequence && sequence <= state.frameSeq) { updateLive(); return; }
-    if (!sequence && updatedAt && updatedAt <= state.frameUpdatedAt) { updateLive(); return; }
+    // Skip work only when the relay actually tells us the frame is unchanged.
+    // A relay that reports neither header must never freeze the picture.
+    if (updatedAt || sequence) {
+      const stamp = `${updatedAt || ""}:${sequence}`;
+      if (stamp === state.frameStamp) { updateLive(); return; }
+      if (sequence && sequence <= state.frameSeq) { updateLive(); return; }
+      if (!sequence && updatedAt <= state.frameUpdatedAt) { updateLive(); return; }
+      state.frameStamp = stamp;
+    }
     const blob = await response.blob();
     if (machine.id !== state.machineId) return;
-    state.frameStamp = stamp;
     if (sequence) state.frameSeq = sequence;
     if (updatedAt) state.frameUpdatedAt = updatedAt;
     state.frameAt = Date.now();
@@ -680,7 +684,166 @@ function updateLive() {
   $("#livePill").classList.toggle("on", fresh);
   const uplink = Number(machine?.status?.stream?.fps || 0);
   const fps = state.displayFps || uplink;
-  $("#liveText").textContent = fresh ? `${fps.toFixed(1)} FPS` : (machine?.online ? "CONNECTING" : "OFFLINE");
+  const error = String(machine?.status?.stream?.error || "").trim();
+  $("#liveText").textContent = fresh
+    ? `${fps.toFixed(1)} FPS`
+    : !machine?.online ? "OFFLINE" : error ? "NO SIGNAL" : "CONNECTING";
+  if (!fresh) {
+    // Say why the picture is missing instead of spinning forever.
+    $("#screenPlaceholder").querySelector("span").textContent = !machine ? "Choose a computer"
+      : !machine.online ? "That computer is offline"
+      : error ? `Screen capture failed — ${error}`
+      : "Waiting for the first screenshot";
+  }
+}
+
+/* ── operator screenshots ─────────────────────────────── */
+
+/* Every step screenshot the model was given is published by the bridge and
+   pulled in here, so the timeline shows the real input and the exact spot
+   OPERATOR clicked — not just a line of text about it. */
+const shots = { cache: new Map(), order: [], observer: null };
+
+function shotObserver() {
+  if (shots.observer || !("IntersectionObserver" in window)) return shots.observer;
+  shots.observer = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue;
+      shots.observer.unobserve(entry.target);
+      loadShot(entry.target);
+    }
+  }, { root: $("#timeline"), rootMargin: "800px 0px" });
+  return shots.observer;
+}
+
+function dropShot(cacheKey) {
+  const record = shots.cache.get(cacheKey);
+  if (!record) return;
+  shots.cache.delete(cacheKey);
+  for (const node of record.nodes) {
+    if (!node.isConnected) continue;
+    node.removeAttribute("src");
+    node.classList.remove("ready");
+    // Timeline images reload when scrolled back to; an open fullscreen view
+    // has no observer root, so it refetches straight away.
+    if (node.closest("#timeline")) armShot(node);
+    else if (!$("#lightbox").classList.contains("hidden")) loadShot(node);
+  }
+  URL.revokeObjectURL(record.url);
+}
+
+async function shotUrl(key, machineId, node) {
+  const cacheKey = `${machineId}:${key}`;
+  const cached = shots.cache.get(cacheKey);
+  if (cached) {
+    if (node) cached.nodes.add(node);
+    return cached.url;
+  }
+  const path = `/api/machines/${encodeURIComponent(machineId)}/frame/${encodeURIComponent(key)}`;
+  const response = await fetch(apiUrl(path), { headers: { Authorization: `Bearer ${state.token}` } });
+  if (!response.ok) throw new Error(`Screenshot unavailable (${response.status})`);
+  const url = URL.createObjectURL(await response.blob());
+  const record = { url, nodes: new Set(node ? [node] : []) };
+  shots.cache.set(cacheKey, record);
+  shots.order = shots.order.filter((item) => item !== cacheKey);
+  shots.order.push(cacheKey);
+  while (shots.order.length > 60) dropShot(shots.order.shift());
+  return url;
+}
+
+function armShot(img) {
+  const observer = shotObserver();
+  if (observer) observer.observe(img);
+  else loadShot(img);
+}
+
+async function loadShot(img, attempt = 0) {
+  const key = img.dataset.shot;
+  const machineId = img.dataset.machine;
+  if (!key || !machineId) return;
+  try {
+    img.src = await shotUrl(key, machineId, img);
+    img.classList.add("ready");
+    img.closest(".shot")?.classList.remove("missing");
+  } catch (error) {
+    // The bridge uploads a screenshot while the event is already on its way,
+    // so a first miss usually just means "not there yet".
+    if (attempt < 4) {
+      setTimeout(() => loadShot(img, attempt + 1), 900 * (attempt + 1));
+      return;
+    }
+    img.closest(".shot")?.classList.add("missing");
+  }
+}
+
+/** Reserve the right box before the screenshot bytes arrive. */
+function shotRatio(payload) {
+  const width = Number(payload.shot_w || payload.width || 0);
+  const height = Number(payload.shot_h || payload.height || 0);
+  return width > 0 && height > 0 ? `${width} / ${height}` : "";
+}
+
+/** Where a click landed inside its screenshot, as a percentage of the frame. */
+function clickPoint(payload) {
+  const x = Number(payload.x);
+  const y = Number(payload.y);
+  const width = Number(payload.width);
+  const height = Number(payload.height);
+  if (!Number.isFinite(x) || !Number.isFinite(y) || !width || !height) return null;
+  const left = ((x - Number(payload.left || 0)) / width) * 100;
+  const top = ((y - Number(payload.top || 0)) / height) * 100;
+  if (left < 0 || left > 100 || top < 0 || top > 100) return null;
+  return { left, top };
+}
+
+function shotCard(info) {
+  const figure = document.createElement("figure");
+  figure.className = "shot";
+  const img = document.createElement("img");
+  img.alt = info.point ? "Screenshot with the click marked" : "Screenshot given to OPERATOR";
+  img.decoding = "async";
+  img.dataset.shot = info.shot;
+  img.dataset.machine = state.machineId;
+  if (info.ratio) img.style.aspectRatio = info.ratio;
+  figure.appendChild(img);
+  if (info.point) {
+    const dot = document.createElement("span");
+    dot.className = "shot-dot";
+    dot.style.left = `${info.point.left}%`;
+    dot.style.top = `${info.point.top}%`;
+    figure.appendChild(dot);
+  }
+  figure.addEventListener("click", (event) => {
+    event.stopPropagation();
+    openLightbox(info);
+    buzz();
+  });
+  armShot(img);
+  return figure;
+}
+
+function openLightbox(info) {
+  const box = $("#lightbox");
+  const image = $("#lightboxImage");
+  const dot = $("#lightboxDot");
+  image.removeAttribute("src");
+  image.classList.remove("ready");
+  image.dataset.shot = info.shot;
+  image.dataset.machine = state.machineId;
+  image.style.aspectRatio = info.ratio || "";
+  $("#lightboxLabel").textContent = info.shotLabel || info.title || "Screenshot";
+  dot.classList.toggle("hidden", !info.point);
+  if (info.point) {
+    dot.style.left = `${info.point.left}%`;
+    dot.style.top = `${info.point.top}%`;
+  }
+  box.classList.remove("hidden");
+  loadShot(image);
+}
+
+function closeLightbox() {
+  $("#lightbox").classList.add("hidden");
+  $("#lightboxImage").removeAttribute("src");
 }
 
 /* ── timeline ─────────────────────────────────────────── */
@@ -729,7 +892,16 @@ function describe(event) {
     return { kind: "user", body: text(payload.message || payload.text || payload.prompt) };
   }
   if (type === "step_begin") return { kind: "step", step: payload.n };
-  if (type === "screenshot") return { kind: "entry", tone: "muted", glyph: "monitor", title: "Looked at the screen" };
+  if (type === "screenshot") {
+    const shot = text(payload.shot);
+    const step = payload.n ? ` · step ${payload.n}` : "";
+    if (!shot) return { kind: "entry", tone: "muted", glyph: "monitor", title: "Looked at the screen" };
+    return {
+      kind: "entry", tone: "shot", glyph: "monitor",
+      title: `Screen sent to the AI${step}`,
+      shot, ratio: shotRatio(payload), shotLabel: `Input screenshot${step}`
+    };
+  }
   if (type === "command") return { kind: "entry", tone: "muted", glyph: "bolt", title: "Task received" };
   if (type === "run_start") return { kind: "entry", tone: "muted", glyph: "bolt", title: text(payload.task) || "Task started" };
   if (type === "planning_begin") return { kind: "entry", tone: "think", glyph: "spark", title: `Planning with ${text(payload.model) || "planner"}` };
@@ -744,11 +916,17 @@ function describe(event) {
     return { kind: "entry", tone: "think muted", glyph: "spark", title: "Thinking", body: thought || message };
   }
   if (type === "click_fx") {
+    const button = text(payload.button) || "left";
+    const coords = `${Math.round(Number(payload.x))}, ${Math.round(Number(payload.y))}`;
     return {
       kind: "entry", tone: "click", glyph: "cursor",
-      title: `${text(payload.button) || "left"} click`,
-      mono: `${Math.round(Number(payload.x))}, ${Math.round(Number(payload.y))}`,
-      click: payload
+      title: `${button} click`,
+      mono: coords,
+      click: payload,
+      shot: text(payload.shot),
+      ratio: shotRatio(payload),
+      point: clickPoint(payload),
+      shotLabel: `${button} click at ${coords}`
     };
   }
   if (type === "action_done") {
@@ -871,6 +1049,7 @@ function addEvent(event, pending = false) {
       extra.textContent = info.extra;
       body.appendChild(extra);
     }
+    if (info.shot) body.appendChild(shotCard(info));
     entry.append(badge, body);
     if (info.click) {
       entry.addEventListener("click", () => {
@@ -1583,6 +1762,15 @@ $$(".sugg").forEach((button) => button.addEventListener("click", () => {
   scheduleClarification();
   $("#promptInput").focus();
 }));
+
+$("#lightbox").addEventListener("click", (event) => {
+  if (event.target.closest(".lightbox-shot")) return;
+  closeLightbox();
+});
+$("#lightboxClose").addEventListener("click", closeLightbox);
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !$("#lightbox").classList.contains("hidden")) closeLightbox();
+});
 
 $("#micBtn").addEventListener("click", () => (recognition ? stopDictation() : startDictation()));
 $("#micStopBtn").addEventListener("click", stopDictation);

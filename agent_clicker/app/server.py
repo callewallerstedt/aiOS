@@ -595,7 +595,30 @@ def api_phone_operator_frame(frame_id):
     path = OPERATOR_FRAMES_DIR / f"frame-{frame_id}.jpg"
     if not path.exists():
         return jsonify({"error": "not found"}), 404
-    return Response(path.read_bytes(), mimetype="image/jpeg", headers={"Cache-Control": "public, max-age=3600"})
+    headers = {"Cache-Control": "public, max-age=3600"}
+    # The remote bridge asks for a phone-sized copy before uploading a step
+    # screenshot to the relay, so a run never pushes full-resolution JPEGs.
+    try:
+        max_dim = int(request.args.get("max") or 0)
+        quality = int(request.args.get("q") or 0)
+    except (TypeError, ValueError):
+        max_dim = quality = 0
+    if max_dim or quality:
+        max_dim = max(240, min(1920, max_dim or 1280))
+        quality = max(30, min(92, quality or 62))
+        try:
+            with Image.open(path) as img:
+                img = img.convert("RGB")
+                width, height = img.size
+                if max(width, height) > max_dim:
+                    scale = max_dim / max(width, height)
+                    img = img.resize((max(1, int(width * scale)), max(1, int(height * scale))))
+                buffer = io.BytesIO()
+                img.save(buffer, format="JPEG", quality=quality, optimize=True)
+            return Response(buffer.getvalue(), mimetype="image/jpeg", headers=headers)
+        except Exception:
+            pass
+    return Response(path.read_bytes(), mimetype="image/jpeg", headers=headers)
 
 
 @app.route("/api/phone/screen")

@@ -379,8 +379,64 @@ h3 { font-size: 17px; letter-spacing: -.02em; font-weight: 700; margin: 0 0 16px
 .entry.muted .entry-title strong { font-size: 11.5px; font-weight: 500; color: var(--text-3); }
 .entry.muted .entry-body { padding-top: 1px; }
 
-/* "Key" filter — drop the low-signal noise, keep the story. */
+/* screenshots in the timeline */
+.entry.shot .entry-icon { background: var(--surface-2); color: var(--text-2); }
+.shot {
+  position: relative; margin: 8px 0 2px; border-radius: 12px; overflow: hidden;
+  background: var(--surface-2); border: 1px solid var(--line);
+  line-height: 0; cursor: zoom-in;
+}
+/* The frame hugs the screenshot exactly, so a click marker placed by
+   percentage lands on the same pixel the model clicked. */
+.shot img {
+  display: block; width: 100%; height: auto;
+  opacity: 0; transition: opacity .18s ease;
+}
+.shot img.ready { opacity: 1; }
+.shot::after {
+  content: ""; position: absolute; inset: 0; pointer-events: none;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .04);
+}
+.shot.missing { display: grid; place-items: center; min-height: 54px; }
+.shot.missing img { display: none; }
+.shot.missing::before {
+  content: "Screenshot not available"; color: var(--text-3); font-size: 11.5px;
+}
+.entry.click .shot { cursor: zoom-in; }
+.shot-dot {
+  position: absolute; width: 16px; height: 16px; margin: -8px 0 0 -8px; border-radius: 50%;
+  background: var(--red); border: 2px solid #fff;
+  box-shadow: 0 0 0 3px rgba(255, 59, 59, .35), 0 0 18px rgba(255, 59, 59, .75);
+  pointer-events: none;
+}
+.shot-dot::before {
+  content: ""; position: absolute; top: 50%; left: 50%;
+  width: 16px; height: 16px; margin: -8px 0 0 -8px;
+  border: 2px solid var(--red); border-radius: 50%;
+  animation: ripple 1.6s cubic-bezier(.2, .7, .3, 1) 3;
+}
+
+/* fullscreen screenshot */
+.lightbox {
+  position: fixed; inset: 0; z-index: 90; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 12px; padding: 16px;
+  padding-bottom: calc(16px + env(safe-area-inset-bottom));
+  background: rgba(0, 0, 0, .92); animation: fade .16s ease;
+}
+.lightbox.hidden { display: none; }
+.lightbox-shot { position: relative; margin: 0; max-width: 100%; max-height: 78vh; line-height: 0; }
+.lightbox-shot img {
+  max-width: 100%; max-height: 78vh; border-radius: 10px;
+  opacity: 0; transition: opacity .18s ease;
+}
+.lightbox-shot img.ready { opacity: 1; }
+.lightbox-bar { display: flex; align-items: center; gap: 12px; color: var(--text-2); font-size: 12px; }
+.lightbox-bar .chip { pointer-events: auto; }
+
+/* "Key" filter — drop the low-signal noise, keep the story. Click shots stay:
+   they are the record of what OPERATOR actually did. */
 .timeline.lean .entry.muted,
+.timeline.lean .entry.shot,
 .timeline.lean .step-rule { display: none; }
 .timeline.lean .entry .mono { display: none; }
 

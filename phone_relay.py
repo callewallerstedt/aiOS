@@ -38,6 +38,10 @@ MODEL_MAP = {
     "terra": "gpt-5.6-terra",
     "sol": "gpt-5.6-sol",
 }
+# Step screenshots rotate through this many key spaces so a fresh run never
+# overwrites the images an older conversation is still displaying.
+SHOT_SLOTS = 6
+MAX_SHOT_UPLOADS_PER_TICK = 4
 RELAY_MUTEX_NAME = "Local\\aiOS.PhoneRelay.Singleton"
 _RELAY_MUTEX_HANDLE = None
 
@@ -278,6 +282,11 @@ class Bridge:
         self.monitors = []
         self.backoff = 1.0
         self.frame_streamer = FrameStreamer(self)
+        # Step screenshots published to the relay for the phone timeline.
+        self.shot_keys = {}
+        self.shot_slot = self.load_shot_slot()
+        self.shot_uploads = concurrent.futures.ThreadPoolExecutor(
+            max_workers=2, thread_name_prefix="aios-shot-upload")
 
     def load_cursor(self) -> int:
         try:
@@ -299,13 +308,73 @@ class Bridge:
         except (OSError, json.JSONDecodeError):
             state = {}
         machines = state.setdefault("machines", {})
-        machines[self.machine_id] = {"log_cursor": int(self.log_cursor), "updated_at": int(time.time() * 1000)}
+        machines[self.machine_id] = {
+            "log_cursor": int(self.log_cursor),
+            "shot_slot": int(self.shot_slot),
+            "updated_at": int(time.time() * 1000),
+        }
         temp = STATE_PATH.with_suffix(".json.tmp")
         try:
             temp.write_text(json.dumps(state, indent=2), encoding="utf-8")
             temp.replace(STATE_PATH)
         except OSError:
             pass
+
+    def load_shot_slot(self) -> int:
+        try:
+            state = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+            return int((state.get("machines") or {}).get(self.machine_id, {}).get("shot_slot", 0)) % SHOT_SLOTS
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return 0
+
+    def begin_shot_run(self) -> None:
+        """Rotate the key space so a new run cannot overwrite the screenshots
+        the phone is still showing for the previous one."""
+        self.shot_slot = (self.shot_slot + 1) % SHOT_SLOTS
+        self.shot_keys = {}
+        self.save_cursor()
+
+    def publish_shot(self, frame: int) -> str:
+        """Start publishing one operator screenshot and return its future key.
+
+        Reuses the relay's existing frame object store, so no hosted deploy is
+        required for the phone to render what the model actually looked at.
+        The upload runs off the polling thread — a slow one must never delay
+        the next command, least of all a Stop.
+        """
+        cached = self.shot_keys.get(frame)
+        if cached is not None:
+            return cached
+        key = f"shot-{self.shot_slot}-{frame}"[:32]
+        self.shot_keys[frame] = key
+        if len(self.shot_keys) > 400:
+            for stale in sorted(self.shot_keys)[:200]:
+                self.shot_keys.pop(stale, None)
+        relay_url, headers = self.relay_url, dict(self.headers)
+
+        def upload():
+            try:
+                image = request_bytes(
+                    f"{LOCAL_BASE}/api/phone/operator/frame/{int(frame)}?max=1280&q=62",
+                    timeout=8,
+                )
+                if not image:
+                    return
+                request_bytes(
+                    f"{relay_url}/api/agent/frame/{urllib.parse.quote(key, safe='')}",
+                    method="PUT",
+                    data=image,
+                    headers={**headers, "Content-Type": "image/jpeg", "X-aiOS-Frame-Seq": str(frame)},
+                    timeout=20,
+                )
+            except Exception as exc:
+                print(f"[{time.strftime('%H:%M:%S')}] shot {key}: {exc}", file=sys.stderr, flush=True)
+
+        try:
+            self.shot_uploads.submit(upload)
+        except RuntimeError:
+            return ""
+        return key
 
     def reload_pairing(self) -> bool:
         """Adopt a newly paired machine key without restarting the daemon."""
@@ -326,6 +395,8 @@ class Bridge:
         self.last_status_at = 0.0
         self.last_monitors_at = 0.0
         self.monitors = []
+        self.shot_keys = {}
+        self.shot_slot = self.load_shot_slot()
         print(f"aiOS Remote bridge switched to pairing {machine_id}", flush=True)
         return True
 
@@ -466,12 +537,27 @@ class Bridge:
         self.log_cursor = int(data.get("size") or self.log_cursor)
         self.save_cursor()
         output = []
+        uploads = 0
         for item in data.get("events") or []:
             if not isinstance(item, dict):
                 continue
+            kind = str(item.get("type") or "log")
+            if kind == "run_start":
+                self.begin_shot_run()
+            try:
+                frame = int(item.get("frame") or 0)
+            except (TypeError, ValueError):
+                frame = 0
+            if frame > 0:
+                key = self.shot_keys.get(frame)
+                if key is None and uploads < MAX_SHOT_UPLOADS_PER_TICK:
+                    uploads += 1
+                    key = self.publish_shot(frame)
+                if key:
+                    item["shot"] = key
             created = float(item.get("ts") or time.time())
             output.append({
-                "type": str(item.get("type") or "log"),
+                "type": kind,
                 "payload": item,
                 "created_at": int(created * 1000) if created < 10_000_000_000 else int(created),
             })
@@ -548,6 +634,7 @@ class Bridge:
                     self.backoff = min(20.0, self.backoff * 1.7)
         finally:
             self.frame_streamer.stop()
+            self.shot_uploads.shutdown(wait=False, cancel_futures=True)
 
 
 def main() -> int:

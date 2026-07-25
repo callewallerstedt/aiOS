@@ -205,6 +205,17 @@
 <!-- ───────────────────────── SHEETS ───────────────────────── -->
 <div id="backdrop" class="backdrop hidden"></div>
 
+<div id="lightbox" class="lightbox hidden" role="dialog" aria-modal="true" aria-label="Screenshot">
+  <figure id="lightboxFigure" class="lightbox-shot">
+    <img id="lightboxImage" alt="Screenshot OPERATOR worked from">
+    <span id="lightboxDot" class="shot-dot hidden"></span>
+  </figure>
+  <div class="lightbox-bar">
+    <span id="lightboxLabel"></span>
+    <button id="lightboxClose" class="chip" type="button">Close</button>
+  </div>
+</div>
+
 <section id="machineSheet" class="sheet hidden" role="dialog" aria-modal="true">
   <div class="grabber"></div>
   <h3>Your computers</h3>

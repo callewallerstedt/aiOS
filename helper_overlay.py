@@ -5671,15 +5671,29 @@ class HelperOverlay:
             return "break"
         if self.agent_operator_loop.is_running():
             self.agent_operator_status_var.set("Already running")
+            self._phone_mirror_write({
+                "type": "error", "ts": time.time(), "title": "Already running",
+                "message": "A task is already in progress — send this as a follow-up, or stop the run first.",
+            })
+            # Also repairs a phone that thought the run had ended.
+            self._phone_mirror_set_running()
             return "break"
         task = self.agent_operator_task.get("1.0", "end").strip() if self.agent_operator_task else ""
         if not task:
             self.agent_operator_status_var.set("Task missing")
+            self._phone_mirror_fail("The task text never reached this PC.", "task_missing")
             return "break"
         monitor = self._agent_operator_selected_monitor()
         if not monitor:
             self.agent_operator_status_var.set("No monitor")
+            self._phone_mirror_fail("No display is available to control.", "no_monitor")
             return "break"
+        self._phone_mirror_monitor = {
+            "left": int(getattr(monitor, "left", 0)),
+            "top": int(getattr(monitor, "top", 0)),
+            "width": int(getattr(monitor, "width", 0)),
+            "height": int(getattr(monitor, "height", 0)),
+        }
         try:
             steps = max(1, min(200, int(float(self.agent_operator_steps_var.get()))))
         except (TypeError, ValueError):
@@ -5710,12 +5724,16 @@ class HelperOverlay:
             if not codex_available:
                 self._agent_operator_log_line("err", f"Codex auth unavailable: {codex_message}\n")
                 self.agent_operator_status_var.set("Codex auth unavailable")
+                self._phone_mirror_fail(f"Codex auth unavailable: {codex_message}", "codex_unavailable")
                 return "break"
             backend = "codex"
         elif provider_mode == "api":
             if not key_available:
                 self._agent_operator_log_line("err", "OpenAI API key is not configured.\n")
                 self.agent_operator_status_var.set("OpenAI API key required")
+                self._phone_mirror_fail(
+                    "No OpenAI API key is saved on this PC. Add one in Settings → AI provider.",
+                    "no_api_key")
                 return "break"
             backend = "api"
         else:
@@ -5727,6 +5745,9 @@ class HelperOverlay:
             else:
                 self._agent_operator_log_line("err", "Codex is unavailable and no API fallback is configured.\n")
                 self.agent_operator_status_var.set("No AI provider available")
+                self._phone_mirror_fail(
+                    "Codex is unavailable and no API key fallback is configured.",
+                    "no_provider")
                 return "break"
         self._agent_operator_log_line("step", f"[{self._ts()}] START\n")
         self._agent_operator_log_line(
@@ -5779,7 +5800,10 @@ class HelperOverlay:
             self._agent_operator_control_stop()
             self._agent_operator_log_line("err", f"start failed: {exc}\n")
             self.agent_operator_status_var.set("Start failed")
+            self._phone_mirror_fail(f"Start failed: {exc}")
             self._agent_operator_sync_buttons()
+        if self.agent_operator_loop and self.agent_operator_loop.is_running():
+            self._phone_mirror_set_running()
         return "break"
 
     def agent_operator_stop(self):
@@ -5910,15 +5934,46 @@ class HelperOverlay:
         except OSError:
             pass
         self._phone_mirror_seq = 0
+        self._phone_mirror_last_frame = 0
         # Marker event so the phone knows a fresh run started
         self._phone_mirror_write({"type": "run_start", "ts": time.time(),
                                   "task": self.agent_operator_current_task})
+        # The run is only "running" once the loop actually starts. Claiming it
+        # here left the phone stuck on a phantom run whenever the start aborted
+        # (no monitor, no provider), which turned the next prompt into a
+        # follow-up for a run that was never alive.
+        self._phone_mirror_write_status(running=False)
+
+    def _phone_mirror_write_status(self, *, running, asking=False, last_question="", reason=""):
+        state = {
+            "ts": time.time(),
+            "running": bool(running),
+            "asking": bool(asking),
+            "last_question": last_question or "",
+            "task": self.agent_operator_current_task,
+        }
+        if reason:
+            state["reason"] = reason
         try:
-            (root / "status.json").write_text(
-                json.dumps({"ts": time.time(), "running": True, "asking": False,
-                            "last_question": "", "task": self.agent_operator_current_task}),
-                encoding="utf-8")
+            (self._phone_mirror_dir() / "status.json").write_text(
+                json.dumps(state, ensure_ascii=False), encoding="utf-8")
         except OSError:
+            pass
+
+    def _phone_mirror_set_running(self):
+        self._phone_mirror_write_status(running=True)
+
+    def _phone_mirror_fail(self, message, reason="start_failed"):
+        """Surface an aborted start on the phone instead of only in the GUI log."""
+        try:
+            self._phone_mirror_write({"type": "error", "ts": time.time(),
+                                      "title": "OPERATOR could not start",
+                                      "message": str(message)})
+        except Exception:
+            pass
+        try:
+            self._phone_mirror_write_status(running=False, reason=reason)
+        except Exception:
             pass
 
     def _phone_mirror_write(self, payload):
@@ -5929,6 +5984,12 @@ class HelperOverlay:
                 fh.write(line.encode("utf-8", "ignore"))
         except OSError:
             pass
+
+    def _phone_mirror_bounds(self):
+        """Capture rectangle of the running monitor, so the phone can place a
+        click marker on the exact screenshot the model was looking at."""
+        bounds = getattr(self, "_phone_mirror_monitor", None)
+        return dict(bounds) if isinstance(bounds, dict) else {}
 
     def _phone_mirror_save_frame(self, image):
         if image is None:
@@ -5955,6 +6016,7 @@ class HelperOverlay:
             except Exception:
                 pass
             img.save(path, format="JPEG", quality=80, optimize=True)
+            self._phone_mirror_last_frame = seq
             return seq
         except Exception:
             return None
@@ -5971,6 +6033,11 @@ class HelperOverlay:
             if seq is None:
                 return
             record["frame"] = seq
+            record["n"] = event.get("n")
+            size = event.get("size") or []
+            if len(size) == 2:
+                record["shot_w"], record["shot_h"] = int(size[0]), int(size[1])
+            record.update(self._phone_mirror_bounds())
         elif kind == "thought":
             record["thought"] = (event.get("thought") or "").strip()
             record["say"] = (event.get("say") or "").strip()
@@ -5997,6 +6064,12 @@ class HelperOverlay:
             record["x"] = event.get("x")
             record["y"] = event.get("y")
             record["button"] = event.get("button", "left")
+            # Point at the screenshot this click was decided from so the phone
+            # can show exactly where OPERATOR clicked.
+            frame = getattr(self, "_phone_mirror_last_frame", 0)
+            if frame:
+                record["frame"] = frame
+            record.update(self._phone_mirror_bounds())
         elif kind == "step_end":
             r = event.get("record") or {}
             record["n"] = r.get("n")
@@ -6686,15 +6759,7 @@ class HelperOverlay:
             pass
 
     def _phone_mirror_set_idle(self, reason=""):
-        root = self._phone_mirror_dir()
-        try:
-            (root / "status.json").write_text(
-                json.dumps({"ts": time.time(), "running": False, "asking": False,
-                            "last_question": "", "reason": reason}),
-                encoding="utf-8",
-            )
-        except OSError:
-            pass
+        self._phone_mirror_write_status(running=False, reason=reason)
 
     def pair_mobile_remote(self):
         url = self.mobile_remote_url_entry.get("1.0", "end").strip()
@@ -9794,13 +9859,28 @@ class HelperOverlay:
     def _remote_submit_operator_attempt(self, text, options, attempts_left):
         ready = False
         try:
-            ready = bool(self._ensure_agent_operator()) and bool(getattr(self, "agent_operator_task", None))
-        except Exception:
+            imported = bool(self._ensure_agent_operator())
+            if imported and not getattr(self, "agent_operator_task", None):
+                # OPERATOR finished loading while another tab was on screen, so
+                # its widgets — the ones the runner needs — were never built.
+                # Without this the phone's task waited for a page that would
+                # never render and was dropped without a word.
+                self.agent_operator_booting = False
+                self.agent_operator_booted = True
+                self.render_tab("AI Operator")
+            ready = imported and bool(getattr(self, "agent_operator_task", None))
+        except Exception as exc:
             ready = False
+            self.agent_operator_error = self.agent_operator_error or str(exc)
         if not ready and attempts_left > 0:
             self.root.after(150, lambda: self._remote_submit_operator_attempt(text, options, attempts_left - 1))
             return
         if not ready:
+            # Never fail quietly: the phone has no other way of learning that
+            # the task it sent was dropped on this PC.
+            self._phone_mirror_fail(
+                self.agent_operator_error or "OPERATOR did not finish loading on this PC.",
+                "operator_unavailable")
             return
         try:
             if options:
@@ -9808,8 +9888,8 @@ class HelperOverlay:
             self.agent_operator_task.delete("1.0", "end")
             self.agent_operator_task.insert("1.0", text)
             self.agent_operator_run()
-        except Exception:
-            pass
+        except Exception as exc:
+            self._phone_mirror_fail(f"Could not hand the task to OPERATOR: {exc}", "handoff_failed")
 
     def _remote_operator_stop(self):
         try:
