@@ -47,6 +47,7 @@ const state = {
   feedVersion: 0,
   model: prefs.get("aios_model", "luna"),
   plannerModel: prefs.get("aios_planner_model", "sol"),
+  lastPlannerModel: prefs.get("aios_planner_last_model", "sol"),
   effort: prefs.get("aios_effort", "low"),
   steps: Number(prefs.get("aios_steps", 30)),
   detailed: prefs.bool("aios_detailed", true),
@@ -239,6 +240,19 @@ function renderOptions(container, items, activeId, onPick) {
     }
     button.appendChild(text);
     if (item.id === activeId) button.appendChild(icon("check", "ic tick"));
+    button.addEventListener("click", () => { buzz(); onPick(item.id); });
+    container.appendChild(button);
+  }
+}
+
+function renderChoiceChips(container, items, activeId, onPick) {
+  container.replaceChildren();
+  for (const item of items) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `choice-chip${item.id === activeId ? " on" : ""}`;
+    button.textContent = item.name;
+    button.setAttribute("aria-pressed", item.id === activeId ? "true" : "false");
     button.addEventListener("click", () => { buzz(); onPick(item.id); });
     container.appendChild(button);
   }
@@ -956,44 +970,66 @@ $("#monitorBtn").addEventListener("click", () => {
   openSheet("monitorSheet");
 });
 
-function openModelSheet() {
-  renderOptions($("#modelOptions"), MODELS, state.model, (id) => {
+function runSettingsSummary() {
+  const clicker = labelOf(MODELS, state.model);
+  const planner = state.plannerModel === "off" ? "No plan" : `Plan ${labelOf(PLANNER_MODELS, state.plannerModel)}`;
+  return `${clicker} · ${planner}`;
+}
+
+function updateRunSettingsLabels() {
+  const summary = runSettingsSummary();
+  $("#runSettingsLabel").textContent = summary;
+  $("#settingsRunValue").textContent = summary;
+  $("#runModelValue").textContent = labelOf(MODELS, state.model);
+  $("#runEffortValue").textContent = labelOf(EFFORTS, state.effort);
+  $("#runPlannerValue").textContent = labelOf(PLANNER_MODELS, state.plannerModel === "off" ? state.lastPlannerModel : state.plannerModel);
+  $("#plannerToggle").checked = state.plannerModel !== "off";
+  $(".planner-section").classList.toggle("off", state.plannerModel === "off");
+}
+
+function renderRunSettings() {
+  renderChoiceChips($("#runModelOptions"), MODELS, state.model, (id) => {
     state.model = id;
     prefs.set("aios_model", id);
-    $("#modelLabel").textContent = labelOf(MODELS, id);
-    $("#settingsModelValue").textContent = labelOf(MODELS, id);
-    closeSheets();
+    renderRunSettings();
     renderMachine();
   });
-  openSheet("modelSheet");
-}
-
-function openEffortSheet() {
-  renderOptions($("#effortOptions"), EFFORTS, state.effort, (id) => {
+  renderChoiceChips($("#runEffortOptions"), EFFORTS, state.effort, (id) => {
     state.effort = id;
     prefs.set("aios_effort", id);
-    $("#effortLabel").textContent = labelOf(EFFORTS, id);
-    $("#settingsEffortValue").textContent = labelOf(EFFORTS, id);
-    closeSheets();
+    renderRunSettings();
   });
-  openSheet("effortSheet");
-}
-
-function openPlannerSheet() {
-  renderOptions($("#plannerOptions"), PLANNER_MODELS, state.plannerModel, (id) => {
+  const plannerChoices = PLANNER_MODELS.filter((item) => item.id !== "off");
+  const activePlanner = state.plannerModel === "off" ? state.lastPlannerModel : state.plannerModel;
+  renderChoiceChips($("#runPlannerOptions"), plannerChoices, activePlanner, (id) => {
     state.plannerModel = id;
+    state.lastPlannerModel = id;
     prefs.set("aios_planner_model", id);
-    $("#settingsPlannerValue").textContent = labelOf(PLANNER_MODELS, id);
-    closeSheets();
+    prefs.set("aios_planner_last_model", id);
+    renderRunSettings();
   });
-  openSheet("plannerSheet");
+  updateRunSettingsLabels();
 }
 
-$("#modelBtn").addEventListener("click", openModelSheet);
-$("#effortBtn").addEventListener("click", openEffortSheet);
-$("#settingsModelRow").addEventListener("click", openModelSheet);
-$("#settingsPlannerRow").addEventListener("click", openPlannerSheet);
-$("#settingsEffortRow").addEventListener("click", openEffortSheet);
+function openRunSettings() {
+  renderRunSettings();
+  openSheet("runSettingsSheet");
+}
+
+$("#plannerToggle").addEventListener("change", (event) => {
+  if (event.target.checked) {
+    state.plannerModel = state.lastPlannerModel || "sol";
+  } else {
+    if (state.plannerModel !== "off") state.lastPlannerModel = state.plannerModel;
+    state.plannerModel = "off";
+  }
+  prefs.set("aios_planner_model", state.plannerModel);
+  prefs.set("aios_planner_last_model", state.lastPlannerModel);
+  renderRunSettings();
+});
+
+$("#runSettingsBtn").addEventListener("click", openRunSettings);
+$("#settingsRunRow").addEventListener("click", openRunSettings);
 $("#settingsBtn").addEventListener("click", () => openSheet("settingsSheet"));
 $("#addMachineBtn").addEventListener("click", () => openSheet("pairSheet"));
 $("#emptyAddBtn").addEventListener("click", () => openSheet("pairSheet"));
@@ -1170,11 +1206,7 @@ if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catc
 
 /* ── boot ─────────────────────────────────────────────── */
 
-$("#modelLabel").textContent = labelOf(MODELS, state.model);
-$("#effortLabel").textContent = labelOf(EFFORTS, state.effort);
-$("#settingsModelValue").textContent = labelOf(MODELS, state.model);
-$("#settingsPlannerValue").textContent = labelOf(PLANNER_MODELS, state.plannerModel);
-$("#settingsEffortValue").textContent = labelOf(EFFORTS, state.effort);
+updateRunSettingsLabels();
 $("#stepsInput").value = state.steps;
 $("#wakeToggle").checked = state.keepAwake;
 $("#hapticToggle").checked = state.haptics;
