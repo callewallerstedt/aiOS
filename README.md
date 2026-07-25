@@ -79,14 +79,25 @@ Each PC gets its own machine credential. The phone can switch computers, send a 
 
 ## Updating
 
-Open **Settings → Update aiOS** inside the running helper. It:
+Open **Settings → Update aiOS** inside the running helper and press **Update & restart**. That one press does everything:
 
-- Compares your local SHA with `origin/main` on GitHub.
-- Pulls via `git` (or downloads the tarball if the install isn't a git clone).
+- Checks the latest commit on GitHub for the configured `owner/repo@branch` (no need to press Check first).
+- Pulls via `git fetch` + `git reset --hard` onto that commit — straight from the configured source, even if the clone's `origin` points somewhere stale.
+- Falls back to downloading the tarball automatically if `git` is missing or the fetch fails.
 - Reinstalls `requirements.txt`.
-- Restarts the helper.
+- Restarts the helper (tarball updates are swapped in by a small applier after the helper exits, because Windows holds the running files open).
 
-Sources (`owner` / `repo` / `branch`) live in `helper_config.json` under `update_source` and are editable in Settings or during the installer's first run. The default points at this repo's `main`.
+If you're already on the latest commit it says so and skips the restart.
+
+Same thing from a terminal:
+
+```powershell
+python aios_updater.py auto           # check, pull, install, relaunch
+python aios_updater.py auto --force   # reinstall even if already current
+python aios_updater.py check          # just report current vs latest
+```
+
+Sources (`owner` / `repo` / `branch`) live in `helper_config.json` under `update_source` and are editable in Settings or during the installer's first run. The default points at this repo's `main`. Local edits to tracked files are discarded by the update; untracked files (your config, logs, models) are left alone.
 
 ## Developing
 
@@ -99,7 +110,7 @@ Clone and run as above. Useful surfaces:
 | `agent_clicker/desktop_agent/loop.py` | OPERATOR agent loop — screenshot → reason → act. |
 | `agent_clicker/desktop_agent/prompts.py` | OPERATOR system prompt. |
 | `phone_site/` | Installable PWA and Sites worker relay. Run `npm run build` to produce its deployable `dist/`. |
-| `aios_updater.py` | In-app updater. CLI: `python aios_updater.py check\|update\|restart`. |
+| `aios_updater.py` | In-app updater. CLI: `python aios_updater.py check\|update\|auto\|restart`. |
 | `install_aios.py` | Installer wizard. |
 
 ### Running the mobile bridge
@@ -130,6 +141,7 @@ One-line title, optional bullet body. Keep changes scoped. Branches: feature bra
 ## Troubleshooting
 
 - **"GitHub could not be reached" in Updater** — check the repo is public (it is) and your network reaches `api.github.com`. The 404 path was the old private-repo case; it's gone now.
+- **Update fails with a git error** — the updater retries the fetch three times and then falls back to downloading the tarball on its own, so this should self-heal. Run `python aios_updater.py auto` in the install folder to see the full log; `update-apply.log` and `update-failures.log` hold the post-restart half.
 - **Whisper download failed during install** — re-run the installer; it'll resume from the failure. Or download manually: `python -c "from faster_whisper import WhisperModel; WhisperModel('small', device='cpu', compute_type='int8')"`.
 - **`Module not found` after install** — re-open the installer and just check "Python dependencies" + "Verify install" runs.
 - **OPERATOR can't see your monitor** — Settings → Run-on-monitor in the OPERATOR panel; the helper auto-detects via `mss`.

@@ -8,8 +8,12 @@ that receives short status strings.
 Public API:
     get_current_sha()        -> short SHA or "" if unknown
     check_for_update()       -> dict with current/latest SHAs and a behind flag
+    update_now(progress)     -> check + pull + install in one call
     perform_update(progress) -> dict with ok/message
     restart_aios()           -> never returns; launches a new helper and exits
+
+CLI:
+    python aios_updater.py auto [--force]   check, install, relaunch
 """
 from __future__ import annotations
 
@@ -23,6 +27,7 @@ import tarfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -102,9 +107,33 @@ def _api_url(src: dict) -> str:
     return f"https://api.github.com/repos/{src['owner']}/{src['repo']}"
 
 
-def _tarball_url(src: dict) -> str:
-    return (f"https://codeload.github.com/{src['owner']}/{src['repo']}"
-            f"/tar.gz/refs/heads/{src['branch']}")
+def _tarball_urls(src: dict) -> list[str]:
+    """Candidate tarball URLs, best first.
+
+    codeload works for public repos without auth; the API endpoint is the one
+    that honours a Bearer token, so private repos need it.
+    """
+    urls = [f"https://codeload.github.com/{src['owner']}/{src['repo']}"
+            f"/tar.gz/refs/heads/{src['branch']}"]
+    api = f"{_api_url(src)}/tarball/{src['branch']}"
+    if src.get("token"):
+        urls.insert(0, api)
+    else:
+        urls.append(api)
+    return urls
+
+
+def _git_remote_url(src: dict, *, with_token: bool = False) -> str:
+    """HTTPS clone URL for the configured source.
+
+    The token variant is only ever passed to git as a command-line argument so
+    it never gets persisted into .git/config.
+    """
+    host = f"github.com/{src['owner']}/{src['repo']}.git"
+    token = (src.get("token") or "").strip()
+    if with_token and token:
+        return f"https://x-access-token:{token}@{host}"
+    return f"https://{host}"
 
 # Files / dirs we never overwrite from upstream — user data + secrets + caches.
 PRESERVE = {
@@ -174,13 +203,29 @@ def _http_json(url: str, timeout: float = 8.0, token: str = "") -> tuple[dict | 
         return None, f"unexpected error reaching {url}: {exc}"
 
 
+class _StripAuthRedirect(urllib.request.HTTPRedirectHandler):
+    """Drop the Authorization header when a redirect crosses hosts.
+
+    api.github.com/…/tarball redirects to a pre-signed codeload URL that
+    rejects the inherited Bearer header with a 400.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None and urllib.parse.urlsplit(newurl).hostname != req.host:
+            new.headers = {k: v for k, v in new.headers.items()
+                           if k.lower() != "authorization"}
+        return new
+
+
 def _http_bytes(url: str, timeout: float = 60.0, progress=None, token: str = "") -> bytes | None:
     headers = {"User-Agent": USER_AGENT}
     if token:
         headers["Authorization"] = f"Bearer {token}"
     req = urllib.request.Request(url, headers=headers)
+    opener = urllib.request.build_opener(_StripAuthRedirect)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with opener.open(req, timeout=timeout) as resp:
             total = int(resp.headers.get("Content-Length") or 0)
             chunks = []
             seen = 0
@@ -204,12 +249,8 @@ def _http_bytes(url: str, timeout: float = 60.0, progress=None, token: str = "")
         return None
 
 
-def get_current_sha() -> str:
-    """Return the short commit SHA of the installed copy, or '' if unknown."""
-    if _is_git_repo():
-        rc, out = _run(["git", "rev-parse", "--short", "HEAD"])
-        if rc == 0:
-            return out.strip()
+def _marker_sha() -> str:
+    """SHA the updater last installed from a tarball, or ''."""
     sha_file = BASE_DIR / ".aios_sha"
     if sha_file.exists():
         try:
@@ -219,12 +260,33 @@ def get_current_sha() -> str:
     return ""
 
 
+def get_current_sha() -> str:
+    """Return the short commit SHA of the installed copy, or '' if unknown."""
+    # `.aios_sha` inside a git clone means the last install came from the
+    # tarball fallback, which overwrites the files without moving HEAD — so it
+    # describes what's on disk and HEAD does not. A successful git update
+    # clears the marker and hands authority back to git.
+    marker = _marker_sha()
+    if marker:
+        return marker
+    if _is_git_repo():
+        rc, out = _run(["git", "rev-parse", "--short", "HEAD"])
+        if rc == 0:
+            return out.strip()
+    return ""
+
+
 def get_current_branch() -> str:
+    """Branch of the local checkout, falling back to the configured branch."""
+    configured = load_source()["branch"]
     if _is_git_repo():
         rc, out = _run(["git", "rev-parse", "--abbrev-ref", "HEAD"])
         if rc == 0:
-            return out.strip() or GITHUB_BRANCH
-    return GITHUB_BRANCH
+            name = out.strip()
+            # Detached HEAD reports "HEAD" — that's not a branch name.
+            if name and name != "HEAD":
+                return name
+    return configured
 
 
 def _remote_latest(src: dict) -> tuple[dict | None, str]:
@@ -272,16 +334,89 @@ def check_for_update(owner: str | None = None, repo: str | None = None,
     }
 
 
+def _git_available() -> bool:
+    rc, _out = _run(["git", "--version"], timeout=20)
+    return rc == 0
+
+
+def _scrub(text: str, src: dict) -> str:
+    """Never let a token leak into a status line or log."""
+    token = (src.get("token") or "").strip()
+    return text.replace(token, "***") if token else text
+
+
+def _git_fetch(src: dict, progress) -> tuple[bool, str]:
+    """Fetch the configured branch straight from the configured remote URL.
+
+    We fetch by URL rather than by remote name so the update always follows
+    owner/repo/branch from the config, even when `origin` points somewhere
+    else (a fork, an old clone, or a path that no longer exists).
+    """
+    url = _git_remote_url(src, with_token=True)
+    cmd = ["git", "fetch", "--no-tags", "--force", url,
+           f"refs/heads/{src['branch']}"]
+    last = ""
+    for attempt in range(3):
+        if attempt:
+            progress(f"fetch failed, retrying ({attempt + 1}/3)…")
+            time.sleep(2 ** attempt)
+        rc, out = _run(cmd, timeout=300)
+        if rc == 0:
+            return True, "fetched"
+        last = _scrub(out, src)
+    return False, f"git fetch failed: {last}"
+
+
 def _git_update(src: dict, progress) -> tuple[bool, str]:
-    progress(f"git fetch origin (branch {src['branch']})…")
-    rc, out = _run(["git", "fetch", "--all", "--prune"], timeout=180)
+    """Hard-sync the working tree onto the fetched tip. Untracked files
+    (helper_config.json, logs, downloaded models) are left alone."""
+    if not _git_available():
+        return False, "git is not installed or not on PATH"
+
+    progress(f"git fetch {src['owner']}/{src['repo']} {src['branch']}…")
+    ok, msg = _git_fetch(src, progress)
+    if not ok:
+        return False, msg
+
+    rc, target = _run(["git", "rev-parse", "FETCH_HEAD"], timeout=60)
+    if rc != 0 or not target:
+        return False, f"could not resolve FETCH_HEAD: {_scrub(target, src)}"
+    target = target.strip().split()[0]
+
+    branch = get_current_branch() or src["branch"]
+    progress(f"git reset --hard {target[:12]} (branch {branch})")
+    # `reset --hard` rather than `checkout -B`: it moves the current branch and
+    # overwrites the tree without refusing when an untracked file collides with
+    # a newly added upstream one.
+    rc, out = _run(["git", "reset", "--hard", target], timeout=180)
     if rc != 0:
-        return False, f"git fetch failed: {out}"
-    progress(f"git reset --hard origin/{src['branch']}")
-    rc, out = _run(["git", "reset", "--hard", f"origin/{src['branch']}"], timeout=120)
+        return False, f"git reset failed: {_scrub(out, src)}"
+
+    rc, head_ref = _run(["git", "rev-parse", "--abbrev-ref", "HEAD"], timeout=60)
+    if rc == 0 and head_ref.strip() == "HEAD":
+        # Detached (a previous update left us there) — reattach to the branch.
+        _run(["git", "checkout", "-B", branch, target], timeout=180)
+
+    rc, head = _run(["git", "rev-parse", "HEAD"], timeout=60)
+    if rc == 0 and head.strip() != target:
+        return False, "working tree did not move to the fetched commit"
+
+    # Keep `origin` pointing at the configured source (without the token) so
+    # manual git commands agree with the updater.
+    rc, current_remote = _run(["git", "remote", "get-url", "origin"], timeout=30)
+    plain = _git_remote_url(src)
     if rc != 0:
-        return False, f"git reset failed: {out}"
-    return True, "git updated"
+        _run(["git", "remote", "add", "origin", plain], timeout=30)
+    elif current_remote.strip() != plain and "github.com" in current_remote:
+        _run(["git", "remote", "set-url", "origin", plain], timeout=30)
+
+    # git is authoritative again — drop any marker left by a tarball fallback.
+    try:
+        (BASE_DIR / ".aios_sha").unlink()
+    except OSError:
+        pass
+
+    return True, f"git updated to {target[:12]}"
 
 
 def _tarball_update(src: dict, progress) -> tuple[bool, str]:
@@ -289,8 +424,14 @@ def _tarball_update(src: dict, progress) -> tuple[bool, str]:
     to `_spawn_apply_script()` which runs after the helper exits, because
     Windows won't let us overwrite files held open by the running process."""
     progress(f"downloading tarball ({src['owner']}/{src['repo']}@{src['branch']})…")
-    blob = _http_bytes(_tarball_url(src), timeout=180, progress=progress,
-                       token=src.get("token", ""))
+    blob = None
+    for attempt, url in enumerate(_tarball_urls(src)):
+        if attempt:
+            progress("retrying download from the GitHub API…")
+        blob = _http_bytes(url, timeout=300, progress=progress,
+                           token=src.get("token", ""))
+        if blob:
+            break
     if not blob:
         return False, "tarball download failed"
     progress("clearing staging dir…")
@@ -333,8 +474,12 @@ def _tarball_update(src: dict, progress) -> tuple[bool, str]:
                 data = fh.read()
                 target.write_bytes(data)
                 written += 1
+            if not written:
+                shutil.rmtree(STAGING_DIR, ignore_errors=True)
+                return False, "tarball contained no files to apply"
             progress(f"staged {written} file(s) — will apply on restart")
     except Exception as exc:
+        shutil.rmtree(STAGING_DIR, ignore_errors=True)
         return False, f"extract failed: {exc}"
     # Remember which SHA was downloaded so we can stamp .aios_sha after apply.
     latest, _err = _remote_latest(src)
@@ -360,40 +505,77 @@ def _install_deps(progress) -> tuple[bool, str]:
 
 def perform_update(progress=None, owner: str | None = None,
                    repo: str | None = None, branch: str | None = None) -> dict:
-    """For git installs: pull + install deps in-place.
-    For tarball installs: stage files for the apply-after-restart flow;
-    deps will be installed by the apply script once files are swapped."""
+    """Pull the latest source and install it.
+
+    Git installs are updated in place (fetch + hard reset + pip install). If
+    git is missing or the fetch/reset fails for any reason, we fall back to the
+    tarball path automatically rather than leaving the user stuck — tarball
+    files are staged now and swapped in by the apply script after the helper
+    exits (Windows holds the running files open).
+    """
     progress = progress or (lambda _msg: None)
     src = load_source(owner, repo, branch)
     via_git = _is_git_repo()
     progress(f"updating via {'git' if via_git else 'tarball'} from "
              f"{src['owner']}/{src['repo']}@{src['branch']}…")
+    git_error = ""
     if via_git:
         ok, msg = _git_update(src, progress)
-        if not ok:
-            return {"ok": False, "message": msg, "restart_needed": False}
-        deps_ok, deps_msg = _install_deps(progress)
-        progress(deps_msg)
-        return {
-            "ok": True,
-            "message": "updated; ready to restart",
-            "deps_message": deps_msg,
-            "deps_ok": deps_ok,
-            "restart_needed": True,
-            "via": "git",
-            "current": get_current_sha(),
-        }
+        if ok:
+            deps_ok, deps_msg = _install_deps(progress)
+            progress(deps_msg)
+            return {
+                "ok": True,
+                "message": "updated; restarting",
+                "deps_message": deps_msg,
+                "deps_ok": deps_ok,
+                "restart_needed": True,
+                "via": "git",
+                "current": get_current_sha(),
+            }
+        git_error = msg
+        progress(f"{msg} — falling back to a direct download")
     # Tarball: stage now, apply on restart.
     ok, msg = _tarball_update(src, progress)
     if not ok:
-        return {"ok": False, "message": msg, "restart_needed": False}
+        return {"ok": False, "restart_needed": False,
+                "message": f"{git_error}; {msg}" if git_error else msg}
     return {
         "ok": True,
-        "message": "files staged · close aiOS to apply the update",
+        "message": "files staged · aiOS will close and reopen updated",
         "restart_needed": True,
         "via": "tarball",
         "staged": True,
+        "git_error": git_error,
     }
+
+
+def update_now(progress=None, owner: str | None = None, repo: str | None = None,
+               branch: str | None = None, force: bool = False) -> dict:
+    """Check GitHub and, if there's anything new, pull and install it.
+
+    This is the one call the UI needs: no separate check step, no state to
+    thread through. Returns the `perform_update` result plus the check result;
+    `updated` is False when we were already on the latest commit.
+    """
+    progress = progress or (lambda _msg: None)
+    progress("checking GitHub for the latest commit…")
+    check = check_for_update(owner, repo, branch)
+    if not check.get("ok"):
+        return {"ok": False, "updated": False, "restart_needed": False,
+                "check": check,
+                "message": check.get("error") or "could not reach GitHub"}
+    if not check.get("behind") and not force:
+        return {"ok": True, "updated": False, "restart_needed": False,
+                "check": check,
+                "message": f"already up to date ({check.get('current') or '?'})"}
+    latest = check.get("latest") or ""
+    if latest:
+        progress(f"latest is {latest} — installing")
+    result = perform_update(progress, owner, repo, branch)
+    result["check"] = check
+    result["updated"] = bool(result.get("ok"))
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -463,7 +645,7 @@ def copy_with_retry(src_path, dst_path, attempts=20):
 def apply_staging():
     if not STAGING_DIR.exists():
         log("no staging dir, nothing to apply")
-        return False
+        return None
     # Sweep any leftover *.aios-new temp files from earlier broken update
     # attempts — they confuse the next install.
     for stale in BASE_DIR.rglob("*.aios-new"):
@@ -501,7 +683,7 @@ def apply_staging():
             PENDING_SHA_FILE.unlink()
         except OSError:
             pass
-    # Clean up staging.
+    # Clean up staging so a later restart doesn't re-apply a spent update.
     shutil.rmtree(STAGING_DIR, ignore_errors=True)
     return not failed
 
@@ -543,8 +725,10 @@ def main():
     log("== apply start ==")
     try:
         wait_for_parent()
-        ok = apply_staging()
-        if ok:
+        applied = apply_staging()
+        # Deps are installed even when a few files refused to copy — a partial
+        # update still needs whatever new packages requirements.txt asks for.
+        if applied is not None:
             install_deps()
         relaunch_helper()
         log("== apply done ==")
@@ -566,6 +750,15 @@ def _write_apply_script(parent_pid: int) -> Path:
     os.close(fd)
     Path(path).write_text(body, encoding="utf-8")
     return Path(path)
+
+
+def _has_staged_files() -> bool:
+    if not STAGING_DIR.exists():
+        return False
+    try:
+        return any(p.is_file() for p in STAGING_DIR.rglob("*"))
+    except OSError:
+        return False
 
 
 def _spawn_apply_script() -> bool:
@@ -595,8 +788,9 @@ def restart_aios(extra_args: list[str] | None = None) -> None:
     helper_path = BASE_DIR / "helper_overlay.py"
     if not helper_path.exists():
         return
-    # If files were staged, hand off to the apply script and exit.
-    if STAGING_DIR.exists():
+    # If files were staged, hand off to the apply script and exit. An empty
+    # staging dir (a download that died mid-flight) is not an update.
+    if _has_staged_files():
         if _spawn_apply_script():
             threading.Timer(0.5, lambda: os._exit(0)).start()
             return
@@ -624,12 +818,23 @@ def restart_aios(extra_args: list[str] | None = None) -> None:
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=["check", "update", "restart"])
+    parser.add_argument("action", choices=["check", "update", "auto", "restart"])
+    parser.add_argument("--force", action="store_true",
+                        help="reinstall even when already on the latest commit")
+    parser.add_argument("--no-restart", action="store_true",
+                        help="with `auto`, skip relaunching the helper")
     args = parser.parse_args()
+    emit = lambda m: print(f"[update] {m}", flush=True)
     if args.action == "check":
         print(json.dumps(check_for_update(), indent=2))
     elif args.action == "update":
-        result = perform_update(progress=lambda m: print(f"[update] {m}"))
-        print(json.dumps(result, indent=2))
+        print(json.dumps(perform_update(progress=emit), indent=2))
+    elif args.action == "auto":
+        result = update_now(progress=emit, force=args.force)
+        print(json.dumps({k: v for k, v in result.items() if k != "check"}, indent=2))
+        if result.get("restart_needed") and not args.no_restart:
+            emit("restarting aiOS…")
+            restart_aios()
+        sys.exit(0 if result.get("ok") else 1)
     elif args.action == "restart":
         restart_aios()

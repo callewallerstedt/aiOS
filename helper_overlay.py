@@ -8720,7 +8720,6 @@ class HelperOverlay:
         update_btn = self.button(actions, "Update & restart",
                                   lambda: self._updater_update_and_restart(), compact=True)
         update_btn.pack(side="left", padx=(8, 0))
-        update_btn.configure(state="disabled")
         self._update_state["check_btn"] = check_btn
         self._update_state["update_btn"] = update_btn
         self._update_state["save_btn"] = save_btn
@@ -8745,18 +8744,15 @@ class HelperOverlay:
         else:
             state["status_var"].set("could not save (check helper_config.json)")
 
-    def _updater_set_buttons(self, busy: bool, can_update: bool):
+    def _updater_set_buttons(self, busy: bool, can_update: bool = True):
+        # The update button stays live regardless of the last check result —
+        # it runs its own check first, so there's nothing to gate on.
         state = self._update_state
-        try:
-            state["check_btn"].configure(
-                state="disabled" if busy else "normal")
-        except Exception:
-            pass
-        try:
-            state["update_btn"].configure(
-                state="normal" if (not busy and can_update) else "disabled")
-        except Exception:
-            pass
+        for key in ("check_btn", "update_btn", "save_btn"):
+            try:
+                state[key].configure(state="disabled" if busy else "normal")
+            except Exception:
+                pass
 
     def _updater_log(self, text):
         state = self._update_state
@@ -8808,14 +8804,18 @@ class HelperOverlay:
         self._updater_set_buttons(busy=False, can_update=behind)
 
     def _updater_update_and_restart(self):
+        """One press: check GitHub, pull the latest, install deps, restart."""
         import aios_updater
         state = self._update_state
         if state["busy"]:
             return
-        if not (state.get("last_check") and state["last_check"].get("behind")):
-            return
+        # Pick up whatever is currently typed in the source fields so the user
+        # doesn't have to press Save first.
+        owner = state["owner_var"].get().strip() or None
+        repo = state["repo_var"].get().strip() or None
+        branch = state["branch_var"].get().strip() or None
         state["busy"] = True
-        self._updater_set_buttons(busy=True, can_update=False)
+        self._updater_set_buttons(busy=True)
         state["status_var"].set("updating…")
         state["log_var"].set("")
 
@@ -8823,7 +8823,11 @@ class HelperOverlay:
             self.root.after(0, lambda m=msg: self._updater_log(m))
 
         def worker():
-            result = aios_updater.perform_update(progress=emit)
+            try:
+                result = aios_updater.update_now(
+                    progress=emit, owner=owner, repo=repo, branch=branch)
+            except Exception as exc:
+                result = {"ok": False, "message": f"updater crashed: {exc}"}
             self.root.after(0, lambda: self._updater_update_done(result))
 
         threading.Thread(target=worker, daemon=True).start()
@@ -8834,7 +8838,16 @@ class HelperOverlay:
         state["busy"] = False
         if not result.get("ok"):
             state["status_var"].set("update failed: " + (result.get("message") or "?"))
-            self._updater_set_buttons(busy=False, can_update=True)
+            self._updater_set_buttons(busy=False)
+            return
+        if not result.get("restart_needed"):
+            # Nothing new upstream — say so instead of restarting for nothing.
+            state["status_var"].set(result.get("message") or "already up to date")
+            check = result.get("check") or {}
+            if check.get("current"):
+                state["info_var"].set(f"up to date · {check['current']}")
+            state["last_check"] = check or state.get("last_check")
+            self._updater_set_buttons(busy=False)
             return
         staged = bool(result.get("staged"))
         if staged:
@@ -8844,7 +8857,8 @@ class HelperOverlay:
         else:
             state["status_var"].set("updated · restarting in 1s…")
             self._updater_log("restarting aiOS…")
-        self._updater_set_buttons(busy=False, can_update=False)
+        # Keep the buttons disabled — we're on our way out.
+        self._updater_set_buttons(busy=True)
         # Stop any operator run first so we don't leave child threads.
         try:
             if self.agent_operator_loop and self.agent_operator_loop.is_running():
