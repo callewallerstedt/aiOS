@@ -882,6 +882,20 @@ function scrollFeed(force = false) {
   }
 }
 
+/** What the finished run cost, as priced by the PC that ran it. */
+function costLine(cost) {
+  if (!cost || typeof cost !== "object") return "";
+  const usd = Number(cost.usd || 0);
+  const parts = [];
+  if (cost.priced) parts.push(`≈ ${usd < 1 ? `$${usd.toFixed(4)}` : `$${usd.toFixed(2)}`}`);
+  if (Number(cost.plan_requests || 0)) {
+    parts.push(`${Number(cost.plan_tokens || 0).toLocaleString()} tokens on your ChatGPT plan`);
+  }
+  const unpriced = Array.isArray(cost.unpriced) ? cost.unpriced : [];
+  if (unpriced.length) parts.push(`no price set for ${unpriced.join(", ")}`);
+  return parts.join(" · ");
+}
+
 /** Turns a raw agent event into the shape the timeline renders. */
 function describe(event) {
   const payload = event.payload || {};
@@ -957,7 +971,9 @@ function describe(event) {
     return {
       kind: "entry", tone: ok ? "ok" : "err", glyph: ok ? "check" : "stop",
       title: ok ? "Finished" : stopped ? "Stopped" : "Run ended",
-      body: [text(payload.message), usageText].filter(Boolean).join("\n"),
+      body: text(payload.message),
+      cost: costLine(payload.cost),
+      mono: usageText,
       hint: payload.steps ? `${payload.steps} steps` : ""
     };
   }
@@ -1036,6 +1052,12 @@ function addEvent(event, pending = false) {
       const paragraph = document.createElement("p");
       paragraph.textContent = info.body;
       body.appendChild(paragraph);
+    }
+    if (info.cost) {
+      const cost = document.createElement("p");
+      cost.className = "entry-cost";
+      cost.textContent = info.cost;
+      body.appendChild(cost);
     }
     if (info.mono) {
       const mono = document.createElement("p");

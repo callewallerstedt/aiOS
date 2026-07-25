@@ -402,18 +402,24 @@ class AgentLoop:
             "backend": backend, "models": {},
         }
 
+        _COUNTERS = ("requests", "input_tokens", "output_tokens", "cached_input_tokens", "total_tokens")
+
+        def _accumulate(into: dict, item: dict):
+            for key in _COUNTERS:
+                into[key] = int(into.get(key) or 0) + int(item.get(key) or 0)
+
         def _add_usage(item: dict):
             if not isinstance(item, dict):
                 return
-            for key in ("requests", "input_tokens", "output_tokens", "cached_input_tokens", "total_tokens"):
-                usage_total[key] += int(item.get(key) or 0)
+            _accumulate(usage_total, item)
             used_model = str(item.get("model") or model)
-            model_usage = usage_total["models"].setdefault(
-                used_model,
-                {"requests": 0, "input_tokens": 0, "output_tokens": 0, "cached_input_tokens": 0, "total_tokens": 0},
-            )
-            for key in ("requests", "input_tokens", "output_tokens", "cached_input_tokens", "total_tokens"):
-                model_usage[key] += int(item.get(key) or 0)
+            model_usage = usage_total["models"].setdefault(used_model, {})
+            _accumulate(model_usage, item)
+            # Split by backend as well: Codex calls ride the ChatGPT plan, so
+            # only the API-key ones can be turned into a dollar figure.
+            used_backend = str(item.get("backend") or backend)
+            backend_usage = model_usage.setdefault("backends", {}).setdefault(used_backend, {})
+            _accumulate(backend_usage, item)
 
         def _emit(ev: dict):
             if ev.get("type") == "done":

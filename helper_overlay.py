@@ -23,6 +23,7 @@ from tkinter import colorchooser, filedialog, messagebox, simpledialog
 
 import aios_codex_accounts
 import codex_usage
+import model_pricing
 from voice_settings import (
     COMPUTE_TYPES,
     DEFAULT_VOICE_DICTATION,
@@ -6081,6 +6082,11 @@ class HelperOverlay:
             record["steps"] = event.get("steps")
             record["message"] = event.get("message", "")
             record["usage"] = event.get("usage") or {}
+            try:
+                record["cost"] = model_pricing.estimate_cost(
+                    record["usage"], self._agent_operator_model())
+            except Exception:
+                pass
         elif kind == "ask":
             record["message"] = event.get("message", "")
         elif kind == "follow_up_received":
@@ -6219,6 +6225,12 @@ class HelperOverlay:
                     f"USAGE {input_tokens:,} input + {output_tokens:,} output"
                     f" ({cached_tokens:,} cached) across {requests} model call(s)\n",
                 )
+                try:
+                    cost_line = model_pricing.describe_cost(usage, self._agent_operator_model())
+                except Exception:
+                    cost_line = ""
+                if cost_line:
+                    self._agent_operator_log_line("status", f"COST {cost_line}\n")
             if self.agent_operator_stop_requested:
                 self._agent_operator_log_line("err", "SAFETY STOP loop exited. aiOPERATOR is no longer controlling input.\n")
                 self.agent_operator_stop_requested = False

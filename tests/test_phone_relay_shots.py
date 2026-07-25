@@ -42,11 +42,16 @@ def test_step_screenshot_is_published_for_the_phone(bridge, monkeypatch):
 def test_a_click_reuses_the_screenshot_it_was_decided_from(bridge, monkeypatch):
     events = feed(bridge, monkeypatch, [
         {"type": "screenshot", "ts": 2.0, "frame": 4, "n": 2},
-        {"type": "click_fx", "ts": 2.5, "frame": 4, "x": 120, "y": 340, "button": "left"},
+        {"type": "click_fx", "ts": 2.5, "frame": 4, "x": 120, "y": 340, "button": "left",
+         "left": 0, "top": 0, "width": 2560, "height": 1440},
     ])
 
     assert events[0]["payload"]["shot"] == events[1]["payload"]["shot"]
     assert len(bridge.uploaded) == 1, "the same frame must not upload twice"
+    # The phone places its marker from these; losing them loses the marker.
+    click = events[1]["payload"]
+    assert (click["x"], click["y"]) == (120, 340)
+    assert (click["left"], click["top"], click["width"], click["height"]) == (0, 0, 2560, 1440)
 
 
 def test_a_new_run_cannot_overwrite_the_previous_run_screenshots(bridge, monkeypatch):
