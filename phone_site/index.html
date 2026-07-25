@@ -181,8 +181,7 @@
     <div class="composer">
       <textarea id="promptInput" rows="1" maxlength="8000" placeholder="Ask your computer…"></textarea>
       <div class="composer-bar">
-        <button id="modelBtn" class="pill" type="button"><span id="modelLabel">Luna</span><svg class="ic"><use href="#i-chevron"/></svg></button>
-        <button id="effortBtn" class="pill" type="button"><span id="effortLabel">Low</span><svg class="ic"><use href="#i-chevron"/></svg></button>
+        <button id="runSettingsBtn" class="pill run-settings-pill" type="button" aria-label="Choose run models"><svg class="ic"><use href="#i-sliders"/></svg><span id="runSettingsLabel">Luna · Plan Sol</span></button>
         <div class="composer-spacer"></div>
         <button id="micBtn" class="roundbtn" type="button" aria-label="Dictate"><svg class="ic"><use href="#i-mic"/></svg></button>
         <button id="sendBtn" class="roundbtn send" type="submit" aria-label="Send"><svg class="ic"><use href="#i-send"/></svg></button>
@@ -213,23 +212,25 @@
   <div id="monitorOptions" class="options"></div>
 </section>
 
-<section id="modelSheet" class="sheet hidden" role="dialog" aria-modal="true">
+<section id="runSettingsSheet" class="sheet hidden" role="dialog" aria-modal="true">
   <div class="grabber"></div>
-  <h3>Clicking model</h3>
-  <div id="modelOptions" class="options"></div>
-</section>
-
-<section id="plannerSheet" class="sheet hidden" role="dialog" aria-modal="true">
-  <div class="grabber"></div>
-  <h3>Planning model</h3>
-  <p class="sheet-copy">Runs once before clicking. Choose a stronger model to plan, then let a faster model execute.</p>
-  <div id="plannerOptions" class="options"></div>
-</section>
-
-<section id="effortSheet" class="sheet hidden" role="dialog" aria-modal="true">
-  <div class="grabber"></div>
-  <h3>Reasoning effort</h3>
-  <div id="effortOptions" class="options"></div>
+  <h3>Run setup</h3>
+  <div class="model-section">
+    <div class="model-section-head"><strong>Clicking model</strong><span id="runModelValue">Luna</span></div>
+    <p>Controls the computer step by step.</p>
+    <div id="runModelOptions" class="choice-chips"></div>
+  </div>
+  <div class="model-section">
+    <div class="model-section-head"><strong>Clicking effort</strong><span id="runEffortValue">Low</span></div>
+    <div id="runEffortOptions" class="choice-chips"></div>
+  </div>
+  <div class="model-section planner-section">
+    <label class="planner-toggle"><span><strong>Plan before clicking</strong><small>Use a stronger model once, then execute cheaply</small></span><input id="plannerToggle" class="switch" type="checkbox" checked></label>
+    <div id="plannerModelGroup">
+      <div class="model-section-head"><strong>Planning model</strong><span id="runPlannerValue">Sol</span></div>
+      <div id="runPlannerOptions" class="choice-chips"></div>
+    </div>
+  </div>
 </section>
 
 <section id="pairSheet" class="sheet hidden" role="dialog" aria-modal="true">
@@ -249,9 +250,7 @@
   <div class="grabber"></div>
   <h3>Settings</h3>
   <div class="rows">
-    <button id="settingsModelRow" class="row" type="button"><span>Clicking model</span><em id="settingsModelValue">Luna</em><svg class="ic"><use href="#i-chevron"/></svg></button>
-    <button id="settingsPlannerRow" class="row" type="button"><span>Planning model</span><em id="settingsPlannerValue">Sol</em><svg class="ic"><use href="#i-chevron"/></svg></button>
-    <button id="settingsEffortRow" class="row" type="button"><span>Reasoning effort</span><em id="settingsEffortValue">Low</em><svg class="ic"><use href="#i-chevron"/></svg></button>
+    <button id="settingsRunRow" class="row" type="button"><span>Run models</span><em id="settingsRunValue">Luna · Plan Sol</em><svg class="ic"><use href="#i-chevron"/></svg></button>
     <label class="row"><span>Maximum steps</span><input id="stepsInput" class="row-input" type="number" inputmode="numeric" min="1" max="100" value="30"></label>
     <label class="row"><span>Detailed activity</span><input id="detailsToggle" class="switch" type="checkbox" checked></label>
     <label class="row"><span>Keep screen awake</span><input id="wakeToggle" class="switch" type="checkbox"></label>

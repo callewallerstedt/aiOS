@@ -433,6 +433,8 @@ h3 { font-size: 17px; letter-spacing: -.02em; font-weight: 700; margin: 0 0 16px
 }
 .pill .ic { width: 14px; height: 14px; color: var(--text-3); }
 .pill:active { background: var(--surface-3); }
+.run-settings-pill { max-width: min(230px, 62vw); gap: 6px; padding-right: 9px; }
+.run-settings-pill span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .roundbtn {
   width: 38px; height: 38px; flex: 0 0 auto;
@@ -471,6 +473,22 @@ h3 { font-size: 17px; letter-spacing: -.02em; font-weight: 700; margin: 0 0 16px
 .sheet h3 { margin-bottom: 14px; }
 .sheet-copy { margin: -6px 0 14px; color: var(--text-2); font-size: 13px; line-height: 1.45; }
 .sheet .btn { margin-top: 10px; }
+
+.model-section { padding: 14px; margin-bottom: 10px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface); }
+.model-section > p { margin: 3px 0 12px; color: var(--text-3); font-size: 12px; }
+.model-section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+.model-section-head strong { font-size: 14px; font-weight: 650; }
+.model-section-head span { color: var(--text-2); font-size: 12px; }
+.choice-chips { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+.choice-chip { min-width: 0; height: 40px; padding: 0 8px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-2); color: var(--text-2); font-size: 13px; font-weight: 650; }
+.choice-chip.on { border-color: var(--red-line); background: var(--red-soft); color: var(--text); }
+.choice-chip:active { transform: scale(.97); }
+.planner-toggle { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
+.planner-toggle > span { flex: 1; min-width: 0; }
+.planner-toggle strong, .planner-toggle small { display: block; }
+.planner-toggle strong { font-size: 14px; }
+.planner-toggle small { margin-top: 2px; color: var(--text-3); font-size: 11.5px; line-height: 1.35; }
+.planner-section.off #plannerModelGroup { display: none; }
 
 .options { display: grid; gap: 6px; margin-bottom: 14px; }
 .option {
