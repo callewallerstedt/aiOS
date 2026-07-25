@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+  <title id="title">aiOS Remote app icon concept</title>
+  <desc id="desc">The original white aiOS wordmark centered on a flat red rounded square.</desc>
+  <rect width="1024" height="1024" rx="224" fill="#F0243A"/>
+  <image
+    href="aios-logo.png"
+    x="54"
+    y="370"
+    width="916"
+    height="286"
+    preserveAspectRatio="xMidYMid meet"
+  />
+</svg>

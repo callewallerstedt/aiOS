@@ -1,5 +1,13 @@
-const CACHE = "aios-remote-v11";
-const SHELL = ["./", "phone.css", "phone.js", "manifest.webmanifest", "icons/aios-icon-192.png"];
+const CACHE = "aios-remote-v12";
+const SHELL = [
+  "./",
+  "phone.css",
+  "phone.js",
+  "manifest.webmanifest",
+  "icons/aios-icon-180.png",
+  "icons/aios-icon-192.png",
+  "icons/aios-icon-512.png"
+];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(SHELL)).then(() => self.skipWaiting()));

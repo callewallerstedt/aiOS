@@ -546,6 +546,7 @@ DEFAULT_CONFIG = {
         "voice": "nova",
         "shell": False,
         "codex_auth": False,
+        "provider_mode": "api",
     },
     "phone_relay": {
         "url": DEFAULT_PHONE_RELAY_URL,
@@ -658,10 +659,13 @@ def merge_dict(base, override):
 
 def load_config():
     config = json.loads(json.dumps(DEFAULT_CONFIG))
+    loaded_operator = {}
     if CONFIG_PATH.exists():
         try:
             with CONFIG_PATH.open("r", encoding="utf-8") as file:
-                config = merge_dict(config, json.load(file))
+                loaded = json.load(file)
+                loaded_operator = loaded.get("ai_operator") if isinstance(loaded.get("ai_operator"), dict) else {}
+                config = merge_dict(config, loaded)
         except (OSError, json.JSONDecodeError):
             pass
 
@@ -686,6 +690,8 @@ def load_config():
     config.setdefault("linked_projects", [])
     config.setdefault("hidden_projects", [])
     config["ai_operator"] = merge_dict(DEFAULT_CONFIG["ai_operator"], config.get("ai_operator") or {})
+    if not str(loaded_operator.get("provider_mode") or "").strip():
+        config["ai_operator"]["provider_mode"] = "codex" if loaded_operator.get("codex_auth") else "api"
     config["phone_relay"] = merge_dict(DEFAULT_CONFIG["phone_relay"], config.get("phone_relay") or {})
     if config["ai_operator"].get("model") == "gpt-5.5":
         config["ai_operator"]["model"] = OPERATOR_DEFAULT_MODEL
@@ -4934,9 +4940,26 @@ class HelperOverlay:
                 value = value.strip().strip('"').strip("'")
                 if key and value and not os.environ.get(key):
                     os.environ[key] = value
-        key = self.get_openai_api_key()
-        if key and not os.environ.get("OPENAI_API_KEY"):
+        self._sync_agent_operator_api_key()
+
+    def _sync_agent_operator_api_key(self, *, force_config=False):
+        """Refresh the live OpenAI client after the phone changes its key."""
+        key = (
+            str(self.config.get("openai_api_key") or "").strip()
+            if force_config
+            else self.get_openai_api_key()
+        )
+        if key:
             os.environ["OPENAI_API_KEY"] = key
+        else:
+            os.environ.pop("OPENAI_API_KEY", None)
+        try:
+            from agent import config as agent_config
+            from agent import vlm
+            agent_config.OPENAI_API_KEY = key
+            vlm._client = None
+        except Exception:
+            pass
 
     def _refresh_agent_operator_codex_auth(self):
         try:
@@ -5242,7 +5265,13 @@ class HelperOverlay:
         if self.agent_operator_shell_var:
             settings["shell"] = bool(self.agent_operator_shell_var.get())
         if self.agent_operator_codex_var:
-            settings["codex_auth"] = bool(self.agent_operator_codex_var.get())
+            codex_enabled = bool(self.agent_operator_codex_var.get())
+            settings["codex_auth"] = codex_enabled
+            current_mode = str(settings.get("provider_mode") or "").strip().lower()
+            if not codex_enabled:
+                settings["provider_mode"] = "api"
+            elif current_mode not in {"codex", "codex_api_fallback"}:
+                settings["provider_mode"] = "codex"
         self.config["ai_operator"] = merge_dict(DEFAULT_CONFIG["ai_operator"], settings)
         self.agent_operator_settings = self.config["ai_operator"]
         save_config(self.config)
@@ -5671,15 +5700,34 @@ class HelperOverlay:
         user_context = self._agent_operator_user_context_text()
         context_count = len([name for name in self._agent_operator_context_files() if self._agent_operator_context_read(name).strip()])
         shell_enabled = bool(self.agent_operator_shell_var and self.agent_operator_shell_var.get())
-        codex_enabled = bool(self.agent_operator_codex_var and self.agent_operator_codex_var.get())
-        if codex_enabled:
-            ok, message = self._refresh_agent_operator_codex_auth()
-            if not ok:
-                self._agent_operator_log_line("err", f"Codex auth unavailable: {message}\n")
+        self.save_agent_operator_settings()
+        provider_mode = str(self.agent_operator_settings.get("provider_mode") or "").strip().lower()
+        if provider_mode not in {"codex", "api", "codex_api_fallback"}:
+            provider_mode = "codex" if self.agent_operator_settings.get("codex_auth") else "api"
+        key_available = bool(self.get_openai_api_key())
+        codex_available, codex_message = self._refresh_agent_operator_codex_auth()
+        if provider_mode == "codex":
+            if not codex_available:
+                self._agent_operator_log_line("err", f"Codex auth unavailable: {codex_message}\n")
                 self.agent_operator_status_var.set("Codex auth unavailable")
                 return "break"
-        backend = "codex" if codex_enabled else "api"
-        self.save_agent_operator_settings()
+            backend = "codex"
+        elif provider_mode == "api":
+            if not key_available:
+                self._agent_operator_log_line("err", "OpenAI API key is not configured.\n")
+                self.agent_operator_status_var.set("OpenAI API key required")
+                return "break"
+            backend = "api"
+        else:
+            if codex_available:
+                backend = "codex_fallback"
+            elif key_available:
+                backend = "api"
+                self._agent_operator_log_line("dim", "Codex unavailable; starting with the API fallback.\n")
+            else:
+                self._agent_operator_log_line("err", "Codex is unavailable and no API fallback is configured.\n")
+                self.agent_operator_status_var.set("No AI provider available")
+                return "break"
         self._agent_operator_log_line("step", f"[{self._ts()}] START\n")
         self._agent_operator_log_line(
             "dim",
@@ -9892,6 +9940,7 @@ class HelperOverlay:
             "voice": ("agent_operator_voice_var", str),
             "shell": ("agent_operator_shell_var", bool),
             "codex_auth": ("agent_operator_codex_var", bool),
+            "provider_mode": (None, str),
         }
         for key, (attr, cast) in mapping.items():
             if key not in options:
@@ -9902,13 +9951,19 @@ class HelperOverlay:
             except Exception:
                 continue
             settings[key] = value
-            var = getattr(self, attr, None)
+            var = getattr(self, attr, None) if attr else None
             if var is not None:
                 try:
                     var.set(value)
                 except Exception:
                     pass
+        # Pick up root-level settings (especially the API key) written by the
+        # phone bridge before saving the live Operator fields back.
+        disk_config = load_config()
+        if "openai_api_key" in disk_config:
+            self.config["openai_api_key"] = disk_config.get("openai_api_key") or ""
         self.config["ai_operator"] = merge_dict(DEFAULT_CONFIG["ai_operator"], settings)
+        self._sync_agent_operator_api_key(force_config=True)
         try:
             self.agent_operator_settings = self.config["ai_operator"]
         except Exception:

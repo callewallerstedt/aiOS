@@ -98,16 +98,24 @@ def chat_with_usage(system: str, messages: list[dict], model: str | None = None,
     backend = 'codex' -> chatgpt.com/backend-api/codex/responses, auth from
                          ~/.codex/auth.json (billed to ChatGPT subscription).
                          Undocumented; can break with Codex updates.
+    backend = 'codex_fallback' -> try Codex first, then use OPENAI_API_KEY.
 
     reasoning_effort: 'minimal' | 'low' | 'medium' | 'high' for gpt-5.x.
     None = let the API default (medium on gpt-5.x).
     """
     model = model or config.MODEL
-    if backend == "codex":
+    if backend in {"codex", "codex_fallback"}:
         from . import codex_backend
-        return codex_backend.chat_with_usage(
-            system, messages, model=model, reasoning_effort=reasoning_effort
-        )
+        try:
+            return codex_backend.chat_with_usage(
+                system, messages, model=model, reasoning_effort=reasoning_effort
+            )
+        except Exception as codex_error:
+            if backend == "codex" or not config.OPENAI_API_KEY:
+                raise
+            fallback_reason = str(codex_error)[:240]
+    else:
+        fallback_reason = ""
 
     full = [{"role": "system", "content": system}] + messages
     kwargs: dict = {
@@ -123,7 +131,11 @@ def chat_with_usage(system: str, messages: list[dict], model: str | None = None,
         # SDK too old for reasoning_effort kwarg — retry without it
         kwargs.pop("reasoning_effort", None)
         resp = client().chat.completions.create(**kwargs)
-    return resp.choices[0].message.content or "", _usage_dict(resp.usage, backend=backend, model=model)
+    usage = _usage_dict(resp.usage, backend="api", model=model)
+    if fallback_reason:
+        usage["fallback_from"] = "codex"
+        usage["fallback_reason"] = fallback_reason
+    return resp.choices[0].message.content or "", usage
 
 
 def chat_raw(system: str, messages: list[dict], model: str | None = None,

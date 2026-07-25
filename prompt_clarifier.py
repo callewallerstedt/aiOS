@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 
 MODEL = "gpt-5.4-nano"
+CODEX_MODEL = "gpt-5.6-luna"
 MAX_QUESTIONS = 10
 SYSTEM_PROMPT = """You are the tiny intent-check assistant inside aiOS Operator.
 Read the user's live draft before it is sent to a computer-use agent.
@@ -95,15 +98,34 @@ def _content_text(message: dict) -> str:
     return ""
 
 
-def clarify_prompt(api_key: str, draft: str, previous: list[dict] | None = None, timeout: float = 25) -> dict:
-    started = time.perf_counter()
+def _request_payload(draft: str, previous: list[dict] | None = None) -> tuple[dict, int]:
     normalized_previous = normalize_questions(previous or [])
     limit = question_limit(draft, normalized_previous)
-    user_payload = {
+    return {
         "draft": str(draft or "")[:8000],
         "previous_questions": normalized_previous,
         "question_limit": limit,
-    }
+    }, limit
+
+
+def _parse_result(raw: str, limit: int) -> list[dict]:
+    text = str(raw or "").strip()
+    fence = re.search(r"```(?:json)?\s*(.+?)\s*```", text, re.DOTALL | re.IGNORECASE)
+    if fence:
+        text = fence.group(1).strip()
+    start = text.find("{")
+    if start < 0:
+        raise RuntimeError("The intent check returned invalid JSON.")
+    try:
+        parsed, _ = json.JSONDecoder().raw_decode(text[start:])
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("The intent check returned invalid JSON.") from exc
+    return normalize_questions(parsed)[:limit]
+
+
+def clarify_prompt(api_key: str, draft: str, previous: list[dict] | None = None, timeout: float = 25) -> dict:
+    started = time.perf_counter()
+    user_payload, limit = _request_payload(draft, previous)
     payload = {
         "model": MODEL,
         "messages": [
@@ -137,13 +159,66 @@ def clarify_prompt(api_key: str, draft: str, previous: list[dict] | None = None,
     if not choices:
         raise RuntimeError("The intent check returned no result.")
     raw = _content_text((choices[0] or {}).get("message") or {})
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError("The intent check returned invalid JSON.") from exc
     return {
-        "questions": normalize_questions(parsed)[:limit],
+        "questions": _parse_result(raw, limit),
         "question_limit": limit,
         "model": MODEL,
+        "provider": "api",
         "elapsed_ms": int((time.perf_counter() - started) * 1000),
     }
+
+
+def clarify_prompt_codex(
+    draft: str,
+    previous: list[dict] | None = None,
+    timeout: float = 25,
+) -> dict:
+    """Run the live intent check through the signed-in Codex account."""
+    started = time.perf_counter()
+    user_payload, limit = _request_payload(draft, previous)
+    agent_root = Path(__file__).resolve().parent / "agent_clicker"
+    if str(agent_root) not in sys.path:
+        sys.path.insert(0, str(agent_root))
+    from agent import codex_backend
+
+    raw = codex_backend.chat_raw(
+        SYSTEM_PROMPT,
+        [{"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)}],
+        model=CODEX_MODEL,
+        timeout=timeout,
+        reasoning_effort="low",
+    )
+    return {
+        "questions": _parse_result(raw, limit),
+        "question_limit": limit,
+        "model": CODEX_MODEL,
+        "provider": "codex",
+        "elapsed_ms": int((time.perf_counter() - started) * 1000),
+    }
+
+
+def clarify_prompt_for_provider(
+    draft: str,
+    previous: list[dict] | None = None,
+    *,
+    provider_mode: str = "api",
+    api_key: str = "",
+    timeout: float = 25,
+) -> dict:
+    mode = str(provider_mode or "api").strip().lower()
+    if mode not in {"codex", "api", "codex_api_fallback"}:
+        mode = "api"
+    if mode == "api":
+        if not api_key:
+            raise RuntimeError("OpenAI API key is not configured.")
+        return clarify_prompt(api_key, draft, previous, timeout=timeout)
+    if mode == "codex":
+        return clarify_prompt_codex(draft, previous, timeout=timeout)
+    try:
+        return clarify_prompt_codex(draft, previous, timeout=timeout)
+    except Exception as codex_error:
+        if not api_key:
+            raise RuntimeError(f"Codex is unavailable and no API fallback is configured: {codex_error}") from codex_error
+        result = clarify_prompt(api_key, draft, previous, timeout=timeout)
+        result["fallback_from"] = "codex"
+        return result

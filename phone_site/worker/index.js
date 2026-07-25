@@ -158,8 +158,22 @@ async function handleApi(request, env, url) {
           .bind(JSON.stringify(input.status), timestamp, timestamp, machine.id).run();
       }
       if (input.completed_command_id) {
-        await env.DB.prepare("UPDATE commands SET completed_at = ?, result_json = ? WHERE id = ? AND machine_id = ?")
-          .bind(timestamp, JSON.stringify(input.result || {}), Number(input.completed_command_id), machine.id).run();
+        const completedId = Number(input.completed_command_id);
+        const completed = await env.DB.prepare("SELECT type, payload_json FROM commands WHERE id = ? AND machine_id = ?")
+          .bind(completedId, machine.id).first();
+        const completedPayload = safeJson(completed?.payload_json);
+        const effectiveType = completed?.type === "config"
+          ? String(completedPayload?._aios_command || "config")
+          : String(completed?.type || "");
+        if (effectiveType === "ai_settings") {
+          // API keys are transient transport data. Remove the command instead
+          // of retaining its payload or result in the relay database.
+          await env.DB.prepare("DELETE FROM commands WHERE id = ? AND machine_id = ?")
+            .bind(completedId, machine.id).run();
+        } else {
+          await env.DB.prepare("UPDATE commands SET completed_at = ?, result_json = ? WHERE id = ? AND machine_id = ?")
+            .bind(timestamp, JSON.stringify(input.result || {}), completedId, machine.id).run();
+        }
       }
       return json({ ok: true });
     }
@@ -199,9 +213,10 @@ async function handleApi(request, env, url) {
     const machine = await env.DB.prepare("SELECT id FROM machines WHERE id = ? AND account_id = ?").bind(machineId, accountId).first();
     if (!machine) return json({ error: "Computer not found." }, 404);
     const input = await body(request);
-    const allowed = new Set(["prompt", "followup", "stop", "config", "clarify", "stream", "update", "codex_switch"]);
+    const allowed = new Set(["prompt", "followup", "stop", "config", "clarify", "stream", "update", "codex_switch", "ai_settings"]);
     if (!allowed.has(input.type)) return json({ error: "Unsupported command." }, 400);
     const payload = input.payload && typeof input.payload === "object" ? input.payload : {};
+    const effectiveType = input.type === "config" ? String(payload._aios_command || "config") : input.type;
     if (input.type === "clarify") {
       await env.DB.prepare("DELETE FROM commands WHERE machine_id = ? AND account_id = ? AND type = 'clarify' AND claimed_at IS NULL")
         .bind(machineId, accountId).run();
@@ -211,6 +226,10 @@ async function handleApi(request, env, url) {
       // machine instead of growing the command table while the viewer is open.
       await env.DB.prepare("DELETE FROM commands WHERE machine_id = ? AND account_id = ? AND type = 'stream'")
         .bind(machineId, accountId).run();
+    }
+    if (effectiveType === "ai_settings") {
+      await env.DB.prepare("DELETE FROM commands WHERE machine_id = ? AND account_id = ? AND (type = 'ai_settings' OR (type = 'config' AND payload_json LIKE ?))")
+        .bind(machineId, accountId, '%"_aios_command":"ai_settings"%').run();
     }
     const result = await env.DB.prepare("INSERT INTO commands (account_id, machine_id, type, payload_json, created_at) VALUES (?, ?, ?, ?, ?)")
       .bind(accountId, machineId, input.type, JSON.stringify(payload), now()).run();

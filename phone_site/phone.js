@@ -22,6 +22,12 @@ const EFFORTS = [
   { id: "high", name: "High", note: "Thinks longer before each move" }
 ];
 
+const AI_PROVIDERS = [
+  { id: "codex", name: "Codex", note: "Use the signed-in ChatGPT Codex account" },
+  { id: "api", name: "OpenAI API", note: "Always use the API key saved on this PC" },
+  { id: "codex_api_fallback", name: "Codex + API fallback", note: "Use Codex first; switch to the API key if needed" }
+];
+
 const RUNNING_STATES = new Set(["running", "starting", "thinking", "acting", "waiting"]);
 const MAX_CLARIFIER_QUESTIONS = 10;
 const REMOTE_API_ORIGIN = location.hostname.endsWith("github.io")
@@ -54,6 +60,10 @@ const state = {
   detailed: prefs.bool("aios_detailed", true),
   haptics: prefs.bool("aios_haptics", true),
   keepAwake: prefs.bool("aios_awake", false),
+  background: prefs.get("aios_background", "black"),
+  providerMode: "codex",
+  hasOpenAIKey: false,
+  codexAvailable: false,
   screenOpen: prefs.bool("aios_screen_open", true),
   timers: [],
   frameTimer: null,
@@ -81,6 +91,22 @@ const state = {
   clarifierQuestions: [],
   clarifierLoading: false
 };
+
+function applyAppearance(background = state.background) {
+  state.background = background === "red" ? "red" : "black";
+  prefs.set("aios_background", state.background);
+  document.documentElement.dataset.background = state.background;
+  const color = state.background === "red" ? "#f0243a" : "#08080a";
+  document.querySelector('meta[name="theme-color"]')?.setAttribute("content", color);
+  const label = state.background === "red" ? "Red" : "Black";
+  const value = $("#appearanceValue");
+  if (value) value.textContent = label;
+  $$(".theme-option").forEach((button) => {
+    button.classList.toggle("on", button.dataset.background === state.background);
+  });
+}
+
+applyAppearance();
 
 /* ── helpers ──────────────────────────────────────────── */
 
@@ -355,6 +381,12 @@ function renderMachine() {
   const accounts = Array.isArray(status.codex_accounts) ? status.codex_accounts : [];
   const activeAccount = accounts.find((account) => account.active);
   $("#codexAccountValue").textContent = activeAccount?.label || "Not signed in";
+  const ai = status.ai || {};
+  state.providerMode = String(ai.provider_mode || operator.provider_mode || state.providerMode || "codex");
+  if (!AI_PROVIDERS.some((provider) => provider.id === state.providerMode)) state.providerMode = "codex";
+  state.hasOpenAIKey = Boolean(ai.has_openai_api_key);
+  state.codexAvailable = Boolean(ai.codex_available || accounts.some((account) => account.logged_in));
+  renderAIStatus();
   const update = status.update || {};
   $("#updateValue").textContent = update.message || "Auto-update on";
 
@@ -862,7 +894,7 @@ async function applyWakeLock() {
 async function sendCommand(type, payload = {}) {
   const machine = currentMachine();
   if (!machine) throw new Error("Choose a computer first.");
-  const tunneled = ["stream", "update", "codex_switch"].includes(type);
+  const tunneled = ["stream", "update", "codex_switch", "ai_settings"].includes(type);
   return api(`/api/machines/${encodeURIComponent(machine.id)}/commands`, {
     method: "POST",
     body: JSON.stringify({
@@ -904,6 +936,7 @@ function renderClarifier() {
   list.replaceChildren();
 
   const openCount = questions.filter((question) => !question.answered).length;
+  $(".clarifier-title").innerHTML = `<span class="clarifier-spark">✦</span> ${state.running ? "Follow-up check" : "Intent check"}`;
   $("#clarifierStatus").textContent = state.clarifierLoading
     ? (questions.length ? "Updating…" : "Reading your draft…")
     : openCount ? `${openCount} ${openCount === 1 ? "detail" : "details"} to decide` : "Covered";
@@ -1204,6 +1237,37 @@ function openRunSettings() {
   openSheet("runSettingsSheet");
 }
 
+function providerLabel(id = state.providerMode) {
+  return AI_PROVIDERS.find((provider) => provider.id === id)?.name || "Codex";
+}
+
+function renderAIStatus() {
+  const providerValue = $("#aiProviderValue");
+  if (providerValue) providerValue.textContent = providerLabel();
+  const keyStatus = $("#apiKeyStatus");
+  if (keyStatus) keyStatus.textContent = state.hasOpenAIKey ? "Saved on this PC" : "Not saved on this PC";
+  $("#clearApiKeyBtn")?.classList.toggle("hidden", !state.hasOpenAIKey);
+}
+
+function renderAIProviderOptions() {
+  renderOptions($("#aiProviderOptions"), AI_PROVIDERS, state.providerMode, async (id) => {
+    if (id === state.providerMode) return;
+    state.providerMode = id;
+    renderAIStatus();
+    renderAIProviderOptions();
+    try {
+      await sendCommand("ai_settings", { provider_mode: id });
+      toast(`${providerLabel(id)} selected`);
+      if (id !== "codex" && !state.hasOpenAIKey) $("#apiKeyInput").focus();
+      setTimeout(loadMachines, 900);
+    } catch (error) {
+      toast(error.message);
+      setTimeout(loadMachines, 300);
+    }
+  });
+  renderAIStatus();
+}
+
 $("#plannerToggle").addEventListener("change", (event) => {
   if (event.target.checked) {
     state.plannerModel = state.lastPlannerModel || "sol";
@@ -1218,6 +1282,67 @@ $("#plannerToggle").addEventListener("change", (event) => {
 
 $("#runSettingsBtn").addEventListener("click", openRunSettings);
 $("#settingsRunRow").addEventListener("click", openRunSettings);
+$("#appearanceRow").addEventListener("click", () => {
+  applyAppearance();
+  openSheet("appearanceSheet");
+});
+$$(".theme-option").forEach((button) => button.addEventListener("click", () => {
+  applyAppearance(button.dataset.background);
+  buzz();
+}));
+$("#aiProviderRow").addEventListener("click", () => {
+  renderAIProviderOptions();
+  $("#apiKeyInput").value = "";
+  openSheet("aiProviderSheet");
+});
+$("#apiKeyForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const input = $("#apiKeyInput");
+  const apiKey = input.value.trim();
+  if (!apiKey) {
+    toast("Paste an OpenAI API key first.");
+    input.focus();
+    return;
+  }
+  const button = $("#saveApiKeyBtn");
+  button.disabled = true;
+  button.textContent = "Saving…";
+  try {
+    await sendCommand("ai_settings", {
+      provider_mode: state.providerMode,
+      openai_api_key: apiKey
+    });
+    input.value = "";
+    state.hasOpenAIKey = true;
+    renderAIStatus();
+    toast("API key sent securely to this PC");
+    setTimeout(loadMachines, 900);
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = "Save";
+  }
+});
+$("#clearApiKeyBtn").addEventListener("click", async () => {
+  if (!window.confirm("Remove the OpenAI API key from this computer?")) return;
+  const button = $("#clearApiKeyBtn");
+  button.disabled = true;
+  try {
+    await sendCommand("ai_settings", {
+      provider_mode: state.providerMode,
+      clear_openai_api_key: true
+    });
+    state.hasOpenAIKey = false;
+    renderAIStatus();
+    toast("API key removal requested");
+    setTimeout(loadMachines, 900);
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    button.disabled = false;
+  }
+});
 $("#codexAccountRow").addEventListener("click", () => {
   const accounts = Array.isArray(currentMachine()?.status?.codex_accounts)
     ? currentMachine().status.codex_accounts.filter((account) => account.logged_in)

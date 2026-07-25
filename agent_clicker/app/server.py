@@ -173,7 +173,26 @@ DEFAULT_OPERATOR_CONFIG = {
     "voice": "nova",
     "shell": False,
     "codex_auth": False,
+    "provider_mode": "",
 }
+
+AI_PROVIDER_MODES = {"codex", "api", "codex_api_fallback"}
+
+
+def _provider_mode(operator):
+    value = str((operator or {}).get("provider_mode") or "").strip().lower()
+    if value in AI_PROVIDER_MODES:
+        return value
+    return "codex" if bool((operator or {}).get("codex_auth")) else "api"
+
+
+def _ai_status(config, operator):
+    accounts = aios_codex_accounts.list_accounts(HELPER_CONFIG_PATH)
+    return {
+        "provider_mode": _provider_mode(operator),
+        "has_openai_api_key": bool(str(config.get("openai_api_key") or os.environ.get("OPENAI_API_KEY") or "").strip()),
+        "codex_available": any(bool(account.get("logged_in")) for account in accounts),
+    }
 
 
 def forward_helper(action, text="", options=None):
@@ -279,11 +298,49 @@ def api_phone_status():
         "monitor_count": len(monitors),
         "operator": operator,
         "operator_state": operator_state,
+        "ai": _ai_status(cfg, operator),
         "codex_usage": codex_usage.codex_usage_payload(aios_codex_accounts.active_home(HELPER_CONFIG_PATH)),
         "codex_accounts": aios_codex_accounts.list_accounts(HELPER_CONFIG_PATH),
         "update": update_health,
         "stream": stream_health,
     })
+
+
+@app.route("/api/phone/ai/config", methods=["GET", "POST", "OPTIONS"])
+def api_phone_ai_config():
+    if request.method == "OPTIONS":
+        return "", 204
+    cfg = _load_helper_config()
+    operator = dict(DEFAULT_OPERATOR_CONFIG)
+    operator.update(cfg.get("ai_operator") or {})
+    if request.method == "GET":
+        return jsonify({"ok": True, "ai": _ai_status(cfg, operator)})
+
+    data = request.get_json(silent=True) or {}
+    provider_mode = str(data.get("provider_mode") or _provider_mode(operator)).strip().lower()
+    if provider_mode not in AI_PROVIDER_MODES:
+        return jsonify({"ok": False, "error": "Unsupported AI provider mode."}), 400
+
+    if "openai_api_key" in data:
+        api_key = str(data.get("openai_api_key") or "").strip()
+        if api_key and (len(api_key) < 20 or any(char.isspace() for char in api_key)):
+            return jsonify({"ok": False, "error": "That API key does not look valid."}), 400
+        cfg["openai_api_key"] = api_key
+    elif data.get("clear_openai_api_key"):
+        cfg["openai_api_key"] = ""
+
+    operator["provider_mode"] = provider_mode
+    operator["codex_auth"] = provider_mode != "api"
+    cfg["ai_operator"] = operator
+    try:
+        _save_helper_config(cfg)
+    except OSError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+    # The desktop helper owns the live model client. It reloads the key from
+    # the shared config and clears any cached OpenAI client before the next call.
+    forward_helper("reload_operator_settings", "", operator)
+    return jsonify({"ok": True, "ai": _ai_status(cfg, operator)})
 
 
 @app.route("/api/phone/start", methods=["POST", "OPTIONS"])

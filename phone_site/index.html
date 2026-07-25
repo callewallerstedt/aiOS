@@ -51,7 +51,7 @@
 <section id="authView" class="auth">
   <div class="auth-card">
     <div class="brand">
-      <div class="brand-mark">ai</div>
+      <div class="brand-mark"><img src="icons/aios-icon-192.png" alt=""></div>
       <div class="brand-text"><strong>aiOS</strong><span>Remote</span></div>
     </div>
 
@@ -258,6 +258,8 @@
   <h3>Settings</h3>
   <div class="rows">
     <button id="settingsRunRow" class="row" type="button"><span>Run models</span><em id="settingsRunValue">Luna · Plan Sol</em><svg class="ic"><use href="#i-chevron"/></svg></button>
+    <button id="appearanceRow" class="row" type="button"><span>Appearance</span><em id="appearanceValue">Black</em><svg class="ic"><use href="#i-chevron"/></svg></button>
+    <button id="aiProviderRow" class="row" type="button"><span>AI provider</span><em id="aiProviderValue">Codex</em><svg class="ic"><use href="#i-chevron"/></svg></button>
     <button id="codexAccountRow" class="row" type="button"><span>Codex account</span><em id="codexAccountValue">Default</em><svg class="ic"><use href="#i-chevron"/></svg></button>
     <div class="row"><span>Software</span><em id="updateValue">Auto-update on</em></div>
     <label class="row"><span>Maximum steps</span><input id="stepsInput" class="row-input" type="number" inputmode="numeric" min="1" max="100" value="30"></label>
@@ -267,6 +269,42 @@
   </div>
   <button id="updateBtn" class="btn btn-quiet btn-block"><svg class="ic"><use href="#i-spark"/></svg> Check and update now</button>
   <button id="logoutBtn" class="btn btn-danger btn-block"><svg class="ic"><use href="#i-power"/></svg> Lock this phone</button>
+</section>
+
+<section id="appearanceSheet" class="sheet hidden" role="dialog" aria-modal="true">
+  <div class="grabber"></div>
+  <h3>Appearance</h3>
+  <p class="sheet-copy">Choose the background that feels best on your phone.</p>
+  <div id="appearanceOptions" class="theme-options">
+    <button class="theme-option" type="button" data-background="black">
+      <span class="theme-swatch black"><i></i></span>
+      <strong>Black</strong>
+      <small>Focused and discreet</small>
+    </button>
+    <button class="theme-option" type="button" data-background="red">
+      <span class="theme-swatch red"><i></i></span>
+      <strong>Red</strong>
+      <small>Bold aiOS look</small>
+    </button>
+  </div>
+</section>
+
+<section id="aiProviderSheet" class="sheet hidden" role="dialog" aria-modal="true">
+  <div class="grabber"></div>
+  <h3>AI provider</h3>
+  <p class="sheet-copy">This controls OPERATOR and the live intent questions.</p>
+  <div id="aiProviderOptions" class="options"></div>
+  <form id="apiKeyForm" class="api-key-card">
+    <div class="api-key-head">
+      <span><strong>OpenAI API key</strong><small id="apiKeyStatus">Not saved on this PC</small></span>
+      <button id="clearApiKeyBtn" class="text-action hidden" type="button">Remove</button>
+    </div>
+    <div class="secret-row">
+      <input id="apiKeyInput" class="text-input secret-input" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="sk-…">
+      <button id="saveApiKeyBtn" class="btn btn-primary" type="submit">Save</button>
+    </div>
+    <p class="note">Saved only in aiOS on the selected computer. The phone never displays it again.</p>
+  </form>
 </section>
 
 <section id="codexAccountSheet" class="sheet hidden" role="dialog" aria-modal="true">

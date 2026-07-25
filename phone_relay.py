@@ -20,7 +20,7 @@ import urllib.request
 import httpx
 
 import aios_codex_accounts
-from prompt_clarifier import clarify_prompt, normalize_questions
+from prompt_clarifier import clarify_prompt_for_provider, normalize_questions
 
 
 ROOT = Path(__file__).resolve().parent
@@ -344,7 +344,7 @@ class Bridge:
         # New control messages can be tunneled through the legacy relay's
         # existing `config` command until every hosted backend is upgraded.
         tunneled = str(payload.get("_aios_command") or "") if kind == "config" else ""
-        if tunneled in {"stream", "update", "codex_switch"}:
+        if tunneled in {"stream", "update", "codex_switch", "ai_settings"}:
             kind = tunneled
             payload = {key: value for key, value in payload.items() if key != "_aios_command"}
         if kind in {"prompt", "followup"}:
@@ -380,9 +380,14 @@ class Bridge:
                 return {"ok": True, "request_id": request_id, "questions": []}
             helper_config = load_config()
             api_key = str(helper_config.get("openai_api_key") or os.environ.get("OPENAI_API_KEY") or "").strip()
-            if not api_key:
-                raise RuntimeError("OpenAI API key is not configured.")
-            result = clarify_prompt(api_key, draft, normalize_questions(payload.get("previous") or []))
+            operator = helper_config.get("ai_operator") if isinstance(helper_config.get("ai_operator"), dict) else {}
+            provider_mode = str(operator.get("provider_mode") or ("codex" if operator.get("codex_auth") else "api"))
+            result = clarify_prompt_for_provider(
+                draft,
+                normalize_questions(payload.get("previous") or []),
+                provider_mode=provider_mode,
+                api_key=api_key,
+            )
             return {"ok": True, "request_id": request_id, **result}
         if kind == "stream":
             monitor_id = str(payload.get("monitor_id") or "1")[:32]
@@ -391,6 +396,14 @@ class Bridge:
         if kind == "codex_switch":
             account_id = str(payload.get("account_id") or "")
             return aios_codex_accounts.switch_account(account_id, CONFIG_PATH)
+        if kind == "ai_settings":
+            provider_mode = str(payload.get("provider_mode") or "").strip().lower()
+            local_payload = {"provider_mode": provider_mode}
+            if "openai_api_key" in payload:
+                local_payload["openai_api_key"] = str(payload.get("openai_api_key") or "").strip()
+            if payload.get("clear_openai_api_key"):
+                local_payload["clear_openai_api_key"] = True
+            return self.local_json("/api/phone/ai/config", method="POST", payload=local_payload)
         if kind == "update":
             UPDATE_REQUEST_PATH.touch()
             return {"ok": True, "queued": True, "message": "Update requested; it will install when OPERATOR is idle."}
@@ -409,7 +422,11 @@ class Bridge:
                 "task": operator_state.get("last_question") if asking else operator_state.get("task", ""),
                 "asking": asking,
                 "model": operator_config.get("model") or "gpt-5.6-luna",
+                "provider_mode": operator_config.get("provider_mode") or (
+                    "codex" if operator_config.get("codex_auth") else "api"
+                ),
             },
+            "ai": raw.get("ai") or {},
             "helper": bool(raw.get("helper")),
             "monitors": self.monitors,
             "stream": self.frame_streamer.snapshot(),
