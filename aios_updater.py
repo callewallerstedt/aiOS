@@ -223,8 +223,8 @@ def get_current_branch() -> str:
     if _is_git_repo():
         rc, out = _run(["git", "rev-parse", "--abbrev-ref", "HEAD"])
         if rc == 0:
-            return out.strip() or GITHUB_BRANCH
-    return GITHUB_BRANCH
+            return out.strip() or DEFAULT_BRANCH
+    return DEFAULT_BRANCH
 
 
 def _remote_latest(src: dict) -> tuple[dict | None, str]:
@@ -273,14 +273,25 @@ def check_for_update(owner: str | None = None, repo: str | None = None,
 
 
 def _git_update(src: dict, progress) -> tuple[bool, str]:
+    rc, out = _run(["git", "status", "--porcelain", "--untracked-files=no"])
+    if rc != 0:
+        return False, f"could not inspect worktree: {out}"
+    if out.strip():
+        return False, "update paused: tracked local changes are present"
+    branch = get_current_branch()
+    if branch != src["branch"]:
+        return False, f"update paused: current branch is {branch}, expected {src['branch']}"
     progress(f"git fetch origin (branch {src['branch']})…")
-    rc, out = _run(["git", "fetch", "--all", "--prune"], timeout=180)
+    rc, out = _run(["git", "fetch", "origin", src["branch"], "--prune"], timeout=180)
     if rc != 0:
         return False, f"git fetch failed: {out}"
-    progress(f"git reset --hard origin/{src['branch']}")
-    rc, out = _run(["git", "reset", "--hard", f"origin/{src['branch']}"], timeout=120)
+    rc, out = _run(["git", "merge-base", "--is-ancestor", "HEAD", f"origin/{src['branch']}"])
     if rc != 0:
-        return False, f"git reset failed: {out}"
+        return False, "update paused: local history has diverged from origin"
+    progress(f"fast-forwarding to origin/{src['branch']}")
+    rc, out = _run(["git", "merge", "--ff-only", f"origin/{src['branch']}"], timeout=120)
+    if rc != 0:
+        return False, f"fast-forward failed: {out}"
     return True, "git updated"
 
 
@@ -568,9 +579,10 @@ def _write_apply_script(parent_pid: int) -> Path:
     return Path(path)
 
 
-def _spawn_apply_script() -> bool:
+def spawn_staged_apply(parent_pid: int | None = None) -> bool:
+    """Launch the detached tarball applier without exposing update secrets."""
     try:
-        script = _write_apply_script(os.getpid())
+        script = _write_apply_script(os.getpid() if parent_pid is None else parent_pid)
         kwargs = {"close_fds": True}
         if os.name == "nt":
             DETACHED_PROCESS = 0x00000008
@@ -580,6 +592,10 @@ def _spawn_apply_script() -> bool:
         return True
     except Exception:
         return False
+
+
+def _spawn_apply_script() -> bool:
+    return spawn_staged_apply()
 
 
 def restart_aios(extra_args: list[str] | None = None) -> None:

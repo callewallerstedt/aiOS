@@ -21,6 +21,7 @@ import urllib.error
 import urllib.request
 from tkinter import colorchooser, filedialog, messagebox, simpledialog
 
+import aios_codex_accounts
 import codex_usage
 from voice_settings import (
     COMPUTE_TYPES,
@@ -51,7 +52,8 @@ DEFAULT_PROJECT_META = {
 }
 HOST = "127.0.0.1"
 PORT = 48736
-CODEX_HOME = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
+CODEX_HOME = aios_codex_accounts.active_home(CONFIG_PATH)
+os.environ["AIOS_ACTIVE_CODEX_HOME"] = str(CODEX_HOME)
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 CREATE_NEW_CONSOLE = 0x00000010 if os.name == "nt" else 0
 OPERATOR_DEFAULT_MODEL = "gpt-5.6-luna"
@@ -82,6 +84,9 @@ WS_EX_NOACTIVATE = 0x08000000
 WS_POPUP = 0x80000000
 SW_SHOWNOACTIVATE = 4
 SW_HIDE = 0
+HWND_TOPMOST = -1
+SWP_NOACTIVATE = 0x0010
+SWP_SHOWWINDOW = 0x0040
 LWA_ALPHA = 0x00000002
 WDA_MONITOR = 0x00000001
 WDA_EXCLUDEFROMCAPTURE = 0x00000011
@@ -174,6 +179,7 @@ class NativeOperatorOverlay:
         self.log_text = ""
         self.title_text = title_text
         self.log_title = log_title
+        self.placements = {}
         self.enabled = sys.platform.startswith("win")
         self._wndproc = None
         if self.enabled:
@@ -187,6 +193,12 @@ class NativeOperatorOverlay:
         self.user32.DefWindowProcW.argtypes = [wintypes.HWND, wintypes.UINT, ctypes.c_size_t, ctypes.c_ssize_t]
         self.user32.DefWindowProcW.restype = ctypes.c_ssize_t
         self.user32.CreateWindowExW.restype = wintypes.HWND
+        self.user32.SetWindowPos.argtypes = [
+            wintypes.HWND, wintypes.HWND,
+            ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+            wintypes.UINT,
+        ]
+        self.user32.SetWindowPos.restype = wintypes.BOOL
 
         wndproc_type = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, wintypes.HWND, wintypes.UINT, ctypes.c_size_t, ctypes.c_ssize_t)
 
@@ -263,7 +275,7 @@ class NativeOperatorOverlay:
         label_w = min(560, max(280, width - 120))
         log_w = min(580, max(360, int(width * 0.34)))
         log_h = min(190, max(120, int(height * 0.20)))
-        placements = {
+        self.placements = {
             "top": (left + inset, top + inset, max(1, width - inset * 2), border),
             "bottom": (left + inset, top + height - inset - border, max(1, width - inset * 2), border),
             "left": (left + inset, top + inset, border, max(1, height - inset * 2)),
@@ -272,8 +284,14 @@ class NativeOperatorOverlay:
             "log": (left + width - inset - log_w - 12, top + height - inset - log_h - 22, log_w, log_h),
         }
         for name, hwnd in self.windows.items():
-            x, y, w, h = placements[name]
-            self.user32.MoveWindow(hwnd, x, y, w, h, True)
+            x, y, w, h = self.placements[name]
+            # WS_EX_TOPMOST alone is not enough once another topmost or
+            # fullscreen window changes the z-order. SetWindowPos both shows
+            # and explicitly reasserts the topmost band without stealing focus.
+            self.user32.SetWindowPos(
+                hwnd, HWND_TOPMOST, x, y, w, h,
+                SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            )
             self.user32.ShowWindow(hwnd, SW_SHOWNOACTIVATE)
 
     def hide(self):
@@ -294,6 +312,13 @@ class NativeOperatorOverlay:
         for name, hwnd in self.windows.items():
             value = log_alpha if name == "log" else label_alpha if name == "label" else alpha
             self.user32.SetLayeredWindowAttributes(hwnd, 0, max(0, min(255, value)), LWA_ALPHA)
+            placement = self.placements.get(name)
+            if placement:
+                x, y, w, h = placement
+                self.user32.SetWindowPos(
+                    hwnd, HWND_TOPMOST, x, y, w, h,
+                    SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                )
             self.user32.InvalidateRect(hwnd, None, True)
 
     def set_log(self, text):
@@ -1204,9 +1229,12 @@ def find_codex():
     return shutil.which("codex") or ""
 
 
-def codex_env():
+def codex_env(home=None):
     env = os.environ.copy()
     env.pop("OPENAI_API_KEY", None)
+    if home:
+        env["CODEX_HOME"] = str(home)
+        env["AIOS_ACTIVE_CODEX_HOME"] = str(home)
     return env
 
 
@@ -1249,13 +1277,21 @@ def _legacy_codex_auth_info_unused():
 
 
 def launch_codex_login():
+    global CODEX_HOME
     codex = find_codex()
     if not codex:
         return False
+    signed_in, _label = codex_auth_info()
+    if signed_in:
+        slot = aios_codex_accounts.create_login_slot(CONFIG_PATH)
+        CODEX_HOME = Path(slot["home"])
+    else:
+        CODEX_HOME.mkdir(parents=True, exist_ok=True)
+    os.environ["AIOS_ACTIVE_CODEX_HOME"] = str(CODEX_HOME)
     try:
         subprocess.Popen(
             [codex, "login"],
-            env=codex_env(),
+            env=codex_env(CODEX_HOME),
             cwd=str(BASE_DIR),
             creationflags=CREATE_NEW_CONSOLE,
         )
@@ -4896,11 +4932,11 @@ class HelperOverlay:
                 key, value = line.split("=", 1)
                 key = key.strip()
                 value = value.strip().strip('"').strip("'")
-                if key:
-                    os.environ.setdefault(key, value)
+                if key and value and not os.environ.get(key):
+                    os.environ[key] = value
         key = self.get_openai_api_key()
-        if key:
-            os.environ.setdefault("OPENAI_API_KEY", key)
+        if key and not os.environ.get("OPENAI_API_KEY"):
+            os.environ["OPENAI_API_KEY"] = key
 
     def _refresh_agent_operator_codex_auth(self):
         try:
@@ -5923,6 +5959,7 @@ class HelperOverlay:
             record["ok"] = bool(event.get("ok"))
             record["steps"] = event.get("steps")
             record["message"] = event.get("message", "")
+            record["usage"] = event.get("usage") or {}
         elif kind == "ask":
             record["message"] = event.get("message", "")
         elif kind == "follow_up_received":
@@ -6050,6 +6087,17 @@ class HelperOverlay:
             self._agent_operator_control_stop()
             self._agent_operator_log_line("ts", f"\n[{self._ts()}] ")
             self._agent_operator_log_line(tag, f"DONE ok={ok} steps={event.get('steps')} message={event.get('message', '')}\n")
+            usage = event.get("usage") if isinstance(event.get("usage"), dict) else {}
+            if usage:
+                input_tokens = int(usage.get("input_tokens") or 0)
+                output_tokens = int(usage.get("output_tokens") or 0)
+                cached_tokens = int(usage.get("cached_input_tokens") or 0)
+                requests = int(usage.get("requests") or 0)
+                self._agent_operator_log_line(
+                    "status",
+                    f"USAGE {input_tokens:,} input + {output_tokens:,} output"
+                    f" ({cached_tokens:,} cached) across {requests} model call(s)\n",
+                )
             if self.agent_operator_stop_requested:
                 self._agent_operator_log_line("err", "SAFETY STOP loop exited. aiOPERATOR is no longer controlling input.\n")
                 self.agent_operator_stop_requested = False
@@ -6124,15 +6172,16 @@ class HelperOverlay:
         self.agent_operator_log_buffer.append((tag, text))
         if len(self.agent_operator_log_buffer) > 500:
             self.agent_operator_log_buffer = self.agent_operator_log_buffer[-500:]
-        if not self.agent_operator_log:
-            return
-        try:
-            self.agent_operator_log.configure(state="normal")
-            self.agent_operator_log.insert("end", text, tag)
-            self.agent_operator_log.configure(state="disabled")
-            self.agent_operator_log.see("end")
-        except tk.TclError:
-            pass
+        if self.agent_operator_log:
+            try:
+                self.agent_operator_log.configure(state="normal")
+                self.agent_operator_log.insert("end", text, tag)
+                self.agent_operator_log.configure(state="disabled")
+                self.agent_operator_log.see("end")
+            except tk.TclError:
+                pass
+        # Phone/headless runs do not necessarily have the full Operator tab
+        # mounted. The native HUD must still receive every thought and action.
         self._agent_operator_control_update_log()
 
     def _agent_operator_render_log_buffer(self):
@@ -9671,11 +9720,11 @@ class HelperOverlay:
             self.send()
 
     def _remote_submit_operator(self, text, options=None):
-        # A phone-launched task opens the real workspace, not just the short
-        # connection overlay.
+        # Build the hidden Operator widgets needed by the runner, but do not
+        # restore or focus the full desktop GUI for a phone-launched task.
+        # The compact always-on-top HUD is shown when the run actually starts.
         self._phone_control_hide()
         self.render_tab("AI Operator")
-        self._show_operator_workspace()
         self._remote_submit_operator_attempt(text, options, attempts_left=80)
 
     def _show_operator_workspace(self):

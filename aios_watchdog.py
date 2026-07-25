@@ -9,6 +9,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 
@@ -18,6 +19,9 @@ HELPER_HEARTBEAT = BASE_DIR / ".aios-helper-heartbeat"
 AHK_HEARTBEAT = BASE_DIR / ".aios-ahk-heartbeat"
 RELAY_HEARTBEAT = BASE_DIR / ".aios-phone-relay-heartbeat"
 HEALTH_PATH = BASE_DIR / ".aios-health.json"
+UPDATE_HEALTH_PATH = BASE_DIR / ".aios-update-health.json"
+UPDATE_REQUEST_PATH = BASE_DIR / ".aios-update-request"
+OPERATOR_STATUS_PATH = BASE_DIR / "phone_operator_events" / "status.json"
 LOG_PATH = BASE_DIR / "aios-watchdog.log"
 CONFIG_PATH = BASE_DIR / "helper_config.json"
 MUTEX_NAME = "Local\\aiOS.Desktop.Watchdog.Singleton"
@@ -25,9 +29,12 @@ CHECK_INTERVAL = 10
 HELPER_TIMEOUT = 40
 AHK_TIMEOUT = 35
 RELAY_TIMEOUT = 90
+AUTO_UPDATE_INTERVAL = 60
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 DETACHED_PROCESS = 0x00000008 if os.name == "nt" else 0
 _MUTEX_HANDLE = None
+_UPDATE_LOCK = threading.Lock()
+_UPDATE_RESULT = {"state": "idle", "message": "Auto-update ready", "updated_at": 0}
 
 
 def log(message: str) -> None:
@@ -158,10 +165,102 @@ def write_health(status: dict) -> None:
         pass
 
 
+def _write_update_health(payload: dict) -> None:
+    global _UPDATE_RESULT
+    _UPDATE_RESULT = {**payload, "updated_at": int(time.time())}
+    temp = UPDATE_HEALTH_PATH.with_suffix(".json.tmp")
+    try:
+        temp.write_text(json.dumps(_UPDATE_RESULT, indent=2), encoding="utf-8")
+        temp.replace(UPDATE_HEALTH_PATH)
+    except OSError:
+        pass
+
+
+def operator_is_running() -> bool:
+    try:
+        return bool(json.loads(OPERATOR_STATUS_PATH.read_text(encoding="utf-8")).get("running"))
+    except (OSError, json.JSONDecodeError):
+        return False
+
+
+def auto_update_enabled(config: dict) -> bool:
+    settings = config.get("auto_update") if isinstance(config.get("auto_update"), dict) else {}
+    return settings.get("enabled", True) is not False
+
+
+def _auto_update_worker(pythonw: str) -> None:
+    if not _UPDATE_LOCK.acquire(blocking=False):
+        return
+    try:
+        import aios_updater
+
+        _write_update_health({"state": "checking", "message": "Checking GitHub main"})
+        check = aios_updater.check_for_update()
+        if not check.get("ok"):
+            _write_update_health({"state": "error", "message": check.get("error") or "Update check failed"})
+            return
+        if not check.get("behind"):
+            _write_update_health({
+                "state": "current", "message": "Latest version installed",
+                "current": check.get("current"), "latest": check.get("latest"),
+            })
+            return
+        if operator_is_running():
+            _write_update_health({
+                "state": "waiting", "message": "Update waiting for OPERATOR to finish",
+                "current": check.get("current"), "latest": check.get("latest"),
+            })
+            return
+        result = aios_updater.perform_update(progress=lambda value: log(f"update: {value}"))
+        if not result.get("ok"):
+            _write_update_health({
+                "state": "paused", "message": result.get("message") or "Update paused safely",
+                "current": check.get("current"), "latest": check.get("latest"),
+            })
+            return
+        _write_update_health({
+            "state": "restarting", "message": "Updated; restarting aiOS services",
+            "current": result.get("current") or check.get("latest"), "latest": check.get("latest"),
+        })
+        stop_python_script("helper_overlay.py")
+        stop_python_script("phone_relay.py")
+        stop_python_script("agent_clicker/run.py")
+        if result.get("staged"):
+            if not aios_updater.spawn_staged_apply(parent_pid=0):
+                raise RuntimeError("could not launch staged update applier")
+            return
+        time.sleep(1.0)
+        spawn([pythonw, str(BASE_DIR / "helper_overlay.py"), "--background"])
+        start_phone_bridge()
+        _write_update_health({
+            "state": "current", "message": "Update installed and services restarted",
+            "current": result.get("current") or check.get("latest"), "latest": check.get("latest"),
+        })
+    except Exception as exc:
+        _write_update_health({"state": "error", "message": f"Auto-update failed: {exc}"})
+        log(f"auto-update failed: {exc!r}")
+    finally:
+        try:
+            UPDATE_REQUEST_PATH.unlink(missing_ok=True)
+        except OSError:
+            pass
+        _UPDATE_LOCK.release()
+
+
+def schedule_auto_update(pythonw: str) -> None:
+    threading.Thread(
+        target=_auto_update_worker,
+        args=(pythonw,),
+        name="aios-auto-update",
+        daemon=True,
+    ).start()
+
+
 def run() -> None:
     pythonw = find_pythonw()
     helper_grace_until = 0.0
     bridge_grace_until = 0.0
+    next_update_check = time.time() + 12
     log("watchdog started")
     while True:
         now = time.time()
@@ -199,6 +298,12 @@ def run() -> None:
                 bridge_grace_until = now + 45
                 log("phone bridge recovery started")
 
+        requested = UPDATE_REQUEST_PATH.exists()
+        if auto_update_enabled(config) and (requested or now >= next_update_check):
+            schedule_auto_update(pythonw)
+            next_update_check = now + AUTO_UPDATE_INTERVAL
+
+        status["update"] = dict(_UPDATE_RESULT)
         write_health(status)
         time.sleep(CHECK_INTERVAL)
 

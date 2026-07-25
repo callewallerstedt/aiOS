@@ -3,17 +3,23 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
+import ctypes
 import json
 import os
 from pathlib import Path
 import platform
 import socket
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 
+import httpx
+
+import aios_codex_accounts
 from prompt_clarifier import clarify_prompt, normalize_questions
 
 
@@ -21,7 +27,9 @@ ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "helper_config.json"
 STATE_PATH = ROOT / "phone-relay-state.json"
 HEARTBEAT_PATH = ROOT / ".aios-phone-relay-heartbeat"
+STREAM_HEALTH_PATH = ROOT / ".aios-stream-health.json"
 LOCAL_EVENTS_PATH = ROOT / "phone_operator_events" / "events.jsonl"
+UPDATE_REQUEST_PATH = ROOT / ".aios-update-request"
 LOCAL_BASE = "http://127.0.0.1:5000"
 DEFAULT_RELAY = os.environ.get("AIOS_RELAY_URL", "").rstrip("/")
 MODEL_MAP = {
@@ -29,6 +37,162 @@ MODEL_MAP = {
     "terra": "gpt-5.6-terra",
     "sol": "gpt-5.6-sol",
 }
+RELAY_MUTEX_NAME = "Local\\aiOS.PhoneRelay.Singleton"
+_RELAY_MUTEX_HANDLE = None
+
+
+def claim_single_instance() -> bool:
+    global _RELAY_MUTEX_HANDLE
+    if os.name != "nt":
+        return True
+    kernel32 = ctypes.windll.kernel32
+    handle = kernel32.CreateMutexW(None, False, RELAY_MUTEX_NAME)
+    if not handle:
+        return True
+    if kernel32.GetLastError() == 183:
+        kernel32.CloseHandle(handle)
+        return False
+    _RELAY_MUTEX_HANDLE = handle
+    return True
+
+
+class FrameStreamer:
+    """Continuously publish the display the phone is actively watching.
+
+    This runs separately from command/event polling so a slow frame can never
+    delay a Stop command. The phone refreshes the lease while visible; without
+    a lease we drop to one frame per second to keep bandwidth reasonable.
+    """
+
+    def __init__(self, bridge):
+        self.bridge = bridge
+        self.target_fps = max(10.0, min(20.0, float(os.environ.get("AIOS_PHONE_STREAM_FPS", "12"))))
+        self.monitor_id = ""
+        self.active_until = time.monotonic() + 15.0
+        self._stop = threading.Event()
+        self._wake = threading.Event()
+        self._thread = None
+        self._lock = threading.Lock()
+        self._frame_times = []
+        self._sequence = 0
+        self._last_health_write = 0.0
+        self._stats = {
+            "fps": 0.0, "target_fps": self.target_fps, "active": False,
+            "capture_ms": 0, "upload_ms": 0, "monitor_id": "",
+            "last_frame_at": 0, "error": "",
+        }
+
+    def start(self):
+        if self._thread and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, name="aios-live-desktop", daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+        self._wake.set()
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=2.0)
+
+    def select_monitor(self, monitor_id: str, lease_seconds: float = 15.0):
+        self.monitor_id = str(monitor_id or "")
+        self.active_until = time.monotonic() + max(5.0, min(60.0, float(lease_seconds)))
+        self._wake.set()
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            return dict(self._stats)
+
+    def _chosen_monitor(self) -> str:
+        available = [str(item.get("id")) for item in self.bridge.monitors if item.get("id") is not None]
+        if self.monitor_id in available:
+            return self.monitor_id
+        return available[0] if available else "1"
+
+    def _record(self, *, monitor_id, capture_ms=0, upload_ms=0, error=""):
+        now = time.monotonic()
+        with self._lock:
+            if not error:
+                self._frame_times.append(now)
+                cutoff = now - 2.0
+                self._frame_times = [stamp for stamp in self._frame_times if stamp >= cutoff]
+            fps = 0.0
+            if len(self._frame_times) >= 2:
+                span = self._frame_times[-1] - self._frame_times[0]
+                if span > 0:
+                    fps = (len(self._frame_times) - 1) / span
+            self._stats.update({
+                "fps": round(fps, 1),
+                "active": time.monotonic() < self.active_until,
+                "capture_ms": int(capture_ms),
+                "upload_ms": int(upload_ms),
+                "monitor_id": monitor_id,
+                "last_frame_at": int(time.time() * 1000) if not error else self._stats.get("last_frame_at", 0),
+                "error": str(error)[:180],
+            })
+            snapshot = dict(self._stats)
+        if now - self._last_health_write >= 0.5:
+            self._last_health_write = now
+            temp = STREAM_HEALTH_PATH.with_suffix(".json.tmp")
+            try:
+                temp.write_text(json.dumps(snapshot, indent=2), encoding="utf-8")
+                temp.replace(STREAM_HEALTH_PATH)
+            except OSError:
+                pass
+
+    def _run(self):
+        local_limits = httpx.Limits(max_keepalive_connections=2, max_connections=2)
+        remote_limits = httpx.Limits(max_keepalive_connections=16, max_connections=16)
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=16, thread_name_prefix="aios-frame-upload")
+        pending = {}
+
+        def upload(remote_client, monitor_id, sequence, content):
+            t0 = time.monotonic()
+            response = remote_client.put(
+                f"{self.bridge.relay_url}/api/agent/frame/{urllib.parse.quote(monitor_id, safe='')}",
+                content=content,
+                headers={
+                    **self.bridge.headers,
+                    "Content-Type": "image/jpeg",
+                    "X-aiOS-Frame-Seq": str(sequence),
+                },
+            )
+            response.raise_for_status()
+            return (time.monotonic() - t0) * 1000
+
+        with httpx.Client(timeout=httpx.Timeout(8.0, connect=4.0), limits=local_limits) as local_client, \
+                httpx.Client(timeout=httpx.Timeout(12.0, connect=5.0), limits=remote_limits) as remote_client:
+            while not self._stop.is_set():
+                started = time.monotonic()
+                for future in [item for item in pending if item.done()]:
+                    monitor_id, capture_ms = pending.pop(future)
+                    try:
+                        self._record(monitor_id=monitor_id, capture_ms=capture_ms, upload_ms=future.result())
+                    except Exception as exc:
+                        self._record(monitor_id=monitor_id, capture_ms=capture_ms, error=exc)
+                active = started < self.active_until
+                fps = self.target_fps if active else 1.0
+                monitor_id = self._chosen_monitor()
+                try:
+                    t0 = time.monotonic()
+                    local = local_client.get(
+                        f"{LOCAL_BASE}/api/phone/screen",
+                        params={"monitor": monitor_id, "q": 48, "max": 1024, "stream": 1},
+                    )
+                    local.raise_for_status()
+                    capture_ms = (time.monotonic() - t0) * 1000
+                    if len(pending) < 16:
+                        self._sequence += 1
+                        future = executor.submit(upload, remote_client, monitor_id, self._sequence, local.content)
+                        pending[future] = (monitor_id, capture_ms)
+                except Exception as exc:
+                    self._record(monitor_id=monitor_id, error=exc)
+                interval = 1.0 / fps
+                wait_for = max(0.0, interval - (time.monotonic() - started))
+                self._wake.wait(wait_for)
+                self._wake.clear()
+        executor.shutdown(wait=False, cancel_futures=True)
 
 
 def load_config() -> dict:
@@ -109,10 +273,10 @@ class Bridge:
         self.headers = {"X-aiOS-Machine-Token": self.token}
         self.log_cursor = self.load_cursor()
         self.last_status_at = 0.0
-        self.last_frame_at = 0.0
         self.last_monitors_at = 0.0
         self.monitors = []
         self.backoff = 1.0
+        self.frame_streamer = FrameStreamer(self)
 
     def load_cursor(self) -> int:
         try:
@@ -159,7 +323,6 @@ class Bridge:
         self.headers = {"X-aiOS-Machine-Token": token}
         self.log_cursor = self.load_cursor()
         self.last_status_at = 0.0
-        self.last_frame_at = 0.0
         self.last_monitors_at = 0.0
         self.monitors = []
         print(f"aiOS Remote bridge switched to pairing {machine_id}", flush=True)
@@ -178,6 +341,12 @@ class Bridge:
     def execute(self, command: dict) -> dict:
         kind = str(command.get("type") or "")
         payload = command.get("payload") if isinstance(command.get("payload"), dict) else {}
+        # New control messages can be tunneled through the legacy relay's
+        # existing `config` command until every hosted backend is upgraded.
+        tunneled = str(payload.get("_aios_command") or "") if kind == "config" else ""
+        if tunneled in {"stream", "update", "codex_switch"}:
+            kind = tunneled
+            payload = {key: value for key, value in payload.items() if key != "_aios_command"}
         if kind in {"prompt", "followup"}:
             model = MODEL_MAP.get(str(payload.get("model") or "").lower(), payload.get("model") or "gpt-5.6-luna")
             options = {
@@ -215,6 +384,16 @@ class Bridge:
                 raise RuntimeError("OpenAI API key is not configured.")
             result = clarify_prompt(api_key, draft, normalize_questions(payload.get("previous") or []))
             return {"ok": True, "request_id": request_id, **result}
+        if kind == "stream":
+            monitor_id = str(payload.get("monitor_id") or "1")[:32]
+            self.frame_streamer.select_monitor(monitor_id, payload.get("lease_seconds") or 15)
+            return {"ok": True, "monitor_id": monitor_id, "target_fps": self.frame_streamer.target_fps}
+        if kind == "codex_switch":
+            account_id = str(payload.get("account_id") or "")
+            return aios_codex_accounts.switch_account(account_id, CONFIG_PATH)
+        if kind == "update":
+            UPDATE_REQUEST_PATH.touch()
+            return {"ok": True, "queued": True, "message": "Update requested; it will install when OPERATOR is idle."}
         raise RuntimeError(f"Unsupported command: {kind}")
 
     def collect_status(self) -> dict:
@@ -233,6 +412,10 @@ class Bridge:
             },
             "helper": bool(raw.get("helper")),
             "monitors": self.monitors,
+            "stream": self.frame_streamer.snapshot(),
+            "codex_usage": raw.get("codex_usage") or {},
+            "codex_accounts": aios_codex_accounts.list_accounts(CONFIG_PATH),
+            "update": raw.get("update") or {},
         }
 
     def refresh_monitors(self) -> None:
@@ -283,31 +466,19 @@ class Bridge:
             payload["result"] = result or {}
         self.remote_json("/api/agent/events", method="POST", payload=payload, timeout=10)
 
-    def upload_frames(self) -> None:
-        if time.monotonic() - self.last_frame_at < 2.2:
-            return
-        for monitor in self.monitors:
-            monitor_id = urllib.parse.quote(str(monitor["id"]), safe="")
-            image = request_bytes(f"{LOCAL_BASE}/api/phone/screen?monitor={monitor_id}&q=68&max=1600", timeout=8)
-            request_bytes(
-                f"{self.relay_url}/api/agent/frame/{monitor_id}",
-                method="PUT",
-                data=image,
-                headers={**self.headers, "Content-Type": "image/jpeg"},
-                timeout=15,
-            )
-        self.last_frame_at = time.monotonic()
-
     def tick(self) -> None:
         self.reload_pairing()
         self.refresh_monitors()
         response = self.remote_json("/api/agent/commands", timeout=15)
         for command in response.get("commands") or []:
-            is_clarify = str(command.get("type") or "") == "clarify"
+            raw_payload = command.get("payload") if isinstance(command.get("payload"), dict) else {}
+            command_type = str(raw_payload.get("_aios_command") or command.get("type") or "")
+            is_clarify = command_type == "clarify"
+            is_silent = command_type == "stream"
             try:
                 result = self.execute(command)
                 self.post_events(
-                    events=[{
+                    events=[] if is_silent else [{
                         "type": "clarification" if is_clarify else "command",
                         "payload": result if is_clarify else {"title": "Command received", "message": command.get("type")},
                         "created_at": int(time.time() * 1000),
@@ -334,27 +505,29 @@ class Bridge:
             self.last_status_at = time.monotonic()
         if events or status is not None:
             self.post_events(events=events, status=status)
-        self.upload_frames()
-
     def run(self) -> None:
         if not self.ready():
             raise RuntimeError("This PC is not paired. Open aiOS Settings → Mobile remote first.")
         print(f"aiOS Remote bridge connected as {self.machine_id}", flush=True)
-        while True:
-            try:
-                HEARTBEAT_PATH.touch()
-            except OSError:
-                pass
-            try:
-                self.tick()
-                self.backoff = 1.0
-                time.sleep(0.7)
-            except KeyboardInterrupt:
-                return
-            except Exception as exc:
-                print(f"[{time.strftime('%H:%M:%S')}] relay: {exc}", file=sys.stderr, flush=True)
-                time.sleep(self.backoff)
-                self.backoff = min(20.0, self.backoff * 1.7)
+        self.frame_streamer.start()
+        try:
+            while True:
+                try:
+                    HEARTBEAT_PATH.touch()
+                except OSError:
+                    pass
+                try:
+                    self.tick()
+                    self.backoff = 1.0
+                    time.sleep(0.35)
+                except KeyboardInterrupt:
+                    return
+                except Exception as exc:
+                    print(f"[{time.strftime('%H:%M:%S')}] relay: {exc}", file=sys.stderr, flush=True)
+                    time.sleep(self.backoff)
+                    self.backoff = min(20.0, self.backoff * 1.7)
+        finally:
+            self.frame_streamer.stop()
 
 
 def main() -> int:
@@ -371,6 +544,8 @@ def main() -> int:
         print(f"Paired {paired['machine_name']} successfully.")
         return 0
     if args.command == "run":
+        if not claim_single_instance():
+            return 0
         relay = load_config().get("phone_relay") or {}
         Bridge(relay).run()
         return 0

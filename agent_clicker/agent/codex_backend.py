@@ -13,6 +13,7 @@ Sources used (Nov 2025 / 2026):
 from __future__ import annotations
 import base64
 import json
+import os
 import pathlib
 import time
 import uuid
@@ -21,7 +22,31 @@ from typing import Any
 import httpx
 
 CODEX_ENDPOINT = "https://chatgpt.com/backend-api/codex/responses"
-AUTH_PATH = pathlib.Path.home() / ".codex" / "auth.json"
+def _current_auth_path() -> pathlib.Path:
+    configured = str(os.environ.get("AIOS_ACTIVE_CODEX_HOME") or os.environ.get("CODEX_HOME") or "").strip()
+    if not configured:
+        try:
+            from aios_codex_accounts import active_home
+            configured = str(active_home(pathlib.Path(__file__).resolve().parents[2] / "helper_config.json"))
+        except Exception:
+            configured = str(pathlib.Path.home() / ".codex")
+    return pathlib.Path(configured).expanduser() / "auth.json"
+
+
+class _DynamicAuthPath:
+    """Path-like facade that resolves the active account on every request."""
+
+    def is_file(self):
+        return _current_auth_path().is_file()
+
+    def read_text(self, *args, **kwargs):
+        return _current_auth_path().read_text(*args, **kwargs)
+
+    def __str__(self):
+        return str(_current_auth_path())
+
+
+AUTH_PATH = _DynamicAuthPath()
 # These match what the Codex CLI sends — the endpoint accepts our requests
 # only with the originator / user-agent it recognizes.
 CODEX_USER_AGENT = "codex_cli_rs/0.40.0 (Windows; x64)"
@@ -128,9 +153,10 @@ def _extract_system(messages: list[dict]) -> str:
 
 # ---------------- SSE -> final text ----------------
 
-def _parse_sse_text(stream_bytes_iter) -> str:
-    """Accumulate `response.output_text.delta` events. Returns the full text."""
+def _parse_sse(stream_bytes_iter) -> tuple[str, dict]:
+    """Accumulate response text and normalized token usage."""
     chunks: list[str] = []
+    usage: dict = {}
     buf = ""
     for raw in stream_bytes_iter:
         if not raw:
@@ -152,18 +178,29 @@ def _parse_sse_text(stream_bytes_iter) -> str:
                 if t == "response.output_text.delta":
                     chunks.append(j.get("delta", ""))
                 elif t == "response.completed":
+                    raw_usage = (j.get("response") or {}).get("usage") or {}
+                    details = raw_usage.get("input_tokens_details") or {}
+                    input_tokens = int(raw_usage.get("input_tokens") or 0)
+                    output_tokens = int(raw_usage.get("output_tokens") or 0)
+                    usage = {
+                        "requests": 1,
+                        "input_tokens": input_tokens,
+                        "output_tokens": output_tokens,
+                        "cached_input_tokens": int(details.get("cached_tokens") or 0),
+                        "total_tokens": int(raw_usage.get("total_tokens") or input_tokens + output_tokens),
+                    }
                     # also has full content in `response.output[]` — but we
                     # already accumulated deltas
                     pass
                 elif t in ("response.error", "error"):
                     raise RuntimeError(f"Codex stream error: {json.dumps(j)[:500]}")
-    return "".join(chunks)
+    return "".join(chunks), usage
 
 
 # ---------------- public ----------------
 
-def chat_raw(system: str, messages: list[dict], model: str = "gpt-5.6-luna",
-             timeout: float = 180.0, reasoning_effort: str | None = None) -> str:
+def chat_with_usage(system: str, messages: list[dict], model: str = "gpt-5.6-luna",
+                    timeout: float = 180.0, reasoning_effort: str | None = None) -> tuple[str, dict]:
     """Send a chat (with optional images) to the Codex backend; return the
     final assistant text. Drop-in replacement for agent.vlm.chat_raw."""
     auth = _load_auth()
@@ -200,7 +237,16 @@ def chat_raw(system: str, messages: list[dict], model: str = "gpt-5.6-luna",
             if r.status_code != 200:
                 txt = r.read().decode("utf-8", "replace")
                 raise RuntimeError(f"Codex backend HTTP {r.status_code}: {txt[:600]}")
-            text = _parse_sse_text(r.iter_bytes())
+            text, usage = _parse_sse(r.iter_bytes())
     if not text:
         raise RuntimeError("Codex backend returned no text (empty stream).")
-    return text
+    usage.update({"backend": "codex", "model": model, "requests": int(usage.get("requests") or 1)})
+    return text, usage
+
+
+def chat_raw(system: str, messages: list[dict], model: str = "gpt-5.6-luna",
+             timeout: float = 180.0, reasoning_effort: str | None = None) -> str:
+    return chat_with_usage(
+        system, messages, model=model, timeout=timeout,
+        reasoning_effort=reasoning_effort,
+    )[0]

@@ -396,7 +396,29 @@ class AgentLoop:
 
         # Wrap on_event so every event also lands in transcript.jsonl
         orig_on_event = self.on_event
+        usage_total = {
+            "requests": 0, "input_tokens": 0, "output_tokens": 0,
+            "cached_input_tokens": 0, "total_tokens": 0,
+            "backend": backend, "models": {},
+        }
+
+        def _add_usage(item: dict):
+            if not isinstance(item, dict):
+                return
+            for key in ("requests", "input_tokens", "output_tokens", "cached_input_tokens", "total_tokens"):
+                usage_total[key] += int(item.get(key) or 0)
+            used_model = str(item.get("model") or model)
+            model_usage = usage_total["models"].setdefault(
+                used_model,
+                {"requests": 0, "input_tokens": 0, "output_tokens": 0, "cached_input_tokens": 0, "total_tokens": 0},
+            )
+            for key in ("requests", "input_tokens", "output_tokens", "cached_input_tokens", "total_tokens"):
+                model_usage[key] += int(item.get(key) or 0)
+
         def _emit(ev: dict):
+            if ev.get("type") == "done":
+                ev = dict(ev)
+                ev["usage"] = json.loads(json.dumps(usage_total))
             _write_event(ev)
             orig_on_event(ev)
         self.on_event = _emit  # type: ignore
@@ -427,6 +449,7 @@ class AgentLoop:
                         backend=backend,
                         reasoning_effort="high",
                     )
+                    _add_usage(vlm.take_last_usage())
                     parsed_plan = vlm.parse_json_lenient(raw_plan)
                     plan = str(parsed_plan.get("plan") or "").strip()[:8000]
                     if not plan:
@@ -571,8 +594,11 @@ class AgentLoop:
                         pass
                 t0 = time.time()
                 try:
-                    raw = vlm.chat_raw(effective_system, msgs, model=model, backend=backend,
-                                       reasoning_effort=reasoning_effort)
+                    raw = vlm.chat_raw(
+                        effective_system, msgs, model=model, backend=backend,
+                        reasoning_effort=reasoning_effort,
+                    )
+                    _add_usage(vlm.take_last_usage())
                     rec.raw = raw
                     if sd:
                         try:

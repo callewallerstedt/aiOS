@@ -25,6 +25,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from agent import config
 import codex_usage
+import aios_codex_accounts
 from agent.orchestrator import run_task
 from voice_settings import load_voice_dictation_settings, resolve_transcribe_language
 
@@ -52,6 +53,8 @@ HELPER_HOST = "127.0.0.1"
 HELPER_PORT = 48736
 SCREEN_LOCK = threading.Lock()
 SCREEN_CACHE: dict[tuple, dict] = {}
+UPDATE_HEALTH_PATH = REPO_ROOT / ".aios-update-health.json"
+STREAM_HEALTH_PATH = REPO_ROOT / ".aios-stream-health.json"
 
 OPERATOR_EVENTS_DIR = REPO_ROOT / "phone_operator_events"
 OPERATOR_EVENTS_FILE = OPERATOR_EVENTS_DIR / "events.jsonl"
@@ -262,13 +265,24 @@ def api_phone_status():
     operator_state = _load_operator_state()
     if not helper:
         operator_state = {"running": False, "asking": False, "last_question": "", "task": ""}
+    try:
+        update_health = json.loads(UPDATE_HEALTH_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        update_health = {"state": "idle", "message": "Auto-update ready"}
+    try:
+        stream_health = json.loads(STREAM_HEALTH_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        stream_health = {}
     return jsonify({
         "ok": True,
         "helper": helper,
         "monitor_count": len(monitors),
         "operator": operator,
         "operator_state": operator_state,
-        "codex_usage": codex_usage.codex_usage_payload(),
+        "codex_usage": codex_usage.codex_usage_payload(aios_codex_accounts.active_home(HELPER_CONFIG_PATH)),
+        "codex_accounts": aios_codex_accounts.list_accounts(HELPER_CONFIG_PATH),
+        "update": update_health,
+        "stream": stream_health,
     })
 
 
@@ -537,9 +551,12 @@ def api_phone_screen():
         max_dim = 1600
     now = time.monotonic()
     cache_key = (idx, quality, max_dim)
+    # The hosted phone viewer requests stream=1 and needs genuinely fresh
+    # frames. Regular preview callers retain the lower-cost cache window.
+    cache_ttl = 0.045 if request.args.get("stream") == "1" else 0.45
     with SCREEN_LOCK:
         cached = SCREEN_CACHE.get(cache_key)
-        if cached and now - cached["at"] < 0.45:
+        if cached and now - cached["at"] < cache_ttl:
             return Response(cached["data"], mimetype="image/jpeg")
         try:
             import mss

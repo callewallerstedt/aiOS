@@ -35,3 +35,9 @@ aios-phone-v*.tar.gz
 .aios-helper-heartbeat
 .aios-ahk-heartbeat
 .aios-phone-relay-heartbeat
+.aios-stream-health.json
+.aios-update-health.json
+.aios-update-request
+.aios_update_staging/
+.aios_update_pending_sha
+.aios_sha

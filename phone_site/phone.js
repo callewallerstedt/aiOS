@@ -56,11 +56,18 @@ const state = {
   keepAwake: prefs.bool("aios_awake", false),
   screenOpen: prefs.bool("aios_screen_open", true),
   timers: [],
+  frameTimer: null,
+  streamLeaseTimer: null,
+  frameBusy: false,
+  frameTimes: [],
+  displayFps: 0,
   busy: false,
   loading: false,
   running: false,
   frameUrl: "",
   frameStamp: "",
+  frameSeq: 0,
+  frameUpdatedAt: 0,
   frameAt: 0,
   installPrompt: null,
   wakeLock: null,
@@ -297,6 +304,8 @@ function selectMachine(id) {
   state.monitorId = "";
   state.lastStep = null;
   state.frameStamp = "";
+  state.frameSeq = 0;
+  state.frameUpdatedAt = 0;
   prefs.set("aios_machine_id", id);
   resetTimeline("Loading this computer’s activity…");
   clearMarkers();
@@ -305,6 +314,7 @@ function selectMachine(id) {
   $("#screenPlaceholder").classList.remove("hidden");
   renderMachine();
   pollEvents();
+  requestStream();
   refreshFrame();
 }
 
@@ -342,6 +352,11 @@ function renderMachine() {
     state.monitorId = String(monitors[0].id);
   }
   $("#monitorLabel").textContent = monitorName(currentMonitor());
+  const accounts = Array.isArray(status.codex_accounts) ? status.codex_accounts : [];
+  const activeAccount = accounts.find((account) => account.active);
+  $("#codexAccountValue").textContent = activeAccount?.label || "Not signed in";
+  const update = status.update || {};
+  $("#updateValue").textContent = update.message || "Auto-update on";
 
   applyWakeLock();
 }
@@ -509,7 +524,8 @@ function markClick(payload) {
 
 async function refreshFrame() {
   const machine = currentMachine();
-  if (!machine) return;
+  if (!machine || state.frameBusy || document.hidden || !state.screenOpen) return;
+  state.frameBusy = true;
   const monitor = encodeURIComponent(state.monitorId || "primary");
   try {
     const response = await fetch(apiUrl(`/api/machines/${encodeURIComponent(machine.id)}/frame/${monitor}?t=${Date.now()}`), {
@@ -517,12 +533,25 @@ async function refreshFrame() {
       cache: "no-store"
     });
     if (!response.ok) { updateLive(); return; }
-    const stamp = response.headers.get("x-aios-updated-at") || "";
+    const updatedAt = Number(response.headers.get("x-aios-updated-at") || 0);
+    const sequence = Number(response.headers.get("x-aios-frame-seq") || 0);
+    const stamp = `${updatedAt || ""}:${sequence}`;
     if (stamp && stamp === state.frameStamp) { updateLive(); return; }
+    if (sequence && sequence <= state.frameSeq) { updateLive(); return; }
+    if (!sequence && updatedAt && updatedAt <= state.frameUpdatedAt) { updateLive(); return; }
     const blob = await response.blob();
     if (machine.id !== state.machineId) return;
     state.frameStamp = stamp;
+    if (sequence) state.frameSeq = sequence;
+    if (updatedAt) state.frameUpdatedAt = updatedAt;
     state.frameAt = Date.now();
+    state.frameTimes.push(performance.now());
+    const cutoff = performance.now() - 2000;
+    state.frameTimes = state.frameTimes.filter((value) => value >= cutoff);
+    if (state.frameTimes.length > 1) {
+      const span = state.frameTimes[state.frameTimes.length - 1] - state.frameTimes[0];
+      state.displayFps = span > 0 ? ((state.frameTimes.length - 1) * 1000) / span : 0;
+    }
     const next = URL.createObjectURL(blob);
     const image = $("#screenImage");
     image.onload = () => {
@@ -536,12 +565,18 @@ async function refreshFrame() {
     updateLive();
   } catch {
     /* A sleeping computer simply has no frame yet. */
+  } finally {
+    state.frameBusy = false;
   }
 }
 
 function updateLive() {
-  const fresh = Date.now() - state.frameAt < 9000 && Boolean(currentMachine()?.online);
+  const machine = currentMachine();
+  const fresh = Date.now() - state.frameAt < 2500 && Boolean(machine?.online);
   $("#livePill").classList.toggle("on", fresh);
+  const uplink = Number(machine?.status?.stream?.fps || 0);
+  const fps = state.displayFps || uplink;
+  $("#liveText").textContent = fresh ? `${fps.toFixed(1)} FPS` : (machine?.online ? "CONNECTING" : "OFFLINE");
 }
 
 /* ── timeline ─────────────────────────────────────────── */
@@ -633,10 +668,14 @@ function describe(event) {
   if (type === "done") {
     const ok = Boolean(payload.ok);
     const stopped = /stop/i.test(text(payload.message));
+    const usage = payload.usage || {};
+    const usageText = Number(usage.requests || 0)
+      ? `${Number(usage.input_tokens || 0).toLocaleString()} input + ${Number(usage.output_tokens || 0).toLocaleString()} output tokens · ${Number(usage.requests || 0)} calls`
+      : "";
     return {
       kind: "entry", tone: ok ? "ok" : "err", glyph: ok ? "check" : "stop",
       title: ok ? "Finished" : stopped ? "Stopped" : "Run ended",
-      body: text(payload.message),
+      body: [text(payload.message), usageText].filter(Boolean).join("\n"),
       hint: payload.steps ? `${payload.steps} steps` : ""
     };
   }
@@ -768,16 +807,38 @@ function startPolling() {
   stopPolling();
   loadMachines();
   pollEvents();
-  refreshFrame();
+  requestStream();
+  startFrameLoop();
   state.timers.push(setInterval(loadMachines, 4000));
   state.timers.push(setInterval(pollEvents, 1400));
-  state.timers.push(setInterval(refreshFrame, 2200));
-  state.timers.push(setInterval(updateLive, 3000));
+  state.streamLeaseTimer = setInterval(requestStream, 8000);
+  state.timers.push(setInterval(updateLive, 1000));
 }
 
 function stopPolling() {
   state.timers.forEach(clearInterval);
   state.timers = [];
+  clearInterval(state.streamLeaseTimer);
+  state.streamLeaseTimer = null;
+  clearTimeout(state.frameTimer);
+  state.frameTimer = null;
+}
+
+function startFrameLoop() {
+  clearTimeout(state.frameTimer);
+  const tick = async () => {
+    await refreshFrame();
+    // Poll a little faster than the 12 FPS sender so network jitter does not
+    // reduce the visible stream below ten fresh frames per second.
+    state.frameTimer = setTimeout(tick, document.hidden || !state.screenOpen ? 500 : 70);
+  };
+  tick();
+}
+
+function requestStream() {
+  const machine = currentMachine();
+  if (!machine || !machine.online || document.hidden || !state.screenOpen) return;
+  sendCommand("stream", { monitor_id: state.monitorId || "1", lease_seconds: 15 }).catch(() => {});
 }
 
 async function applyWakeLock() {
@@ -801,9 +862,13 @@ async function applyWakeLock() {
 async function sendCommand(type, payload = {}) {
   const machine = currentMachine();
   if (!machine) throw new Error("Choose a computer first.");
+  const tunneled = ["stream", "update", "codex_switch"].includes(type);
   return api(`/api/machines/${encodeURIComponent(machine.id)}/commands`, {
     method: "POST",
-    body: JSON.stringify({ type, payload })
+    body: JSON.stringify({
+      type: tunneled ? "config" : type,
+      payload: tunneled ? { ...payload, _aios_command: type } : payload
+    })
   });
 }
 
@@ -1081,9 +1146,12 @@ $("#monitorBtn").addEventListener("click", () => {
     (id) => {
       state.monitorId = id;
       state.frameStamp = "";
+      state.frameSeq = 0;
+      state.frameUpdatedAt = 0;
       $("#monitorLabel").textContent = monitorName(currentMonitor());
       clearMarkers();
       closeSheets();
+      requestStream();
       refreshFrame();
     }
   );
@@ -1150,6 +1218,31 @@ $("#plannerToggle").addEventListener("change", (event) => {
 
 $("#runSettingsBtn").addEventListener("click", openRunSettings);
 $("#settingsRunRow").addEventListener("click", openRunSettings);
+$("#codexAccountRow").addEventListener("click", () => {
+  const accounts = Array.isArray(currentMachine()?.status?.codex_accounts)
+    ? currentMachine().status.codex_accounts.filter((account) => account.logged_in)
+    : [];
+  if (!accounts.length) {
+    toast("Sign in to Codex once from aiOS on this PC first.");
+    return;
+  }
+  renderOptions(
+    $("#codexAccountOptions"),
+    accounts.map((account) => ({ id: account.id, name: account.label, note: account.active ? "Active" : "Ready" })),
+    accounts.find((account) => account.active)?.id || "",
+    async (id) => {
+      try {
+        await sendCommand("codex_switch", { account_id: id });
+        closeSheets();
+        toast("Codex account switched");
+        setTimeout(loadMachines, 900);
+      } catch (error) {
+        toast(error.message);
+      }
+    }
+  );
+  openSheet("codexAccountSheet");
+});
 $("#settingsBtn").addEventListener("click", () => openSheet("settingsSheet"));
 $("#addMachineBtn").addEventListener("click", () => openSheet("pairSheet"));
 $("#emptyAddBtn").addEventListener("click", () => openSheet("pairSheet"));
@@ -1200,6 +1293,20 @@ $("#hapticToggle").addEventListener("change", (event) => {
   prefs.set("aios_haptics", state.haptics ? 1 : 0);
   buzz();
 });
+$("#updateBtn").addEventListener("click", async () => {
+  const button = $("#updateBtn");
+  button.disabled = true;
+  try {
+    await sendCommand("update");
+    closeSheets();
+    toast("Update requested. aiOS will restart itself when safe.");
+    setTimeout(loadMachines, 1200);
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    button.disabled = false;
+  }
+});
 $("#logoutBtn").addEventListener("click", clearSession);
 
 /* ── wiring: workspace ────────────────────────────────── */
@@ -1217,7 +1324,14 @@ $("#filterBtn").addEventListener("click", () => {
   buzz();
 });
 
-$("#screenToggle").addEventListener("click", () => { buzz(); toggleScreen(!state.screenOpen); });
+$("#screenToggle").addEventListener("click", () => {
+  buzz();
+  toggleScreen(!state.screenOpen);
+  if (state.screenOpen) {
+    requestStream();
+    startFrameLoop();
+  }
+});
 $("#expandBtn").addEventListener("click", () => toggleImmersive(!$("#viewer").classList.contains("immersive")));
 $("#zoomResetBtn").addEventListener("click", resetZoom);
 $("#jumpBtn").addEventListener("click", () => scrollFeed(true));
@@ -1323,6 +1437,8 @@ document.addEventListener("visibilitychange", () => {
   if (document.hidden || !state.token) return;
   loadMachines();
   pollEvents();
+  requestStream();
+  startFrameLoop();
   refreshFrame();
   applyWakeLock();
 });

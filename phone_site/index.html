@@ -136,7 +136,7 @@
       </div>
 
       <div class="hud hud-bottom">
-        <span id="livePill" class="live"><i></i>LIVE</span>
+        <span id="livePill" class="live"><i></i><span id="liveText">CONNECTING</span></span>
         <span id="lastClickPill" class="chip chip-static hidden"></span>
       </div>
     </section>
@@ -258,12 +258,22 @@
   <h3>Settings</h3>
   <div class="rows">
     <button id="settingsRunRow" class="row" type="button"><span>Run models</span><em id="settingsRunValue">Luna · Plan Sol</em><svg class="ic"><use href="#i-chevron"/></svg></button>
+    <button id="codexAccountRow" class="row" type="button"><span>Codex account</span><em id="codexAccountValue">Default</em><svg class="ic"><use href="#i-chevron"/></svg></button>
+    <div class="row"><span>Software</span><em id="updateValue">Auto-update on</em></div>
     <label class="row"><span>Maximum steps</span><input id="stepsInput" class="row-input" type="number" inputmode="numeric" min="1" max="100" value="30"></label>
     <label class="row"><span>Detailed activity</span><input id="detailsToggle" class="switch" type="checkbox" checked></label>
     <label class="row"><span>Keep screen awake</span><input id="wakeToggle" class="switch" type="checkbox"></label>
     <label class="row"><span>Haptics</span><input id="hapticToggle" class="switch" type="checkbox" checked></label>
   </div>
+  <button id="updateBtn" class="btn btn-quiet btn-block"><svg class="ic"><use href="#i-spark"/></svg> Check and update now</button>
   <button id="logoutBtn" class="btn btn-danger btn-block"><svg class="ic"><use href="#i-power"/></svg> Lock this phone</button>
+</section>
+
+<section id="codexAccountSheet" class="sheet hidden" role="dialog" aria-modal="true">
+  <div class="grabber"></div>
+  <h3>Codex account</h3>
+  <p class="note">Choose an account already signed in on this computer. Add another account from aiOS on the PC once, then switch here instantly.</p>
+  <div id="codexAccountOptions" class="options"></div>
 </section>
 
 <section id="renameSheet" class="sheet hidden" role="dialog" aria-modal="true">

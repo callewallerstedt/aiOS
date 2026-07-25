@@ -33,7 +33,12 @@ if (!$config.phone_relay.enabled -or !$config.phone_relay.machine_token) {
     throw "This PC is not paired yet. Open aiOS Settings, then Mobile remote."
 }
 
-$existing = Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like "*phone_relay.py*run*" }
+$relayScript = [Regex]::Escape((Join-Path $root "phone_relay.py"))
+$existing = Get-CimInstance Win32_Process | Where-Object {
+    $_.Name -match '^pythonw?\.exe$' -and
+    $_.CommandLine -match $relayScript -and
+    $_.CommandLine -match '\srun(?:\s|$)'
+}
 if (!$existing) {
     Start-Process -FilePath $python -ArgumentList @((Join-Path $root "phone_relay.py"), "run") `
         -WorkingDirectory $root -WindowStyle Hidden `

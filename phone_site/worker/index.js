@@ -167,8 +167,15 @@ async function handleApi(request, env, url) {
     if (path.startsWith("/api/agent/frame/") && request.method === "PUT") {
       const monitor = path.split("/").pop().replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 32) || "primary";
       const key = `frames/${machine.account_id}/${machine.id}/${monitor}.jpg`;
-      await env.FILES.put(key, request.body, { httpMetadata: { contentType: request.headers.get("content-type") || "image/jpeg" }, customMetadata: { updatedAt: String(timestamp) } });
-      await env.DB.prepare("UPDATE machines SET last_seen = ?, updated_at = ? WHERE id = ?").bind(timestamp, timestamp, machine.id).run();
+      await env.FILES.put(key, request.body, {
+        httpMetadata: { contentType: request.headers.get("content-type") || "image/jpeg" },
+        customMetadata: {
+          updatedAt: String(timestamp),
+          sequence: String(request.headers.get("x-aios-frame-seq") || "")
+        }
+      });
+      // Status/event heartbeats already keep last_seen current. Avoid a D1
+      // write for every video frame (10-20 writes per second per computer).
       return json({ ok: true, updated_at: timestamp });
     }
   }
@@ -192,11 +199,17 @@ async function handleApi(request, env, url) {
     const machine = await env.DB.prepare("SELECT id FROM machines WHERE id = ? AND account_id = ?").bind(machineId, accountId).first();
     if (!machine) return json({ error: "Computer not found." }, 404);
     const input = await body(request);
-    const allowed = new Set(["prompt", "followup", "stop", "config", "clarify"]);
+    const allowed = new Set(["prompt", "followup", "stop", "config", "clarify", "stream", "update", "codex_switch"]);
     if (!allowed.has(input.type)) return json({ error: "Unsupported command." }, 400);
     const payload = input.payload && typeof input.payload === "object" ? input.payload : {};
     if (input.type === "clarify") {
       await env.DB.prepare("DELETE FROM commands WHERE machine_id = ? AND account_id = ? AND type = 'clarify' AND claimed_at IS NULL")
+        .bind(machineId, accountId).run();
+    }
+    if (input.type === "stream") {
+      // A stream command is only a short lease heartbeat. Keep one row per
+      // machine instead of growing the command table while the viewer is open.
+      await env.DB.prepare("DELETE FROM commands WHERE machine_id = ? AND account_id = ? AND type = 'stream'")
         .bind(machineId, accountId).run();
     }
     const result = await env.DB.prepare("INSERT INTO commands (account_id, machine_id, type, payload_json, created_at) VALUES (?, ?, ?, ?, ?)")
@@ -233,6 +246,7 @@ async function handleApi(request, env, url) {
     if (!object) return json({ error: "No screenshot yet." }, 404);
     const headers = new Headers({ "content-type": object.httpMetadata?.contentType || "image/jpeg", "cache-control": "no-store" });
     headers.set("x-aios-updated-at", object.customMetadata?.updatedAt || "");
+    headers.set("x-aios-frame-seq", object.customMetadata?.sequence || "");
     return new Response(object.body, { headers });
   }
 

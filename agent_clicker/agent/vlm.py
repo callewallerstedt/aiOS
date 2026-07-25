@@ -2,6 +2,7 @@ import base64
 import io
 import json
 import re
+import threading
 from typing import Any
 
 from PIL import Image
@@ -9,6 +10,7 @@ from PIL import Image
 from . import config
 
 _client: Any = None
+_usage_local = threading.local()
 
 
 def client():
@@ -73,8 +75,23 @@ def parse_json_lenient(text: str) -> dict[str, Any]:
                          f"head={text[:300]!r}") from e
 
 
-def chat_raw(system: str, messages: list[dict], model: str | None = None,
-             backend: str = "api", reasoning_effort: str | None = None) -> str:
+def _usage_dict(usage, *, backend: str, model: str) -> dict:
+    if usage is None:
+        return {"requests": 1, "backend": backend, "model": model}
+    details = getattr(usage, "prompt_tokens_details", None) or getattr(usage, "input_tokens_details", None)
+    input_tokens = int(getattr(usage, "prompt_tokens", None) or getattr(usage, "input_tokens", 0) or 0)
+    output_tokens = int(getattr(usage, "completion_tokens", None) or getattr(usage, "output_tokens", 0) or 0)
+    cached_tokens = int(getattr(details, "cached_tokens", 0) or 0)
+    total_tokens = int(getattr(usage, "total_tokens", 0) or input_tokens + output_tokens)
+    return {
+        "requests": 1, "input_tokens": input_tokens, "output_tokens": output_tokens,
+        "cached_input_tokens": cached_tokens, "total_tokens": total_tokens,
+        "backend": backend, "model": model,
+    }
+
+
+def chat_with_usage(system: str, messages: list[dict], model: str | None = None,
+                    backend: str = "api", reasoning_effort: str | None = None) -> tuple[str, dict]:
     """Send a chat with vision messages; return raw assistant text.
 
     backend = 'api'  -> standard api.openai.com (billed to OPENAI_API_KEY)
@@ -88,7 +105,7 @@ def chat_raw(system: str, messages: list[dict], model: str | None = None,
     model = model or config.MODEL
     if backend == "codex":
         from . import codex_backend
-        return codex_backend.chat_raw(
+        return codex_backend.chat_with_usage(
             system, messages, model=model, reasoning_effort=reasoning_effort
         )
 
@@ -106,7 +123,24 @@ def chat_raw(system: str, messages: list[dict], model: str | None = None,
         # SDK too old for reasoning_effort kwarg — retry without it
         kwargs.pop("reasoning_effort", None)
         resp = client().chat.completions.create(**kwargs)
-    return resp.choices[0].message.content or ""
+    return resp.choices[0].message.content or "", _usage_dict(resp.usage, backend=backend, model=model)
+
+
+def chat_raw(system: str, messages: list[dict], model: str | None = None,
+             backend: str = "api", reasoning_effort: str | None = None) -> str:
+    text, usage = chat_with_usage(
+        system, messages, model=model, backend=backend,
+        reasoning_effort=reasoning_effort,
+    )
+    _usage_local.last = usage
+    return text
+
+
+def take_last_usage() -> dict:
+    """Return and clear usage from the current thread's last chat_raw call."""
+    usage = getattr(_usage_local, "last", {})
+    _usage_local.last = {}
+    return dict(usage) if isinstance(usage, dict) else {}
 
 
 def chat_json(system: str, messages: list[dict], model: str | None = None,
