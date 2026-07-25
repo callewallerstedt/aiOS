@@ -1,6 +1,19 @@
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" };
 const CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+const ALLOWED_WEB_ORIGINS = new Set(["https://callewallerstedt.github.io"]);
 let schemaReady = false;
+
+function withCors(response, request) {
+  const origin = request.headers.get("origin") || "";
+  if (!ALLOWED_WEB_ORIGINS.has(origin)) return response;
+  const result = new Response(response.body, response);
+  result.headers.set("access-control-allow-origin", origin);
+  result.headers.set("access-control-allow-headers", "authorization, content-type");
+  result.headers.set("access-control-allow-methods", "GET, POST, PATCH, DELETE, OPTIONS");
+  result.headers.set("access-control-max-age", "86400");
+  result.headers.append("vary", "Origin");
+  return result;
+}
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), { status, headers: JSON_HEADERS });
@@ -236,11 +249,14 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     try {
-      if (url.pathname.startsWith("/api/")) return await handleApi(request, env, url);
+      if (url.pathname.startsWith("/api/")) {
+        if (request.method === "OPTIONS") return withCors(new Response(null, { status: 204 }), request);
+        return withCors(await handleApi(request, env, url), request);
+      }
       return env.ASSETS.fetch(request);
     } catch (error) {
       console.error(error);
-      return json({ error: "The relay hit an unexpected error." }, 500);
+      return withCors(json({ error: "The relay hit an unexpected error." }, 500), request);
     }
   }
 };

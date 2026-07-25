@@ -154,14 +154,14 @@ class App:
         ttk.Label(top, text="Model").grid(row=0, column=3, padx=(14, 4))
         self.var_model = tk.StringVar(value=DEFAULT_MODEL)
         self.cb_model = ttk.Combobox(top, textvariable=self.var_model, width=14, values=[
-            "gpt-5.5", "gpt-5.5-pro", "gpt-5.2", "gpt-5", "gpt-4o", "gpt-4o-mini"
+            "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-5", "gpt-4o", "gpt-4o-mini"
         ])
         self.cb_model.grid(row=0, column=4)
 
         ttk.Label(top, text="Reasoning").grid(row=0, column=17, padx=(14, 4))
         self.var_reason = tk.StringVar(value="medium")
         ttk.Combobox(top, textvariable=self.var_reason, width=8, state="readonly",
-                     values=["minimal", "low", "medium", "high"]).grid(row=0, column=18)
+                     values=["minimal", "low", "medium", "high", "xhigh", "max"]).grid(row=0, column=18)
 
         ttk.Label(top, text="Max steps").grid(row=0, column=5, padx=(14, 4))
         self.var_steps = tk.IntVar(value=25)

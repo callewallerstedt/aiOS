@@ -1,5 +1,6 @@
 from __future__ import annotations
 import base64
+import ctypes
 import io
 import json
 import os
@@ -64,7 +65,7 @@ OPERATOR_UPLOADS_DIR.mkdir(exist_ok=True)
 
 def _load_operator_state():
     if not OPERATOR_STATUS_FILE.exists():
-        return {"running": False, "asking": False, "last_question": ""}
+        return {"running": False, "asking": False, "last_question": "", "task": ""}
     try:
         with OPERATOR_STATUS_FILE.open("r", encoding="utf-8") as fh:
             data = json.load(fh)
@@ -72,9 +73,10 @@ def _load_operator_state():
             "running": bool(data.get("running")),
             "asking": bool(data.get("asking")),
             "last_question": str(data.get("last_question") or ""),
+            "task": str(data.get("task") or ""),
         }
     except (OSError, json.JSONDecodeError):
-        return {"running": False, "asking": False, "last_question": ""}
+        return {"running": False, "asking": False, "last_question": "", "task": ""}
 
 
 class PhoneTranscriber:
@@ -159,8 +161,8 @@ def add_phone_cors(response):
 HELPER_CONFIG_PATH = REPO_ROOT / "helper_config.json"
 DEFAULT_OPERATOR_CONFIG = {
     "monitor": "",
-    "model": "gpt-5.5",
-    "reasoning": "medium",
+    "model": "gpt-5.6-luna",
+    "reasoning": "low",
     "steps": "25",
     "delay": "0.20",
     "tts": False,
@@ -256,12 +258,15 @@ def api_phone_status():
     cfg = _load_helper_config()
     operator = dict(DEFAULT_OPERATOR_CONFIG)
     operator.update(cfg.get("ai_operator") or {})
+    operator_state = _load_operator_state()
+    if not helper:
+        operator_state = {"running": False, "asking": False, "last_question": "", "task": ""}
     return jsonify({
         "ok": True,
         "helper": helper,
         "monitor_count": len(monitors),
         "operator": operator,
-        "operator_state": _load_operator_state(),
+        "operator_state": operator_state,
         "codex_usage": codex_usage.codex_usage_payload(),
     })
 
@@ -549,8 +554,17 @@ def api_phone_screen():
                 from PIL import ImageGrab
 
                 image = ImageGrab.grab().convert("RGB")
-            except Exception as exc:
-                return jsonify({"error": str(exc)}), 500
+            except Exception:
+                try:
+                    from desktop_agent.screen import capture_region
+
+                    if "monitor" in locals():
+                        image = capture_region(monitor["left"], monitor["top"], monitor["width"], monitor["height"])
+                    else:
+                        user32 = ctypes.windll.user32
+                        image = capture_region(0, 0, user32.GetSystemMetrics(0), user32.GetSystemMetrics(1))
+                except Exception as exc:
+                    return jsonify({"error": str(exc)}), 500
         image.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
         out = io.BytesIO()
         image.save(out, format="JPEG", quality=quality, optimize=True)

@@ -2,7 +2,7 @@
 Codex CLI in ~/.codex/auth.json.
 
 This lets the agent use your ChatGPT subscription instead of a billed API key,
-calling the same gpt-5.5 model. The endpoint and protocol are UNDOCUMENTED:
+calling the configured OPERATOR model. The endpoint and protocol are UNDOCUMENTED:
 they can break with any Codex update. Falls back cleanly if auth is missing.
 
 Sources used (Nov 2025 / 2026):
@@ -162,8 +162,8 @@ def _parse_sse_text(stream_bytes_iter) -> str:
 
 # ---------------- public ----------------
 
-def chat_raw(system: str, messages: list[dict], model: str = "gpt-5.5",
-             timeout: float = 180.0) -> str:
+def chat_raw(system: str, messages: list[dict], model: str = "gpt-5.6-luna",
+             timeout: float = 180.0, reasoning_effort: str | None = None) -> str:
     """Send a chat (with optional images) to the Codex backend; return the
     final assistant text. Drop-in replacement for agent.vlm.chat_raw."""
     auth = _load_auth()
@@ -176,6 +176,11 @@ def chat_raw(system: str, messages: list[dict], model: str = "gpt-5.5",
     if not instructions:
         instructions = "You are a helpful assistant."  # endpoint requires non-empty
 
+    reasoning = {"summary": "auto"}
+    effort = str(reasoning_effort or "").strip().lower()
+    if effort in {"minimal", "low", "medium", "high"}:
+        reasoning["effort"] = effort
+
     body = {
         "model": model,
         "instructions": instructions,
@@ -183,7 +188,7 @@ def chat_raw(system: str, messages: list[dict], model: str = "gpt-5.5",
         "tools": [],
         "tool_choice": "auto",
         "parallel_tool_calls": False,
-        "reasoning": {"summary": "auto"},
+        "reasoning": reasoning,
         "store": False,
         "stream": True,
         "include": ["reasoning.encrypted_content"],

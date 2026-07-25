@@ -4,19 +4,19 @@ import json
 import re
 from typing import Any
 
-from openai import OpenAI
 from PIL import Image
 
 from . import config
 
-_client: OpenAI | None = None
+_client: Any = None
 
 
-def client() -> OpenAI:
+def client():
     global _client
     if _client is None:
         if not config.OPENAI_API_KEY:
             raise RuntimeError("OPENAI_API_KEY missing. Copy .env.example to .env and set it.")
+        from openai import OpenAI
         _client = OpenAI(api_key=config.OPENAI_API_KEY)
     return _client
 
@@ -88,7 +88,9 @@ def chat_raw(system: str, messages: list[dict], model: str | None = None,
     model = model or config.MODEL
     if backend == "codex":
         from . import codex_backend
-        return codex_backend.chat_raw(system, messages, model=model)
+        return codex_backend.chat_raw(
+            system, messages, model=model, reasoning_effort=reasoning_effort
+        )
 
     full = [{"role": "system", "content": system}] + messages
     kwargs: dict = {

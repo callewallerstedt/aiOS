@@ -260,12 +260,19 @@ DiscordMuteStop() {
 }
 
 AiosToggleNow() {
-    pythonw := "C:\Python313\pythonw.exe"
+    pythonw := A_ScriptDir "\.venv\Scripts\pythonw.exe"
+    if !FileExist(pythonw) {
+        pythonw := "C:\Python313\pythonw.exe"
+    }
     if !FileExist(pythonw) {
         pythonw := "pythonw.exe"
     }
     Run('"' pythonw '" "' A_ScriptDir '\helper_overlay.py" --toggle', A_ScriptDir)
 }
+
+; Dedicated aiOS launcher requested for this desktop. Insert keeps its
+; existing tap-to-open / hold-to-dictate behavior.
+^Space::AiosToggleNow()
 
 ; --- fast TCP send to the voice server (no Python spawn) ---
 
@@ -311,7 +318,10 @@ VoiceStartFast() {
     if (SendToVoice("start")) {
         return
     }
-    pythonw := "C:\Python313\pythonw.exe"
+    pythonw := A_ScriptDir "\.venv\Scripts\pythonw.exe"
+    if !FileExist(pythonw) {
+        pythonw := "C:\Python313\pythonw.exe"
+    }
     if !FileExist(pythonw) {
         pythonw := "pythonw.exe"
     }

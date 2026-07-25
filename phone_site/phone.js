@@ -16,6 +16,13 @@ const EFFORTS = [
 ];
 
 const RUNNING_STATES = new Set(["running", "starting", "thinking", "acting", "waiting"]);
+const REMOTE_API_ORIGIN = location.hostname.endsWith("github.io")
+  ? "https://aios-remote-control.contact-wallerstedt.chatgpt.site"
+  : "";
+
+function apiUrl(path) {
+  return `${REMOTE_API_ORIGIN}${path}`;
+}
 
 const prefs = {
   get(key, fallback) { const value = localStorage.getItem(key); return value === null ? fallback : value; },
@@ -134,7 +141,7 @@ async function api(path, options = {}) {
   const headers = new Headers(options.headers || {});
   if (state.token) headers.set("Authorization", `Bearer ${state.token}`);
   if (options.body && !(options.body instanceof Blob)) headers.set("Content-Type", "application/json");
-  const response = await fetch(path, { ...options, headers });
+  const response = await fetch(apiUrl(path), { ...options, headers });
   const data = response.headers.get("content-type")?.includes("application/json") ? await response.json() : null;
   if (response.status === 401 && state.token && !path.includes("/account/")) clearSession();
   if (!response.ok) throw new Error(data?.error || `Request failed (${response.status})`);
@@ -474,7 +481,7 @@ async function refreshFrame() {
   if (!machine) return;
   const monitor = encodeURIComponent(state.monitorId || "primary");
   try {
-    const response = await fetch(`/api/machines/${encodeURIComponent(machine.id)}/frame/${monitor}?t=${Date.now()}`, {
+    const response = await fetch(apiUrl(`/api/machines/${encodeURIComponent(machine.id)}/frame/${monitor}?t=${Date.now()}`), {
       headers: { Authorization: `Bearer ${state.token}` },
       cache: "no-store"
     });
@@ -1137,7 +1144,7 @@ document.addEventListener("visibilitychange", () => {
   applyWakeLock();
 });
 
-if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
 
 /* ── boot ─────────────────────────────────────────────── */
 
