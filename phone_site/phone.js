@@ -309,10 +309,11 @@ window.addEventListener("popstate", () => {
 });
 
 function openSheet(id) {
+  const replacingSheet = overlayCloser === hideSheets;
   $$(".sheet").forEach((sheet) => sheet.classList.toggle("hidden", sheet.id !== id));
   $("#backdrop").classList.remove("hidden");
   buzz();
-  openOverlay(hideSheets);
+  if (!replacingSheet) openOverlay(hideSheets);
 }
 
 function hideSheets() {
