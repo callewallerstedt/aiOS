@@ -20,6 +20,7 @@ import urllib.request
 import httpx
 
 import aios_codex_accounts
+from aios_secret_transport import decrypt_secret
 from prompt_clarifier import clarify_prompt_for_provider, normalize_questions
 
 
@@ -399,8 +400,10 @@ class Bridge:
         if kind == "ai_settings":
             provider_mode = str(payload.get("provider_mode") or "").strip().lower()
             local_payload = {"provider_mode": provider_mode}
-            if "openai_api_key" in payload:
-                local_payload["openai_api_key"] = str(payload.get("openai_api_key") or "").strip()
+            if "encrypted_openai_api_key" in payload:
+                local_payload["openai_api_key"] = decrypt_secret(payload.get("encrypted_openai_api_key")).strip()
+            elif "openai_api_key" in payload:
+                raise RuntimeError("Refresh the phone app before saving a key; plaintext key transfer is disabled.")
             if payload.get("clear_openai_api_key"):
                 local_payload["clear_openai_api_key"] = True
             return self.local_json("/api/phone/ai/config", method="POST", payload=local_payload)

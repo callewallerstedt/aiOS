@@ -188,11 +188,17 @@ def _provider_mode(operator):
 
 def _ai_status(config, operator):
     accounts = aios_codex_accounts.list_accounts(HELPER_CONFIG_PATH)
-    return {
+    status = {
         "provider_mode": _provider_mode(operator),
         "has_openai_api_key": bool(str(config.get("openai_api_key") or os.environ.get("OPENAI_API_KEY") or "").strip()),
         "codex_available": any(bool(account.get("logged_in")) for account in accounts),
     }
+    try:
+        from aios_secret_transport import public_key_payload
+        status.update(public_key_payload())
+    except Exception:
+        status.update({"transport_version": 0, "transport_public_key": ""})
+    return status
 
 
 def forward_helper(action, text="", options=None):

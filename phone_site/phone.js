@@ -64,6 +64,7 @@ const state = {
   providerMode: "codex",
   hasOpenAIKey: false,
   codexAvailable: false,
+  transportPublicKey: "",
   screenOpen: prefs.bool("aios_screen_open", true),
   timers: [],
   frameTimer: null,
@@ -136,6 +137,75 @@ async function copyText(value) {
   }
   buzz();
   toast("Copied to clipboard");
+}
+
+function bytesFromBase64Url(value) {
+  const normalized = String(value || "").replace(/-/g, "+").replace(/_/g, "/");
+  const binary = atob(normalized + "=".repeat((4 - normalized.length % 4) % 4));
+  return Uint8Array.from(binary, (char) => char.charCodeAt(0));
+}
+
+function bytesToBase64Url(value) {
+  const bytes = value instanceof Uint8Array ? value : new Uint8Array(value);
+  let binary = "";
+  for (let index = 0; index < bytes.length; index += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
+  }
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+async function encryptSecretForMachine(secret) {
+  if (!window.crypto?.subtle || !state.transportPublicKey) {
+    throw new Error("Update aiOS on this computer before saving an API key.");
+  }
+  const encoder = new TextEncoder();
+  const remoteKey = await crypto.subtle.importKey(
+    "raw",
+    bytesFromBase64Url(state.transportPublicKey),
+    { name: "ECDH", namedCurve: "P-256" },
+    false,
+    []
+  );
+  const ephemeral = await crypto.subtle.generateKey(
+    { name: "ECDH", namedCurve: "P-256" },
+    true,
+    ["deriveBits"]
+  );
+  const shared = await crypto.subtle.deriveBits(
+    { name: "ECDH", public: remoteKey },
+    ephemeral.privateKey,
+    256
+  );
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const material = await crypto.subtle.importKey("raw", shared, "HKDF", false, ["deriveKey"]);
+  const key = await crypto.subtle.deriveKey(
+    {
+      name: "HKDF",
+      hash: "SHA-256",
+      salt: iv,
+      info: encoder.encode("aiOS Phone API Key v1")
+    },
+    material,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["encrypt"]
+  );
+  const ciphertext = await crypto.subtle.encrypt(
+    {
+      name: "AES-GCM",
+      iv,
+      additionalData: encoder.encode("aiOS Phone API Key")
+    },
+    key,
+    encoder.encode(secret)
+  );
+  const ephemeralPublicKey = await crypto.subtle.exportKey("raw", ephemeral.publicKey);
+  return {
+    version: 1,
+    ephemeral_public_key: bytesToBase64Url(ephemeralPublicKey),
+    iv: bytesToBase64Url(iv),
+    ciphertext: bytesToBase64Url(ciphertext)
+  };
 }
 
 function ago(timestamp) {
@@ -386,6 +456,7 @@ function renderMachine() {
   if (!AI_PROVIDERS.some((provider) => provider.id === state.providerMode)) state.providerMode = "codex";
   state.hasOpenAIKey = Boolean(ai.has_openai_api_key);
   state.codexAvailable = Boolean(ai.codex_available || accounts.some((account) => account.logged_in));
+  state.transportPublicKey = String(ai.transport_public_key || "");
   renderAIStatus();
   const update = status.update || {};
   $("#updateValue").textContent = update.message || "Auto-update on";
@@ -1245,7 +1316,11 @@ function renderAIStatus() {
   const providerValue = $("#aiProviderValue");
   if (providerValue) providerValue.textContent = providerLabel();
   const keyStatus = $("#apiKeyStatus");
-  if (keyStatus) keyStatus.textContent = state.hasOpenAIKey ? "Saved on this PC" : "Not saved on this PC";
+  if (keyStatus) {
+    keyStatus.textContent = state.hasOpenAIKey
+      ? "Saved on this PC"
+      : state.transportPublicKey ? "Not saved on this PC" : "Update this PC to enable secure key sync";
+  }
   $("#clearApiKeyBtn")?.classList.toggle("hidden", !state.hasOpenAIKey);
 }
 
@@ -1308,9 +1383,10 @@ $("#apiKeyForm").addEventListener("submit", async (event) => {
   button.disabled = true;
   button.textContent = "Saving…";
   try {
+    const encryptedOpenAIKey = await encryptSecretForMachine(apiKey);
     await sendCommand("ai_settings", {
       provider_mode: state.providerMode,
-      openai_api_key: apiKey
+      encrypted_openai_api_key: encryptedOpenAIKey
     });
     input.value = "";
     state.hasOpenAIKey = true;
