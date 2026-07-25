@@ -1,4 +1,4 @@
-const CACHE = "aios-remote-v9";
+const CACHE = "aios-remote-v10";
 const SHELL = ["./", "phone.css", "phone.js", "manifest.webmanifest", "icons/aios-icon-192.png"];
 
 self.addEventListener("install", (event) => {

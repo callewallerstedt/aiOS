@@ -10,7 +10,7 @@ import urllib.request
 
 
 MODEL = "gpt-5.4-nano"
-MAX_QUESTIONS = 3
+MAX_QUESTIONS = 10
 SYSTEM_PROMPT = """You are the tiny intent-check assistant inside aiOS Operator.
 Read the user's live draft before it is sent to a computer-use agent.
 
@@ -20,7 +20,10 @@ Return JSON only with this shape:
 Rules:
 - Ask only about ambiguity that could materially change what the Operator does.
 - Never ask for information already present in the draft.
-- Return at most 3 questions, ordered by importance. Zero is valid for a clear draft.
+- Never exceed question_limit. It is a ceiling, not a target; zero is valid for a clear draft.
+- Adapt the number of questions to the draft as it exists now. A short single action normally needs 0-2. A medium multi-part request may need 2-5. Use 6-10 only for a genuinely large or complex draft with that many independent ambiguities.
+- Do not dump a full checklist early. On an ordinary refresh, add at most 2 newly justified unanswered questions while preserving relevant previous questions. A newly pasted large multi-step draft may justify more.
+- Order questions by importance, with unanswered questions before answered history.
 - Keep each question under 90 characters and easy to answer in the main draft.
 - Use the same language as the draft.
 - Mark answered=true only when the current draft actually answers the question.
@@ -35,6 +38,22 @@ Rules:
 Example: if a previous question asks which file and the new draft names C:\\work\\logo.psd,
 return that exact previous question with answered=true. Do not ask whether that path is correct.
 """
+
+
+def question_limit(draft: str, previous: list[dict] | None = None) -> int:
+    """Grow the question ceiling with draft complexity and prior conversation."""
+    text = str(draft or "").strip()
+    previous_count = min(len(previous or []), MAX_QUESTIONS)
+    segments = len([part for part in re.split(r"[\n.!?;]+|(?:^|\s)[-*]\s+", text) if part.strip()])
+    if len(text) < 120 and segments <= 1:
+        complexity_limit = 2
+    elif len(text) < 400 and segments <= 3:
+        complexity_limit = 4
+    elif len(text) < 1000 and segments <= 6:
+        complexity_limit = 6
+    else:
+        complexity_limit = MAX_QUESTIONS
+    return min(MAX_QUESTIONS, max(complexity_limit, previous_count + 2))
 
 
 def _question_id(value: object, question: str, index: int) -> str:
@@ -78,9 +97,12 @@ def _content_text(message: dict) -> str:
 
 def clarify_prompt(api_key: str, draft: str, previous: list[dict] | None = None, timeout: float = 25) -> dict:
     started = time.perf_counter()
+    normalized_previous = normalize_questions(previous or [])
+    limit = question_limit(draft, normalized_previous)
     user_payload = {
         "draft": str(draft or "")[:8000],
-        "previous_questions": normalize_questions(previous or []),
+        "previous_questions": normalized_previous,
+        "question_limit": limit,
     }
     payload = {
         "model": MODEL,
@@ -89,7 +111,7 @@ def clarify_prompt(api_key: str, draft: str, previous: list[dict] | None = None,
             {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
         ],
         "reasoning_effort": "low",
-        "max_completion_tokens": 500,
+        "max_completion_tokens": 1200,
         "response_format": {"type": "json_object"},
     }
     request = urllib.request.Request(
@@ -120,7 +142,8 @@ def clarify_prompt(api_key: str, draft: str, previous: list[dict] | None = None,
     except json.JSONDecodeError as exc:
         raise RuntimeError("The intent check returned invalid JSON.") from exc
     return {
-        "questions": normalize_questions(parsed),
+        "questions": normalize_questions(parsed)[:limit],
+        "question_limit": limit,
         "model": MODEL,
         "elapsed_ms": int((time.perf_counter() - started) * 1000),
     }

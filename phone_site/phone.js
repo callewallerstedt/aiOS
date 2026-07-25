@@ -23,6 +23,7 @@ const EFFORTS = [
 ];
 
 const RUNNING_STATES = new Set(["running", "starting", "thinking", "acting", "waiting"]);
+const MAX_CLARIFIER_QUESTIONS = 10;
 const REMOTE_API_ORIGIN = location.hostname.endsWith("github.io")
   ? "https://aios-remote-control.contact-wallerstedt.chatgpt.site"
   : "";
@@ -909,7 +910,7 @@ function applyClarification(payload) {
   clearTimeout(state.clarifierTimeout);
   state.clarifierLoading = false;
   if (payload.ok !== false && Array.isArray(payload.questions)) {
-    state.clarifierQuestions = payload.questions.slice(0, 3)
+    state.clarifierQuestions = payload.questions.slice(0, MAX_CLARIFIER_QUESTIONS)
       .filter((question) => question?.question)
       .map((question) => ({
         id: String(question.id || "question"),

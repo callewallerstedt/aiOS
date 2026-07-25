@@ -421,7 +421,11 @@ h3 { font-size: 17px; letter-spacing: -.02em; font-weight: 700; margin: 0 0 16px
   content: ""; display: inline-block; width: 5px; height: 5px; margin: 0 6px 1px 0;
   border-radius: 50%; background: var(--red); animation: pulse 1s ease-in-out infinite;
 }
-.clarifier-questions { display: grid; gap: 6px; margin-top: 8px; }
+.clarifier-questions {
+  display: grid; gap: 6px; margin-top: 8px;
+  max-height: min(38dvh, 360px); overflow-y: auto; overscroll-behavior: contain;
+  scrollbar-width: thin; scrollbar-color: var(--line-2) transparent;
+}
 .clarifier-question {
   width: 100%; display: grid; grid-template-columns: 22px minmax(0,1fr) auto; align-items: center; gap: 8px;
   min-height: 38px; padding: 7px 9px; text-align: left;
