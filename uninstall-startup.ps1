@@ -1,22 +1,32 @@
 $ErrorActionPreference = "Stop"
 
-$startupDir = [Environment]::GetFolderPath("Startup")
-$shortcutPath = Join-Path $startupDir "Computer Helper Autocorrect.lnk"
-
-if (Test-Path $shortcutPath) {
-    Remove-Item -LiteralPath $shortcutPath
-    Write-Host "Removed startup shortcut: $shortcutPath"
-} else {
-    Write-Host "Startup shortcut was not installed."
+$taskName = "aiOS Watchdog"
+$task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+if ($task) {
+    Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+    Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
+    Write-Host "Removed scheduled task: $taskName"
 }
 
-$matches = Get-CimInstance Win32_Process |
-    Where-Object {
-        ($_.Name -eq "pythonw.exe" -and $_.CommandLine -like "*autocorrect.py*") -or
-        ($_.Name -like "AutoHotkey*.exe" -and $_.CommandLine -like "*autocorrect.ahk*")
+$startupDir = [Environment]::GetFolderPath("Startup")
+foreach ($name in @("aiOS Watchdog.lnk", "Computer Helper Autocorrect.lnk")) {
+    $shortcutPath = Join-Path $startupDir $name
+    if (Test-Path -LiteralPath $shortcutPath) {
+        Remove-Item -LiteralPath $shortcutPath -Force
+        Write-Host "Removed startup shortcut: $shortcutPath"
     }
+}
 
+$matches = Get-CimInstance Win32_Process | Where-Object {
+    ($_.Name -match '^pythonw?\.exe$' -and $_.CommandLine -like "*aios_watchdog.py*") -or
+    ($_.Name -like "AutoHotkey*.exe" -and $_.CommandLine -like "*autocorrect.ahk*")
+}
 foreach ($process in $matches) {
     Stop-Process -Id $process.ProcessId -Force
-    Write-Host "Stopped autocorrect process: $($process.ProcessId)"
+    Write-Host "Stopped startup process: $($process.ProcessId)"
+}
+
+foreach ($file in @(".aios-health.json", ".aios-helper-heartbeat", ".aios-ahk-heartbeat", ".aios-phone-relay-heartbeat")) {
+    $path = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) $file
+    if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
 }

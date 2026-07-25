@@ -23,7 +23,7 @@ aiOS is a Windows desktop overlay that gives you:
 
 The two surfaces talk to each other on `127.0.0.1:48736`, plus a Flask server in `agent_clicker/` for the phone.
 
-Press **Ctrl+Space** to open or hide aiOS after the startup launcher is installed.
+Press **Ctrl+Space** to open or hide aiOS. The recommended startup watchdog keeps aiOS, its hotkeys, and a paired phone remote running in the background after sign-in.
 
 ## Quick start
 
@@ -41,8 +41,10 @@ The installer is a Tk wizard. It:
 4. Writes voice defaults.
 5. Optionally signs you in with Codex.
 6. Creates `agent_clicker/.env` from the example.
-7. Optionally installs AutoHotkey via `winget` and registers the startup hotkey.
+7. Optionally installs AutoHotkey via `winget` and registers the resilient per-user startup watchdog.
 8. Verifies everything imports.
+
+The watchdog starts aiOS silently at Windows sign-in, checks each component every few seconds, and repairs the desktop helper, hotkeys, local OPERATOR bridge, or paired phone relay if one stops. The visual splash remains available for manual launches, but startup audio is disabled.
 
 Optional steps that fail (e.g. no internet for whisper) won't kill the install — the wizard logs them and continues.
 
@@ -63,6 +65,7 @@ OPERATOR can run in two modes:
 - **Codex mode** — click **Sign in with Codex** in the OPERATOR panel. aiOS opens the official Codex OAuth flow, detects completion automatically, and enables Codex mode. Use **Switch account** there whenever you want to add or change the active login.
 
 OPERATOR defaults to `gpt-5.6-luna`, including when it uses your Codex account.
+You can choose a separate pre-run planning model (Sol by default) while keeping Luna as the less expensive clicking model. Set Planning model to Off to begin execution immediately.
 
 ### aiOS Remote on your phone
 

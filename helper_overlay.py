@@ -62,8 +62,8 @@ WM_DROPFILES = 0x0233
 BRAND_FONT_PATH = BASE_DIR / "assets" / "fonts" / "Michroma-Regular.ttf"
 BRAND_FONT_FAMILY = "Michroma"
 STARTUP_FRAME_DIR = BASE_DIR / "assets" / "startup" / "aios-logo-reveal-frames"
-STARTUP_SOUND_PATH = BASE_DIR / "assets" / "startup" / "aios-startup.wav"
 OPERATOR_SOUND_PATH = BASE_DIR / "assets" / "startup" / "aios-operator.wav"
+HELPER_HEARTBEAT_PATH = BASE_DIR / ".aios-helper-heartbeat"
 APP_ICON_PATH = BASE_DIR / "assets" / "aios-logo.ico"
 TRAY_ICON_PATH = BASE_DIR / "assets" / "rectangle-logo.ico"
 APP_USER_MODEL_ID = "aiOS.Desktop.Helper"
@@ -513,6 +513,7 @@ DEFAULT_CONFIG = {
     "ai_operator": {
         "monitor": "",
         "model": OPERATOR_DEFAULT_MODEL,
+        "planner_model": "gpt-5.6-sol",
         "reasoning": "low",
         "steps": "25",
         "delay": "0.20",
@@ -1412,7 +1413,7 @@ class ScrollFrame(tk.Frame):
 
 
 class HelperOverlay:
-    def __init__(self):
+    def __init__(self, *, background=False):
         self.config = load_config()
         self.theme = self.config["theme"]
         self.project_root = Path(self.config["project_root"])
@@ -1524,6 +1525,7 @@ class HelperOverlay:
         self.agent_operator_context_save_after = None
         self.agent_operator_monitor_var = None
         self.agent_operator_model_var = None
+        self.agent_operator_planner_model_var = None
         self.agent_operator_reason_var = None
         self.agent_operator_steps_var = None
         self.agent_operator_delay_var = None
@@ -1605,13 +1607,15 @@ class HelperOverlay:
         self._start_command_server()
         self._schedule_usage_refresh()
         self._schedule_chat_watchdog()
+        self._schedule_self_health_heartbeat()
         self._poll_ui_queue()
         self._poll_agent_operator_events()
         self._ensure_voice_server()
         self.root.after(100, self._start_agent_operator_load)
         self.root.after(400, self._protect_aios_windows_from_capture)
         self.root.after(1200, self._ensure_phone_relay)
-        self.show_startup_screen()
+        if not background:
+            self.show_startup_screen()
 
     def _build_ui(self):
         self.shell = tk.Canvas(self.root, bg=TRANSPARENT, highlightthickness=0, bd=0)
@@ -4432,6 +4436,7 @@ class HelperOverlay:
         self.agent_operator_step_var = tk.StringVar(value="")
         self.agent_operator_monitor_var = tk.StringVar(value=selected)
         self.agent_operator_model_var = tk.StringVar(value=self.agent_operator_model_var.get() if self.agent_operator_model_var else str(self.agent_operator_settings.get("model") or self.agent_operator_default_model))
+        self.agent_operator_planner_model_var = tk.StringVar(value=self.agent_operator_planner_model_var.get() if self.agent_operator_planner_model_var else str(self.agent_operator_settings.get("planner_model") or "gpt-5.6-sol"))
         self.agent_operator_reason_var = tk.StringVar(value=self.agent_operator_reason_var.get() if self.agent_operator_reason_var else str(self.agent_operator_settings.get("reasoning") or "low"))
         self.agent_operator_steps_var = tk.StringVar(value=self.agent_operator_steps_var.get() if self.agent_operator_steps_var else str(self.agent_operator_settings.get("steps") or "25"))
         self.agent_operator_delay_var = tk.StringVar(value=self.agent_operator_delay_var.get() if self.agent_operator_delay_var else str(self.agent_operator_settings.get("delay") or "0.20"))
@@ -4485,6 +4490,21 @@ class HelperOverlay:
         monitor_actions.pack(side="right")
         self.button(monitor_actions, "Preview", self.agent_operator_preview_monitor, compact=True).pack(side="left", padx=(6, 0))
         self.button(monitor_actions, "Test Cursor", self.agent_operator_test_cursor, compact=True).pack(side="left", padx=(6, 0))
+
+        planner_row = tk.Frame(self.agent_operator_advanced_frame, bg=self.c("surface"))
+        planner_row.pack(fill="x", pady=(0, 6))
+        tk.Label(planner_row, text="Planning model", bg=self.c("surface"), fg=self.c("muted"), font=self.font(9, "bold")).pack(side="left")
+        planner_choices = ["off", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"]
+        if self.agent_operator_planner_model_var.get() not in planner_choices:
+            planner_choices.insert(0, self.agent_operator_planner_model_var.get())
+        planner_menu = tk.OptionMenu(
+            planner_row,
+            self.agent_operator_planner_model_var,
+            *planner_choices,
+            command=lambda _value: self.save_agent_operator_settings(),
+        )
+        self.style_option(planner_menu)
+        planner_menu.pack(side="left", fill="x", expand=True, padx=(8, 0))
 
         row2 = tk.Frame(self.agent_operator_advanced_frame, bg=self.c("surface"))
         row2.pack(fill="x", pady=(0, 6))
@@ -5138,6 +5158,12 @@ class HelperOverlay:
     def _agent_operator_model(self):
         return self.agent_operator_model_var.get().strip() or self.agent_operator_default_model
 
+    def _agent_operator_planner_model(self):
+        if not self.agent_operator_planner_model_var:
+            return str(self.agent_operator_settings.get("planner_model") or "")
+        value = self.agent_operator_planner_model_var.get().strip()
+        return "" if value.lower() in {"", "off", "none", "disabled"} else value
+
     def toggle_agent_operator_advanced(self):
         self.agent_operator_advanced_open = not self.agent_operator_advanced_open
         frame = self.agent_operator_advanced_frame
@@ -5165,6 +5191,8 @@ class HelperOverlay:
             settings["monitor"] = self.agent_operator_monitor_var.get()
         if self.agent_operator_model_var:
             settings["model"] = self._agent_operator_model()
+        if self.agent_operator_planner_model_var:
+            settings["planner_model"] = self.agent_operator_planner_model_var.get().strip() or "off"
         if self.agent_operator_reason_var:
             settings["reasoning"] = self.agent_operator_reason_var.get()
         if self.agent_operator_steps_var:
@@ -5601,6 +5629,7 @@ class HelperOverlay:
         self.agent_operator_clear_log()
         self.agent_operator_last_clicks.clear()
         model = self._agent_operator_model()
+        planner_model = self._agent_operator_planner_model()
         reasoning = (self.agent_operator_reason_var.get() if self.agent_operator_reason_var else "low").strip().lower() or None
         attachments = self._agent_operator_attachment_snapshot()
         user_context = self._agent_operator_user_context_text()
@@ -5618,7 +5647,7 @@ class HelperOverlay:
         self._agent_operator_log_line("step", f"[{self._ts()}] START\n")
         self._agent_operator_log_line(
             "dim",
-            f"task={task!r} monitor={monitor.label} model={model} reasoning={reasoning} max_steps={steps} attachments={len(attachments)} prompts={context_count} shell={'on' if shell_enabled else 'off'} backend={backend}\n\n",
+            f"task={task!r} monitor={monitor.label} planner={planner_model or 'off'} model={model} reasoning={reasoning} max_steps={steps} attachments={len(attachments)} prompts={context_count} shell={'on' if shell_enabled else 'off'} backend={backend}\n\n",
         )
         self.agent_operator_status_var.set("Running")
         self.agent_operator_stop_requested = False
@@ -5637,6 +5666,7 @@ class HelperOverlay:
                 mid_screenshots="key",
                 attachments=attachments,
                 user_context=user_context,
+                planner_model=planner_model,
             )
             self._agent_operator_sync_buttons()
         except TypeError:
@@ -5653,6 +5683,7 @@ class HelperOverlay:
                     reasoning_effort=reasoning,
                     mid_screenshots="key",
                     attachments=attachments,
+                    planner_model=planner_model,
                 )
                 self._agent_operator_sync_buttons()
             except TypeError:
@@ -5863,6 +5894,11 @@ class HelperOverlay:
             record["actions"] = len(event.get("actions") or [])
             record["status"] = event.get("status")
             record["elapsed_ms"] = event.get("elapsed_ms")
+        elif kind == "planning_begin":
+            record["model"] = event.get("model", "")
+        elif kind == "plan":
+            record["model"] = event.get("model", "")
+            record["plan"] = (event.get("plan") or "")[:8000]
         elif kind == "action_done":
             result = event.get("result") or {}
             atype = (result.get("action") or {}).get("type") or "?"
@@ -5959,6 +5995,12 @@ class HelperOverlay:
                 self.agent_operator_step_var.set(f"step {event.get('n')}")
             self.agent_operator_last_clicks.clear()
             self._agent_operator_log_line("step", f"\n[{self._ts()}] Step {event.get('n')}\n")
+        elif kind == "planning_begin":
+            if self.agent_operator_status_var:
+                self.agent_operator_status_var.set("Planning")
+            self._agent_operator_log_line("step", f"\n[{self._ts()}] Planning with {event.get('model', 'planner')}\n")
+        elif kind == "plan":
+            self._agent_operator_log_line("status", (event.get("plan") or "").rstrip() + "\n")
         elif kind == "screenshot":
             self.agent_operator_current_image = event.get("image")
             self._agent_operator_redraw_preview()
@@ -9016,6 +9058,13 @@ class HelperOverlay:
         self._chat_watchdog()
         self.root.after(5000, self._schedule_chat_watchdog)
 
+    def _schedule_self_health_heartbeat(self):
+        try:
+            HELPER_HEARTBEAT_PATH.touch()
+        except OSError:
+            pass
+        self.root.after(5000, self._schedule_self_health_heartbeat)
+
     def _chat_watchdog(self):
         if self.busy and self.chat_busy_since:
             if time.perf_counter() - self.chat_busy_since > 300:
@@ -9247,7 +9296,6 @@ class HelperOverlay:
         if not frame_paths:
             self.show()
             return
-        self._play_startup_sound()
         self._launch_startup_splash()
         self.root.after(2600, self.show)
 
@@ -9265,9 +9313,6 @@ class HelperOverlay:
             )
         except OSError:
             pass
-
-    def _play_startup_sound(self):
-        self._play_wav_async(STARTUP_SOUND_PATH)
 
     def _play_operator_sound(self):
         now = time.perf_counter()
@@ -9790,6 +9835,7 @@ class HelperOverlay:
         mapping = {
             "monitor": ("agent_operator_monitor_var", str),
             "model": ("agent_operator_model_var", str),
+            "planner_model": ("agent_operator_planner_model_var", str),
             "reasoning": ("agent_operator_reason_var", str),
             "steps": ("agent_operator_steps_var", str),
             "delay": ("agent_operator_delay_var", str),
@@ -10300,6 +10346,7 @@ def main():
     parser.add_argument("--show", action="store_true")
     parser.add_argument("--hide", action="store_true")
     parser.add_argument("--quit", action="store_true")
+    parser.add_argument("--background", action="store_true")
     args = parser.parse_args()
 
     if args.quit:
@@ -10317,7 +10364,7 @@ def main():
         send_command("show" if args.show else "toggle")
         return
 
-    app = HelperOverlay()
+    app = HelperOverlay(background=args.background)
     app.run()
 
 
