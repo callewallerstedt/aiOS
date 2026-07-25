@@ -1,210 +1,267 @@
 <!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
-<title>aiOS</title>
-<meta name="theme-color" content="#05060a" />
-<meta name="mobile-web-app-capable" content="yes" />
-<meta name="apple-mobile-web-app-capable" content="yes" />
-<meta name="apple-mobile-web-app-title" content="aiOS" />
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-<link rel="manifest" href="/manifest.webmanifest" />
-<link rel="apple-touch-icon" href="/icons/aios-icon-180.png" />
-<link rel="icon" sizes="192x192" href="/icons/aios-icon-192.png" />
-<link rel="preconnect" href="https://rsms.me/" />
-<link rel="stylesheet" href="https://rsms.me/inter/inter.css" />
-<link rel="stylesheet" href="/phone.css" />
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+  <meta name="theme-color" content="#08080a">
+  <meta name="description" content="Ask your computer to do things. OPERATOR remote control from your phone.">
+  <meta property="og:title" content="aiOS Remote">
+  <meta property="og:description" content="Ask your computer to do things — from anywhere.">
+  <meta property="og:type" content="website">
+  <meta property="og:image" content="/og-aios-remote.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="apple-touch-icon" href="/icons/aios-icon-180.png">
+  <link rel="icon" href="/icons/aios-icon-192.png">
+  <link rel="stylesheet" href="/phone.css">
+  <title>aiOS Remote</title>
 </head>
 <body>
-<div class="bg-gradient" aria-hidden="true"></div>
 
-<main class="shell">
-  <header class="top">
+<svg class="sprite" aria-hidden="true" focusable="false">
+  <symbol id="i-mic" viewBox="0 0 24 24"><path d="M12 3a3 3 0 0 1 3 3v6a3 3 0 0 1-6 0V6a3 3 0 0 1 3-3Z"/><path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v3"/></symbol>
+  <symbol id="i-send" viewBox="0 0 24 24"><path d="M12 20V5"/><path d="m5.5 11.5 6.5-6.5 6.5 6.5"/></symbol>
+  <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6.5" y="6.5" width="11" height="11" rx="2.5"/></symbol>
+  <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2.2"/><circle cx="9" cy="17" r="2.2"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m7 10 5 5 5-5"/></symbol>
+  <symbol id="i-back" viewBox="0 0 24 24"><path d="M14 6l-6 6 6 6"/></symbol>
+  <symbol id="i-expand" viewBox="0 0 24 24"><path d="M9 4H4v5M15 4h5v5M15 20h5v-5M9 20H4v-5"/></symbol>
+  <symbol id="i-shrink" viewBox="0 0 24 24"><path d="M4 9h5V4M20 9h-5V4M20 15h-5v5M4 15h5v5"/></symbol>
+  <symbol id="i-monitor" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12.5" rx="2"/><path d="M9 20h6M12 16.5V20"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2.5"/><path d="M15 5.5A2.5 2.5 0 0 0 12.5 4h-6A2.5 2.5 0 0 0 4 6.5v6A2.5 2.5 0 0 0 5.5 15"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4.5 7h15M9.5 7V5h5v2M6.5 7l.9 12.1A2 2 0 0 0 9.4 21h5.2a2 2 0 0 0 2-1.9L17.5 7"/></symbol>
+  <symbol id="i-zoom-out" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M8.5 11h5M16 16l4 4"/></symbol>
+  <symbol id="i-cursor" viewBox="0 0 24 24"><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/><circle cx="12" cy="12" r="3.2"/></symbol>
+  <symbol id="i-spark" viewBox="0 0 24 24"><path fill="currentColor" stroke="none" d="M12 3.5 13.8 9l5.7 1.8-5.7 1.8L12 20.5l-1.8-5.9L4.5 12.8 10.2 11 12 3.5Z"/></symbol>
+  <symbol id="i-bolt" viewBox="0 0 24 24"><path fill="currentColor" stroke="none" d="M13.5 3 5.8 13.4h5.2L10.5 21l7.7-10.4H13L13.5 3Z"/></symbol>
+  <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v11M7.5 10.5 12 15l4.5-4.5M5 20h14"/></symbol>
+  <symbol id="i-power" viewBox="0 0 24 24"><path d="M12 4v8"/><path d="M6.8 7.2a7.5 7.5 0 1 0 10.4 0"/></symbol>
+  <symbol id="i-arrow-down" viewBox="0 0 24 24"><path d="M12 5v14M6 13.5l6 6 6-6"/></symbol>
+  <symbol id="i-pc" viewBox="0 0 24 24"><rect x="4" y="3.5" width="16" height="17" rx="2.5"/><path d="M8 8h8M8 12h8M8 16h4"/></symbol>
+  <symbol id="i-warn" viewBox="0 0 24 24"><path d="M12 8v5M12 16.5v.01"/><circle cx="12" cy="12" r="8.5"/></symbol>
+  <symbol id="i-edit" viewBox="0 0 24 24"><path d="M5 19h3l9.5-9.5a2.1 2.1 0 0 0-3-3L5 16v3Z"/></symbol>
+</svg>
+
+<!-- ───────────────────────── AUTH ───────────────────────── -->
+<section id="authView" class="auth">
+  <div class="auth-card">
     <div class="brand">
-      <img class="logo" src="/icons/aios-logo.png" alt="aiOS" />
+      <div class="brand-mark">ai</div>
+      <div class="brand-text"><strong>aiOS</strong><span>Remote</span></div>
     </div>
-    <div class="top-meta">
-      <button id="state" class="pill" type="button" aria-label="status">
-        <span class="dot"></span><span id="state-text">ready</span>
-      </button>
-      <button id="settings-btn" class="icon-mini" type="button" aria-label="Settings">
-        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
-          <path fill="currentColor" d="M19.14 12.94a7.86 7.86 0 0 0 0-1.88l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96a7.6 7.6 0 0 0-1.63-.95l-.36-2.54a.5.5 0 0 0-.5-.42h-3.84a.5.5 0 0 0-.5.42l-.36 2.54c-.59.23-1.14.55-1.63.95l-2.39-.96a.5.5 0 0 0-.6.22L2.66 8.84a.5.5 0 0 0 .12.64l2.03 1.58a7.86 7.86 0 0 0 0 1.88L2.78 14.5a.5.5 0 0 0-.12.64l1.92 3.32c.14.24.43.34.6.22l2.39-.96c.5.4 1.04.72 1.63.95l.36 2.54c.05.24.26.42.5.42h3.84c.24 0 .45-.18.5-.42l.36-2.54c.59-.23 1.13-.55 1.63-.95l2.39.96c.27.1.46 0 .6-.22l1.92-3.32a.5.5 0 0 0-.12-.64ZM12 15.5A3.5 3.5 0 1 1 15.5 12 3.5 3.5 0 0 1 12 15.5Z"/>
-        </svg>
-      </button>
+
+    <div id="welcomePane" class="pane">
+      <h1>Ask your computer<br>to do things.</h1>
+      <p class="lede">Send a task to OPERATOR, watch it work live, and take over whenever you want.</p>
+      <div class="auth-actions">
+        <button id="createAccountBtn" class="btn btn-primary btn-block">Create my remote</button>
+        <button id="showLoginBtn" class="btn btn-quiet btn-block">I have a private code</button>
+      </div>
+    </div>
+
+    <form id="loginForm" class="pane hidden">
+      <button type="button" id="loginBackBtn" class="linkback"><svg class="ic"><use href="#i-back"/></svg> Back</button>
+      <h2>Enter your private code</h2>
+      <p class="sub">The code you saved when you created your remote.</p>
+      <input id="loginCode" class="code-input" autocomplete="one-time-code" autocapitalize="characters" autocorrect="off" spellcheck="false" placeholder="AIOS-XXXXX-XXXXX-XXXXX-XXXXX" required>
+      <p id="loginError" class="form-error"></p>
+      <button class="btn btn-primary btn-block" type="submit">Unlock</button>
+    </form>
+
+    <div id="createdPane" class="pane hidden">
+      <h2>Save this code</h2>
+      <p class="sub">It links your phone to your computers. Anyone with it can pair a PC — keep it safe.</p>
+      <button id="privateCode" class="code-chip" type="button" aria-label="Copy private code"></button>
+      <div class="auth-actions">
+        <button id="copyCodeBtn" class="btn btn-quiet btn-block"><svg class="ic"><use href="#i-copy"/></svg> Copy code</button>
+        <button id="enterRemoteBtn" class="btn btn-primary btn-block">Open my remote</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ───────────────────────── APP ───────────────────────── -->
+<main id="appView" class="app hidden">
+
+  <header class="appbar">
+    <button id="machineBtn" class="machine-btn" type="button">
+      <span id="machineDot" class="dot"></span>
+      <span class="machine-btn-text">
+        <strong id="machineName">Computer</strong>
+        <small id="machineMeta">Connecting…</small>
+      </span>
+      <svg class="ic chev"><use href="#i-chevron"/></svg>
+    </button>
+    <div class="appbar-actions">
+      <button id="installBtn" class="iconbtn hidden" aria-label="Install app"><svg class="ic"><use href="#i-download"/></svg></button>
+      <button id="settingsBtn" class="iconbtn" aria-label="Settings"><svg class="ic"><use href="#i-sliders"/></svg></button>
     </div>
   </header>
 
-  <div class="usage-strip" id="codex-usage" aria-label="Codex usage"></div>
-
-  <section class="screen" id="screen-wrap">
-    <div class="screen-toolbar">
-      <select id="monitor-select" class="chip-select" aria-label="Monitor">
-        <option value="1">Monitor 1</option>
-      </select>
-      <button id="screen-zoom" class="chip-btn" type="button" aria-label="Fullscreen" title="Fullscreen">
-        <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M5 5h5V3H3v7h2Zm14 0v5h2V3h-7v2Zm0 14h-5v2h7v-7h-2ZM5 14H3v7h7v-2H5Z"/></svg>
-      </button>
-      <button id="screen-collapse" class="chip-btn" type="button" aria-label="Collapse" title="Collapse">
-        <svg id="screen-collapse-icon" viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M5 11h14v2H5z"/></svg>
-      </button>
-    </div>
-    <div class="screen-stage" id="screen-stage">
-      <img id="screen" alt="" draggable="false" />
-    </div>
-    <div class="screen-empty">no signal · check backend</div>
+  <section id="emptyState" class="empty hidden">
+    <div class="empty-icon"><svg class="ic"><use href="#i-pc"/></svg></div>
+    <h2>Connect your first computer</h2>
+    <p>Open aiOS on your PC, go to <strong>Settings → Mobile remote</strong>, and paste your private code.</p>
+    <button id="emptyAddBtn" class="btn btn-primary">Show pairing steps</button>
   </section>
 
-  <section class="transcript-wrap">
-    <div class="op-followup-banner" id="op-followup-banner" hidden>
-      <div class="op-followup-row">
-        <span class="op-followup-mode" id="op-followup-mode">running</span>
-        <button id="op-followup-clear" class="op-followup-clear" type="button">Clear</button>
-      </div>
-      <div class="op-followup-question" id="op-followup-question" hidden></div>
-    </div>
-    <textarea id="text" class="text" rows="2" placeholder="tap mic, or type here…" autocomplete="off" autocorrect="on" autocapitalize="sentences" spellcheck="true"></textarea>
-    <div class="attach-strip" id="attach-strip" hidden></div>
-    <div class="attach-row">
-      <button id="attach-btn" class="attach-btn" type="button" aria-label="Attach image">
-        <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M21.44 11.05 12.25 20.24a6 6 0 1 1-8.49-8.49l9.19-9.19a4 4 0 1 1 5.66 5.66l-9.2 9.19a2 2 0 1 1-2.83-2.83l8.49-8.48 1.41 1.41-8.49 8.49a.5.5 0 1 0 .71.71l9.19-9.19a2 2 0 1 0-2.83-2.83L4.17 13.17a4 4 0 1 0 5.66 5.66l9.19-9.19 1.42 1.41Z"/></svg>
-        <span>Attach</span>
-      </button>
-      <input id="attach-input" type="file" accept="image/*" multiple hidden />
-      <div class="char-count" id="char-count"></div>
-    </div>
-  </section>
+  <div id="workspace" class="workspace hidden">
 
-  <section class="operator-panel" id="operator-panel" hidden>
-    <button class="op-disclose" id="op-disclose" type="button">
-      <span>Operator settings</span>
-      <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="m7 10 5 5 5-5z"/></svg>
+    <!-- Live screen -->
+    <section id="viewer" class="viewer">
+      <div id="viewerScroll" class="viewer-scroll">
+        <div id="viewerCanvas" class="viewer-canvas">
+          <img id="screenImage" alt="Live screen" draggable="false">
+          <div id="markerLayer" class="markers"></div>
+        </div>
+      </div>
+
+      <div id="screenPlaceholder" class="viewer-empty">
+        <div class="spinner"></div>
+        <span>Waiting for the first screenshot</span>
+      </div>
+
+      <div class="hud hud-top">
+        <button id="monitorBtn" class="chip" type="button"><svg class="ic"><use href="#i-monitor"/></svg><span id="monitorLabel">Display</span></button>
+        <div class="hud-right">
+          <span id="zoomChip" class="chip chip-static hidden">100%</span>
+          <button id="zoomResetBtn" class="chip hidden" type="button"><svg class="ic"><use href="#i-zoom-out"/></svg>Fit</button>
+          <button id="expandBtn" class="chip" type="button" aria-label="Fullscreen"><svg class="ic"><use href="#i-expand"/></svg></button>
+        </div>
+      </div>
+
+      <div class="hud hud-bottom">
+        <span id="livePill" class="live"><i></i>LIVE</span>
+        <span id="lastClickPill" class="chip chip-static hidden"></span>
+      </div>
+    </section>
+
+    <button id="screenToggle" class="screen-toggle" type="button">
+      <svg class="ic"><use href="#i-chevron"/></svg><span>Hide screen</span>
     </button>
-    <div class="op-body" id="op-body">
-      <div class="op-grid">
-        <label class="op-field">
-          <span>Model</span>
-          <input id="op-model" type="text" inputmode="text" autocomplete="off" placeholder="gpt-5.5" />
-        </label>
-        <label class="op-field">
-          <span>Reasoning</span>
-          <select id="op-reasoning">
-            <option value="minimal">minimal</option>
-            <option value="low">low</option>
-            <option value="medium" selected>medium</option>
-            <option value="high">high</option>
-          </select>
-        </label>
-        <label class="op-field">
-          <span>Max steps</span>
-          <input id="op-steps" type="number" inputmode="numeric" min="1" max="200" value="25" />
-        </label>
-        <label class="op-field">
-          <span>Action delay</span>
-          <input id="op-delay" type="number" inputmode="decimal" step="0.05" min="0" max="3" value="0.20" />
-        </label>
-        <label class="op-field span-2">
-          <span>Run on monitor</span>
-          <select id="op-monitor">
-            <option value="">auto</option>
-          </select>
-        </label>
-        <label class="op-field span-2">
-          <span>Voice</span>
-          <select id="op-voice">
-            <option value="nova">nova</option>
-            <option value="alloy">alloy</option>
-            <option value="echo">echo</option>
-            <option value="fable">fable</option>
-            <option value="onyx">onyx</option>
-            <option value="shimmer">shimmer</option>
-            <option value="coral">coral</option>
-            <option value="sage">sage</option>
-            <option value="ash">ash</option>
-          </select>
-        </label>
+
+    <!-- Timeline -->
+    <section class="timeline-wrap">
+      <div class="timeline-head">
+        <div class="run">
+          <span id="runDot" class="run-dot"></span>
+          <div>
+            <strong id="runTitle">Ready for a task</strong>
+            <small id="runMeta">Luna · idle</small>
+          </div>
+        </div>
+        <div class="run-actions">
+          <button id="filterBtn" class="ghostbtn" type="button">All</button>
+          <button id="clearChatBtn" class="iconbtn sm" type="button" aria-label="Clear timeline"><svg class="ic"><use href="#i-trash"/></svg></button>
+          <button id="stopBtn" class="stopbtn hidden" type="button"><svg class="ic"><use href="#i-stop"/></svg>Stop</button>
+        </div>
       </div>
-      <div class="op-toggles">
-        <label class="op-toggle"><input id="op-tts" type="checkbox" /><span>TTS</span></label>
-        <label class="op-toggle"><input id="op-shell" type="checkbox" /><span>Shell</span></label>
-        <label class="op-toggle"><input id="op-codex" type="checkbox" /><span>Codex</span></label>
+      <div id="timeline" class="timeline">
+        <div class="timeline-empty">
+          <svg class="ic"><use href="#i-spark"/></svg>
+          <p>Nothing yet. Ask your computer to do something.</p>
+        </div>
       </div>
-      <div class="op-actions">
-        <button id="op-save" class="op-btn" type="button">Save</button>
-        <button id="op-stop" class="op-btn danger" type="button">Safety stop</button>
+      <button id="jumpBtn" class="jump hidden" type="button"><svg class="ic"><use href="#i-arrow-down"/></svg>New activity</button>
+    </section>
+  </div>
+
+  <!-- Composer -->
+  <form id="promptForm" class="dock hidden">
+    <div id="suggestions" class="suggestions">
+      <button type="button" class="sugg">Summarise what's on my screen</button>
+      <button type="button" class="sugg">Open my email and read the latest</button>
+      <button type="button" class="sugg">Find the file I worked on last</button>
+    </div>
+    <div class="composer">
+      <textarea id="promptInput" rows="1" maxlength="8000" placeholder="Ask your computer…"></textarea>
+      <div class="composer-bar">
+        <button id="modelBtn" class="pill" type="button"><span id="modelLabel">Luna</span><svg class="ic"><use href="#i-chevron"/></svg></button>
+        <button id="effortBtn" class="pill" type="button"><span id="effortLabel">Low</span><svg class="ic"><use href="#i-chevron"/></svg></button>
+        <div class="composer-spacer"></div>
+        <button id="micBtn" class="roundbtn" type="button" aria-label="Dictate"><svg class="ic"><use href="#i-mic"/></svg></button>
+        <button id="sendBtn" class="roundbtn send" type="submit" aria-label="Send"><svg class="ic"><use href="#i-send"/></svg></button>
       </div>
     </div>
-
-    <div class="op-stream-head">
-      <span class="stream-title">Live operator</span>
-      <span class="stream-status" id="op-status">idle</span>
-      <button id="op-clear-persistent" class="op-clear-mini" type="button" aria-label="Clear operator" title="Clear operator">
-        <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path fill="currentColor" d="M9 3h6l1 2h4v2H4V5h4l1-2zM6 8h12l-1 13a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L6 8z"/></svg>
-        <span>Clear</span>
-      </button>
+    <div id="listening" class="listening hidden">
+      <span class="wave"><i></i><i></i><i></i><i></i><i></i></span>
+      <span id="listeningText">Listening…</span>
+      <button type="button" id="micStopBtn" class="ghostbtn">Done</button>
     </div>
-    <div class="op-stream" id="op-stream"></div>
-  </section>
-
-  <footer class="dock">
-    <button id="clear" class="icon-btn" type="button" aria-label="Clear">
-      <svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M18.3 5.71a1 1 0 0 0-1.41 0L12 10.59 7.11 5.7A1 1 0 0 0 5.7 7.11L10.59 12 5.7 16.89a1 1 0 1 0 1.41 1.41L12 13.41l4.89 4.89a1 1 0 0 0 1.41-1.41L13.41 12l4.89-4.89a1 1 0 0 0 0-1.4Z"/></svg>
-    </button>
-    <button id="mic" class="mic" type="button" aria-label="Microphone">
-      <span class="mic-pulse"></span>
-      <span class="mic-pulse delayed"></span>
-      <span class="mic-glyph">
-        <svg viewBox="0 0 24 24" width="30" height="30" aria-hidden="true">
-          <path fill="currentColor" d="M12 14a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v5a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11Z"/>
-        </svg>
-      </span>
-    </button>
-    <button id="send" class="icon-btn send" type="button" aria-label="Send">
-      <svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="m4 21 18-9L4 3v7l13 2-13 2Z"/></svg>
-    </button>
-  </footer>
+  </form>
 </main>
 
-<div class="modal" id="settings-modal" hidden>
-  <div class="modal-card">
-    <h2>Settings</h2>
-    <label class="modal-field">
-      <span>Backend URL</span>
-      <input id="settings-backend" type="url" autocomplete="off" placeholder="https://your-tunnel.example.com" />
-    </label>
-    <div class="modal-row">
-      <label class="modal-field">
-        <span>Refresh (ms)</span>
-        <input id="settings-refresh" type="number" inputmode="numeric" min="400" max="10000" step="100" value="500" />
-      </label>
-      <label class="modal-field">
-        <span>Quality</span>
-        <input id="settings-quality" type="number" inputmode="numeric" min="20" max="95" step="5" value="78" />
-      </label>
-      <label class="modal-field">
-        <span>Max size</span>
-        <input id="settings-size" type="number" inputmode="numeric" min="400" max="3840" step="100" value="1600" />
-      </label>
-    </div>
-    <label class="modal-toggle"><input id="settings-stream" type="checkbox" checked /><span>Live screen mirroring</span></label>
-    <label class="modal-toggle"><input id="settings-autosend" type="checkbox" /><span>Auto-send after voice</span></label>
-    <label class="modal-toggle"><input id="settings-haptics" type="checkbox" checked /><span>Haptics</span></label>
-    <div class="modal-actions">
-      <button id="settings-cancel" class="op-btn" type="button">Close</button>
-      <button id="settings-save" class="op-btn primary" type="button">Save</button>
-    </div>
-  </div>
-</div>
+<!-- ───────────────────────── SHEETS ───────────────────────── -->
+<div id="backdrop" class="backdrop hidden"></div>
 
-<div class="zoom-modal" id="zoom-modal" hidden>
-  <button class="zoom-close" id="zoom-close" type="button" aria-label="Close">×</button>
-  <div class="zoom-loading" id="zoom-loading">capturing high-res frame…</div>
-  <div class="zoom-stage" id="zoom-stage">
-    <img id="zoom-img" alt="" draggable="false" />
-  </div>
-</div>
+<section id="machineSheet" class="sheet hidden" role="dialog" aria-modal="true">
+  <div class="grabber"></div>
+  <h3>Your computers</h3>
+  <div id="machineOptions" class="options"></div>
+  <button id="renameBtn" class="btn btn-quiet btn-block"><svg class="ic"><use href="#i-edit"/></svg> Rename this computer</button>
+  <button id="addMachineBtn" class="btn btn-quiet btn-block"><svg class="ic"><use href="#i-plus"/></svg> Pair another PC</button>
+</section>
 
-<script src="/phone.js"></script>
+<section id="monitorSheet" class="sheet hidden" role="dialog" aria-modal="true">
+  <div class="grabber"></div>
+  <h3>Display</h3>
+  <div id="monitorOptions" class="options"></div>
+</section>
+
+<section id="modelSheet" class="sheet hidden" role="dialog" aria-modal="true">
+  <div class="grabber"></div>
+  <h3>Clicking model</h3>
+  <div id="modelOptions" class="options"></div>
+</section>
+
+<section id="effortSheet" class="sheet hidden" role="dialog" aria-modal="true">
+  <div class="grabber"></div>
+  <h3>Reasoning effort</h3>
+  <div id="effortOptions" class="options"></div>
+</section>
+
+<section id="pairSheet" class="sheet hidden" role="dialog" aria-modal="true">
+  <div class="grabber"></div>
+  <h3>Pair another PC</h3>
+  <ol class="steps">
+    <li>Open aiOS on the Windows computer.</li>
+    <li>Go to <strong>Settings → Mobile remote</strong>.</li>
+    <li>Paste this code and press <strong>Connect</strong>.</li>
+  </ol>
+  <button id="pairCode" class="code-chip" type="button"></button>
+  <button id="pairCopyBtn" class="btn btn-primary btn-block"><svg class="ic"><use href="#i-copy"/></svg> Copy private code</button>
+  <p class="note">Treat this like a password. Every PC gets its own revocable key.</p>
+</section>
+
+<section id="settingsSheet" class="sheet hidden" role="dialog" aria-modal="true">
+  <div class="grabber"></div>
+  <h3>Settings</h3>
+  <div class="rows">
+    <button id="settingsModelRow" class="row" type="button"><span>Clicking model</span><em id="settingsModelValue">Luna</em><svg class="ic"><use href="#i-chevron"/></svg></button>
+    <button id="settingsEffortRow" class="row" type="button"><span>Reasoning effort</span><em id="settingsEffortValue">Low</em><svg class="ic"><use href="#i-chevron"/></svg></button>
+    <label class="row"><span>Maximum steps</span><input id="stepsInput" class="row-input" type="number" inputmode="numeric" min="1" max="100" value="30"></label>
+    <label class="row"><span>Detailed activity</span><input id="detailsToggle" class="switch" type="checkbox" checked></label>
+    <label class="row"><span>Keep screen awake</span><input id="wakeToggle" class="switch" type="checkbox"></label>
+    <label class="row"><span>Haptics</span><input id="hapticToggle" class="switch" type="checkbox" checked></label>
+  </div>
+  <button id="logoutBtn" class="btn btn-danger btn-block"><svg class="ic"><use href="#i-power"/></svg> Lock this phone</button>
+</section>
+
+<section id="renameSheet" class="sheet hidden" role="dialog" aria-modal="true">
+  <div class="grabber"></div>
+  <h3>Rename computer</h3>
+  <form id="renameForm">
+    <input id="renameInput" class="text-input" maxlength="80" placeholder="Studio PC">
+    <button class="btn btn-primary btn-block" type="submit">Save name</button>
+  </form>
+</section>
+
+<div id="toast" class="toast" role="status"></div>
+<script src="/phone.js" defer></script>
 </body>
 </html>

@@ -1,24 +1,19 @@
 {
-  "name": "aiOS Phone",
+  "name": "aiOS Remote",
   "short_name": "aiOS",
+  "description": "Ask your computer to do things, from anywhere.",
   "start_url": "/",
   "scope": "/",
-  "display": "fullscreen",
-  "background_color": "#070808",
-  "theme_color": "#070808",
-  "orientation": "portrait",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#08080a",
+  "theme_color": "#08080a",
+  "categories": ["productivity", "utilities"],
   "icons": [
-    {
-      "src": "/icons/aios-icon-192.png",
-      "sizes": "192x192",
-      "type": "image/png",
-      "purpose": "any maskable"
-    },
-    {
-      "src": "/icons/aios-icon-512.png",
-      "sizes": "512x512",
-      "type": "image/png",
-      "purpose": "any maskable"
-    }
+    { "src": "/icons/aios-icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "/icons/aios-icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ],
+  "shortcuts": [
+    { "name": "New OPERATOR task", "short_name": "New task", "url": "/?compose=1", "icons": [{ "src": "/icons/aios-icon-192.png", "sizes": "192x192" }] }
   ]
 }

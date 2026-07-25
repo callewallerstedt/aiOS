@@ -1,1201 +1,1160 @@
-const $ = (id) => document.getElementById(id);
-
-const shellEl = document.querySelector('.shell');
-const stateEl = $('state');
-const stateText = $('state-text');
-const textEl = $('text');
-const charCount = $('char-count');
-const micBtn = $('mic');
-const sendBtn = $('send');
-const clearBtn = $('clear');
-const screenEl = $('screen');
-const screenStage = $('screen-stage');
-const screenWrap = $('screen-wrap');
-const screenCollapseBtn = $('screen-collapse');
-const screenCollapseIcon = $('screen-collapse-icon');
-const monitorSelect = $('monitor-select');
-const zoomBtn = $('screen-zoom');
-const operatorPanel = $('operator-panel');
-const opStatus = $('op-status');
-const opStream = $('op-stream');
-const opDisclose = $('op-disclose');
-const opBody = $('op-body');
-const codexUsage = $('codex-usage');
-const opFollowupBanner = $('op-followup-banner');
-const opFollowupMode = $('op-followup-mode');
-const opFollowupQuestion = $('op-followup-question');
-const opFollowupClear = $('op-followup-clear');
-const opClearPersistent = $('op-clear-persistent');
-const attachBtn = $('attach-btn');
-const attachInput = $('attach-input');
-const attachStrip = $('attach-strip');
-
-const opInputs = {
-  model: $('op-model'),
-  reasoning: $('op-reasoning'),
-  steps: $('op-steps'),
-  delay: $('op-delay'),
-  monitor: $('op-monitor'),
-  voice: $('op-voice'),
-  tts: $('op-tts'),
-  shell: $('op-shell'),
-  codex_auth: $('op-codex'),
-};
-
-const settingsBtn = $('settings-btn');
-const settingsModal = $('settings-modal');
-const settingsBackend = $('settings-backend');
-const settingsRefresh = $('settings-refresh');
-const settingsQuality = $('settings-quality');
-const settingsSize = $('settings-size');
-const settingsStream = $('settings-stream');
-const settingsAutosend = $('settings-autosend');
-const settingsHaptics = $('settings-haptics');
-const settingsSave = $('settings-save');
-const settingsCancel = $('settings-cancel');
-
-const zoomModal = $('zoom-modal');
-const zoomStage = $('zoom-stage');
-const zoomImg = $('zoom-img');
-const zoomClose = $('zoom-close');
-const zoomLoading = $('zoom-loading');
-
-const params = new URLSearchParams(window.location.search);
-const queryBackend = params.get('backend');
-if (queryBackend) localStorage.setItem('aiosBackendUrl', queryBackend.replace(/\/$/, ''));
-
-const sameOriginBackend = !location.hostname.endsWith('.vercel.app');
-
-const prefs = loadPrefs();
-let apiBase = (queryBackend || (sameOriginBackend ? location.origin : localStorage.getItem('aiosBackendUrl') || '')).replace(/\/$/, '');
-let target = 'operator';
-let recorder = null;
-let stream = null;
-let chunks = [];
-let mimeType = '';
-let screenTimer = null;
-let heartbeatTimer = null;
-let statusTimer = null;
-let activeMonitor = Number(localStorage.getItem('aiosScreenMonitor') || 1);
-let monitors = [];
-let operatorConfig = null;
-let operatorPanelOpen = localStorage.getItem('aiosOpPanel') !== 'closed';
-let screenCollapsed = localStorage.getItem('aiosScreenCollapsed') === '1';
-let evtSource = null;
-let evtSeenSize = 0;
-let operatorPollTimer = null;
-let operatorStreamStarting = false;
-let stepEntries = new Map(); // n -> element
-let lastEntryEl = null;
-let recordingStartedAt = 0;
-let operatorState = { running: false, asking: false, last_question: '' };
-let pendingAttachments = []; // {id, localUrl, uploading}
-
-function loadPrefs() {
-  let raw = {};
-  try { raw = JSON.parse(localStorage.getItem('aiosPrefs') || '{}'); } catch (_e) {}
-  return {
-    refreshMs: clamp(Number(raw.refreshMs) || 500, 400, 10000),
-    quality: clamp(Number(raw.quality) || 78, 20, 95),
-    maxSize: clamp(Number(raw.maxSize) || 1600, 400, 3840),
-    stream: raw.stream !== false,
-    autoSend: !!raw.autoSend,
-    haptics: raw.haptics !== false,
-  };
-}
-function savePrefs() { localStorage.setItem('aiosPrefs', JSON.stringify(prefs)); }
-function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
-
-function haptic(kind = 'light') {
-  if (!prefs.haptics) return;
-  if (!('vibrate' in navigator)) return;
-  const map = { light: 8, med: 18, heavy: 28, success: [10, 30, 10], err: [30, 50, 30] };
-  try { navigator.vibrate(map[kind] || 8); } catch (_e) {}
-}
-
-/* Operator-only mode */
-operatorPanel.hidden = false;
-ensureOperatorConfig();
-phoneStart();
-
-stateEl.addEventListener('click', () => openSettings());
-clearBtn.addEventListener('click', () => { textEl.value = ''; updateCharCount(); setState(apiBase ? 'ready' : 'backend'); haptic('light'); });
-sendBtn.addEventListener('click', () => { haptic('med'); sendTranscript(); });
-micBtn.addEventListener('click', () => {
-  if (recorder && recorder.state === 'recording') stopRecording();
-  else startRecording();
-});
-
-textEl.addEventListener('input', () => { updateCharCount(); autoGrowText(); });
-function updateCharCount() {
-  const n = textEl.value.length;
-  charCount.textContent = n ? `${n}` : '';
-}
-function autoGrowText() {
-  textEl.style.height = 'auto';
-  const maxPx = Math.round(window.innerHeight * 0.38);
-  const target = Math.min(textEl.scrollHeight + 2, maxPx);
-  textEl.style.height = Math.max(64, target) + 'px';
-}
-
-monitorSelect.addEventListener('change', () => {
-  activeMonitor = Number(monitorSelect.value);
-  if (!Number.isFinite(activeMonitor)) activeMonitor = 1;
-  localStorage.setItem('aiosScreenMonitor', String(activeMonitor));
-  startScreen(true);
-  haptic('light');
-});
-
-zoomBtn.addEventListener('click', () => openHQScreen());
-screenEl.addEventListener('click', () => { if (screenEl.src) openHQScreen(); });
-
-async function openHQScreen() {
-  if (!apiBase) return;
-  haptic('light');
-  // Open modal immediately with loading; show the low-res mirror as instant preview, then swap to HQ
-  if (screenEl.src) openZoom(screenEl.src, { showLoading: true });
-  else openZoom('', { showLoading: true });
-  try {
-    const url = `/api/phone/screen?monitor=${encodeURIComponent(activeMonitor)}&q=95&max=3840&t=${Date.now()}`;
-    const r = await fetch(apiUrl(url));
-    if (!r.ok) throw new Error('hq fetch failed');
-    const blob = await r.blob();
-    const objUrl = URL.createObjectURL(blob);
-    swapZoomSrc(objUrl);
-  } catch (_e) {
-    zoomLoading.textContent = 'failed to capture';
-  }
-}
-
-screenCollapseBtn.addEventListener('click', () => {
-  screenCollapsed = !screenCollapsed;
-  localStorage.setItem('aiosScreenCollapsed', screenCollapsed ? '1' : '0');
-  applyScreenCollapsed();
-  haptic('light');
-});
-function applyScreenCollapsed() {
-  shellEl.classList.toggle('screen-collapsed', screenCollapsed);
-  screenWrap.classList.toggle('collapsed', screenCollapsed);
-  if (screenCollapseIcon) {
-    screenCollapseIcon.innerHTML = screenCollapsed
-      ? '<path fill="currentColor" d="M11 5h2v14h-2zM5 11h14v2H5z"/>'  // plus
-      : '<path fill="currentColor" d="M5 11h14v2H5z"/>';                // minus
-  }
-  if (screenCollapsed) stopScreen();
-  else startScreen(true);
-}
-applyScreenCollapsed();
-
-textEl.addEventListener('focus', () => {
-  setTimeout(() => textEl.scrollIntoView({ block: 'center', behavior: 'smooth' }), 250);
-});
-
-settingsBtn.addEventListener('click', openSettings);
-settingsCancel.addEventListener('click', closeSettings);
-settingsSave.addEventListener('click', () => {
-  const val = settingsBackend.value.trim();
-  if (val) {
-    apiBase = val.replace(/\/$/, '');
-    localStorage.setItem('aiosBackendUrl', apiBase);
-  }
-  prefs.refreshMs = clamp(Number(settingsRefresh.value) || 900, 400, 10000);
-  prefs.quality = clamp(Number(settingsQuality.value) || 78, 20, 95);
-  prefs.maxSize = clamp(Number(settingsSize.value) || 1600, 400, 3840);
-  prefs.stream = !!settingsStream.checked;
-  prefs.autoSend = !!settingsAutosend.checked;
-  prefs.haptics = !!settingsHaptics.checked;
-  savePrefs();
-  closeSettings();
-  checkStatus();
-  loadMonitors();
-  startScreen(true);
-  startHeartbeat();
-  startStatusRefresh();
-  if (target === 'operator') startOperatorStream();
-  haptic('success');
-});
-settingsModal.addEventListener('click', (e) => { if (e.target === settingsModal) closeSettings(); });
-
-opDisclose.addEventListener('click', () => {
-  operatorPanelOpen = !operatorPanelOpen;
-  operatorPanel.classList.toggle('collapsed', !operatorPanelOpen);
-  localStorage.setItem('aiosOpPanel', operatorPanelOpen ? 'open' : 'closed');
-  haptic('light');
-});
-if (!operatorPanelOpen) operatorPanel.classList.add('collapsed');
-
-$('op-save').addEventListener('click', () => { haptic('med'); saveOperatorConfig(); });
-$('op-stop').addEventListener('click', () => { haptic('heavy'); stopOperator(); });
-
-window.addEventListener('pagehide', () => {
-  if (apiBase) navigator.sendBeacon(apiUrl('/api/phone/stop'), new Blob(['{}'], { type: 'application/json' }));
-});
-
-document.addEventListener('visibilitychange', () => {
-  if (document.hidden) { stopScreen(); stopOperatorStream(); }
-  else { startScreen(true); if (target === 'operator') startOperatorStream(); }
-});
-
-init();
-
-async function init() {
-  await loadBackend();
-  await checkStatus();
-  await loadMonitors();
-  startScreen();
-  startHeartbeat();
-  startStatusRefresh();
-  startOperatorStream();
-  autoGrowText();
-}
-
-function apiUrl(path) { return `${apiBase}${path}`; }
-
-function setState(value, kind = '') {
-  stateText.textContent = value;
-  stateEl.classList.remove('live', 'err', 'warn');
-  if (kind) stateEl.classList.add(kind);
-}
-
-async function loadBackend() {
-  if (queryBackend || sameOriginBackend) return;
-  try {
-    const r = await fetch('/backend.json', { cache: 'no-store' });
-    if (!r.ok) return;
-    const data = await r.json();
-    if (data.backend) {
-      apiBase = String(data.backend).replace(/\/$/, '');
-      localStorage.setItem('aiosBackendUrl', apiBase);
-    }
-  } catch (_e) { setState('backend', 'err'); }
-}
-
-function openSettings() {
-  settingsBackend.value = apiBase || '';
-  settingsRefresh.value = prefs.refreshMs;
-  settingsQuality.value = prefs.quality;
-  settingsSize.value = prefs.maxSize;
-  settingsStream.checked = prefs.stream;
-  settingsAutosend.checked = prefs.autoSend;
-  settingsHaptics.checked = prefs.haptics;
-  settingsModal.hidden = false;
-}
-function closeSettings() { settingsModal.hidden = true; }
-
-/* VOICE - faster: send opus webm, smaller chunks */
-function chooseMimeType() {
-  const options = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/aac'];
-  return options.find((t) => MediaRecorder.isTypeSupported(t)) || '';
-}
-
-async function startRecording() {
-  if (!apiBase) { openSettings(); return; }
-  if (!navigator.mediaDevices || !window.MediaRecorder) { setState('no mic', 'err'); return; }
-  try {
-    haptic('med');
-    await phoneStart();
-    chunks = [];
-    stream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, sampleRate: 16000, channelCount: 1 },
-    });
-    mimeType = chooseMimeType();
-    const opts = mimeType ? { mimeType, audioBitsPerSecond: 32000 } : undefined;
-    recorder = new MediaRecorder(stream, opts);
-    recorder.addEventListener('dataavailable', (e) => { if (e.data && e.data.size > 0) chunks.push(e.data); });
-    recorder.addEventListener('stop', uploadRecording);
-    recorder.start(250);
-    recordingStartedAt = Date.now();
-    micBtn.classList.add('recording');
-    setState('listening', 'live');
-  } catch (_e) {
-    setState('mic blocked', 'err');
-    haptic('err');
-  }
-}
-
-function stopRecording() {
-  if (recorder && recorder.state === 'recording') {
-    haptic('light');
-    if (Date.now() - recordingStartedAt < 220) {
-      setTimeout(() => { try { recorder.stop(); } catch (_e) {} }, 240);
-    } else {
-      recorder.stop();
-    }
-    setState('transcribing', 'warn');
-  }
-}
-
-function stopTracks() {
-  if (stream) stream.getTracks().forEach((t) => t.stop());
-  stream = null; recorder = null;
-}
-
-async function uploadRecording() {
-  micBtn.classList.remove('recording');
-  stopTracks();
-  if (!chunks.length) { setState('empty'); return; }
-  const blob = new Blob(chunks, { type: mimeType || 'audio/webm' });
-  chunks = [];
-  const form = new FormData();
-  const ext = (mimeType || '').includes('webm') ? 'webm' : 'mp4';
-  form.append('audio', blob, `phone.${ext}`);
-  form.append('target', 'none');
-  try {
-    const r = await fetch(apiUrl('/api/phone/transcribe'), { method: 'POST', body: form });
-    const data = await r.json();
-    if (!r.ok) throw new Error(data.error || 'failed');
-    if (data.text) {
-      const existing = textEl.value.trim();
-      textEl.value = existing ? `${existing} ${data.text}` : data.text;
-      updateCharCount();
-      setState('ready', 'live');
-      haptic('success');
-      if (prefs.autoSend) sendTranscript();
-    } else {
-      setState('empty');
-    }
-  } catch (_e) {
-    setState('error', 'err');
-    haptic('err');
-  }
-}
-
-async function sendTranscript() {
-  const text = textEl.value.trim();
-  if (!apiBase) { openSettings(); return; }
-  const readyAttachments = pendingAttachments.filter(a => a.id && !a.uploading).map(a => a.id);
-  const stillUploading = pendingAttachments.some(a => a.uploading);
-  if (stillUploading) { setState('uploading…', 'warn'); return; }
-  if (!text && !readyAttachments.length) { setState('empty'); return; }
-  setState('sending', 'warn');
-  const isFollowup = target === 'operator' && operatorState.running;
-  const body = { target, text };
-  if (readyAttachments.length) body.attachments = readyAttachments;
-  if (target === 'operator') {
-    if (isFollowup) {
-      body.intent = 'followup';
-      appendUserFollowup(text, operatorState.asking);
-    } else {
-      body.intent = 'new';
-      body.options = collectOperatorOptions();
-      opStatus.textContent = 'booting...';
-      opStatus.classList.add('live');
-      startOperatorStream();
-      appendUserPrompt(text);
-    }
-  }
-  try {
-    await phoneStart();
-    const r = await fetch(apiUrl('/api/phone/send'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    const data = await r.json();
-    if (!r.ok || !data.ok) throw new Error(data.error || 'failed');
-    setState('sent', 'live');
-    if (target === 'operator' && !isFollowup) {
-      opStatus.textContent = 'booting…';
-      opStatus.classList.add('live');
-    }
-    if (isFollowup) {
-      // Optimistically clear asking flag locally; status poll will confirm.
-      operatorState.asking = false;
-      renderFollowupBanner();
-    }
-    textEl.value = '';
-    updateCharCount();
-    pendingAttachments.forEach(a => { try { URL.revokeObjectURL(a.localUrl); } catch (_e) {} });
-    pendingAttachments = [];
-    renderAttachStrip();
-  } catch (_e) {
-    setState('offline', 'err');
-    haptic('err');
-  }
-}
-
-function appendUserFollowup(text, answeringAsk) {
-  const el = document.createElement('div');
-  el.className = 'entry';
-  const label = answeringAsk ? 'answer' : 'follow-up';
-  const color = answeringAsk ? 'rgba(244,201,93,.22)' : 'rgba(110,168,255,.18)';
-  el.innerHTML = `<div class="row"><span class="badge" style="background:${color};color:#fff;">${label}</span><span class="ts">now</span></div><div class="body">${escapeHtml(text)}</div>`;
-  opStream.appendChild(el);
-  scrollOpToBottom();
-}
-
-function renderFollowupBanner() {
-  if (!opFollowupBanner) return;
-  if (target !== 'operator' || !operatorState.running) {
-    opFollowupBanner.hidden = true;
-    opFollowupBanner.classList.remove('asking');
-    textEl.placeholder = 'tap mic, or type here…';
-    return;
-  }
-  opFollowupBanner.hidden = false;
-  if (operatorState.asking) {
-    opFollowupBanner.classList.add('asking');
-    opFollowupMode.textContent = 'Operator is asking';
-    if (operatorState.last_question) {
-      opFollowupQuestion.hidden = false;
-      opFollowupQuestion.textContent = operatorState.last_question;
-    } else {
-      opFollowupQuestion.hidden = true;
-    }
-    textEl.placeholder = 'type your answer…';
-  } else {
-    opFollowupBanner.classList.remove('asking');
-    opFollowupMode.textContent = 'Operator running · follow-up';
-    opFollowupQuestion.hidden = true;
-    textEl.placeholder = 'add an instruction…';
-  }
-}
-
-async function clearOperator() {
-  if (!apiBase) return;
-  try {
-    await fetch(apiUrl('/api/phone/operator/clear'), { method: 'POST' });
-  } catch (_e) {}
-  operatorState = { running: false, asking: false, last_question: '' };
-  renderFollowupBanner();
-  opStream.innerHTML = '';
-  stepEntries.clear();
-  lastEntryEl = null;
-  opStatus.textContent = 'idle';
-  opStatus.classList.remove('live');
-  haptic('light');
-}
-
-if (opFollowupClear) opFollowupClear.addEventListener('click', clearOperator);
-if (opClearPersistent) opClearPersistent.addEventListener('click', clearOperator);
-
-if (attachBtn) attachBtn.addEventListener('click', () => attachInput && attachInput.click());
-if (attachInput) attachInput.addEventListener('change', (e) => {
-  const files = Array.from(e.target.files || []);
-  files.forEach(uploadAttachment);
-  attachInput.value = '';
-});
-
-textEl.addEventListener('paste', (e) => {
-  const items = (e.clipboardData && e.clipboardData.items) || [];
-  for (const it of items) {
-    if (it.kind === 'file') {
-      const file = it.getAsFile();
-      if (file && file.type.startsWith('image/')) {
-        e.preventDefault();
-        uploadAttachment(file);
-      }
-    }
-  }
-});
-
-['dragover', 'drop'].forEach((evtName) => {
-  document.body.addEventListener(evtName, (e) => {
-    if (evtName === 'dragover') { e.preventDefault(); return; }
-    if (evtName === 'drop') {
-      e.preventDefault();
-      const files = Array.from((e.dataTransfer && e.dataTransfer.files) || []);
-      files.filter(f => f.type.startsWith('image/')).forEach(uploadAttachment);
-    }
-  });
-});
-
-function renderAttachStrip() {
-  if (!attachStrip) return;
-  attachStrip.innerHTML = '';
-  if (!pendingAttachments.length) { attachStrip.hidden = true; return; }
-  attachStrip.hidden = false;
-  pendingAttachments.forEach((att, i) => {
-    const chip = document.createElement('div');
-    chip.className = 'attach-chip' + (att.uploading ? ' uploading' : '');
-    chip.innerHTML = `<img src="${att.localUrl}" alt="" />
-      <button class="attach-chip-x" type="button" aria-label="Remove">×</button>`;
-    chip.querySelector('.attach-chip-x').addEventListener('click', () => {
-      pendingAttachments.splice(i, 1);
-      try { URL.revokeObjectURL(att.localUrl); } catch (_e) {}
-      renderAttachStrip();
-    });
-    attachStrip.appendChild(chip);
-  });
-}
-
-async function uploadAttachment(file) {
-  if (!apiBase) { openSettings(); return; }
-  const localUrl = URL.createObjectURL(file);
-  const slot = { id: null, localUrl, uploading: true };
-  pendingAttachments.push(slot);
-  renderAttachStrip();
-  try {
-    const fd = new FormData();
-    fd.append('files', file, file.name || 'image.png');
-    const r = await fetch(apiUrl('/api/phone/operator/upload'), {
-      method: 'POST', body: fd,
-    });
-    const data = await r.json();
-    if (!r.ok || !data.ok || !data.attachments || !data.attachments[0]) {
-      throw new Error(data.error || 'upload failed');
-    }
-    slot.id = data.attachments[0].id;
-    slot.uploading = false;
-    renderAttachStrip();
-    haptic('success');
-  } catch (_e) {
-    const idx = pendingAttachments.indexOf(slot);
-    if (idx >= 0) pendingAttachments.splice(idx, 1);
-    try { URL.revokeObjectURL(localUrl); } catch (_e2) {}
-    renderAttachStrip();
-    setState('upload err', 'err');
-    haptic('err');
-  }
-}
-
-async function checkStatus() {
-  if (!apiBase) { setState('backend', 'err'); return; }
-  try {
-    const r = await fetch(apiUrl('/api/phone/status'), { cache: 'no-store' });
-    const data = await r.json();
-    if (data.helper) setState('ready', 'live');
-    else setState('offline', 'err');
-    if (data.operator && !operatorConfig) {
-      operatorConfig = data.operator;
-      applyOperatorConfig(operatorConfig);
-    }
-    if (data.operator_state) {
-      operatorState = {
-        running: !!data.operator_state.running,
-        asking: !!data.operator_state.asking,
-        last_question: String(data.operator_state.last_question || ''),
-      };
-      renderFollowupBanner();
-    }
-    renderCodexUsage(data.codex_usage);
-  } catch (_e) { setState('offline', 'err'); }
-}
-
-function renderCodexUsage(data) {
-  if (!codexUsage || !data || !Array.isArray(data.accounts)) return;
-  codexUsage.innerHTML = '';
-  for (const account of data.accounts.slice(0, 2)) {
-    const pill = document.createElement('div');
-    pill.className = 'usage-pill' + (account.active ? ' active' : '');
-    const name = escapeHtml(account.short || '--');
-    const primary = account.primary ? `${account.primary.remaining}` : '--';
-    const secondary = account.secondary ? `${account.secondary.remaining}` : '--';
-    pill.innerHTML = `<b>${name}</b><span>5h ${primary}</span><span>w ${secondary}</span>`;
-    codexUsage.appendChild(pill);
-  }
-}
-
-async function loadMonitors(verbose = false) {
-  if (!apiBase) return;
-  monitorSelect.innerHTML = '<option value="1">scanning…</option>';
-  try {
-    const r = await fetch(apiUrl('/api/phone/monitors'), { cache: 'no-store' });
-    if (!r.ok) {
-      const msg = r.status === 404 ? 'old backend · restart server.py' : `monitors ${r.status}`;
-      monitorSelect.innerHTML = `<option value="1">${escapeHtml(msg)}</option>`;
-      setState(msg, 'err');
-      return;
-    }
-    const data = await r.json();
-    monitors = (data.monitors || []).filter((m) => m && Number.isFinite(m.width) && Number.isFinite(m.height));
-    monitorSelect.innerHTML = '';
-    opInputs.monitor.innerHTML = '<option value="">auto</option>';
-    if (!monitors.length) {
-      monitorSelect.innerHTML = '<option value="1">no monitors found</option>';
-      setState('no monitors', 'err');
-      return;
-    }
-    for (const m of monitors) {
-      const o = document.createElement('option');
-      o.value = String(m.index);
-      o.textContent = `${m.name} · ${m.width}×${m.height}`;
-      monitorSelect.appendChild(o);
-      if (m.index === 0) continue;
-      const o2 = document.createElement('option');
-      o2.value = m.label;
-      o2.textContent = `${m.name} · ${m.width}×${m.height}`;
-      opInputs.monitor.appendChild(o2);
-    }
-    const exists = monitors.some((m) => m.index === activeMonitor);
-    if (!exists) activeMonitor = (monitors.find((m) => m.index >= 1) || monitors[0]).index;
-    monitorSelect.value = String(activeMonitor);
-    const physical = monitors.filter((m) => m.index >= 1).length;
-    if (verbose) setState(`found ${physical} monitor${physical === 1 ? '' : 's'}`, physical >= 1 ? 'live' : 'warn');
-    if (operatorConfig) applyOperatorConfig(operatorConfig);
-    startScreen(true);
-  } catch (e) {
-    monitorSelect.innerHTML = '<option value="1">monitor scan failed</option>';
-    setState('monitors error', 'err');
-  }
-}
-
-async function ensureOperatorConfig() {
-  if (operatorConfig) return;
-  if (!apiBase) return;
-  try {
-    const r = await fetch(apiUrl('/api/phone/operator/config'), { cache: 'no-store' });
-    const data = await r.json();
-    if (data.ok) { operatorConfig = data.operator; applyOperatorConfig(operatorConfig); }
-  } catch (_e) {}
-}
-
-function applyOperatorConfig(cfg) {
-  if (!cfg) return;
-  if (cfg.model) opInputs.model.value = cfg.model;
-  if (cfg.reasoning) opInputs.reasoning.value = cfg.reasoning;
-  if (cfg.steps) opInputs.steps.value = cfg.steps;
-  if (cfg.delay) opInputs.delay.value = cfg.delay;
-  if (cfg.voice) opInputs.voice.value = cfg.voice;
-  opInputs.tts.checked = !!cfg.tts;
-  opInputs.shell.checked = !!cfg.shell;
-  opInputs.codex_auth.checked = !!cfg.codex_auth;
-  if (cfg.monitor) {
-    const exists = Array.from(opInputs.monitor.options).some((o) => o.value === cfg.monitor);
-    if (exists) opInputs.monitor.value = cfg.monitor;
-  }
-}
-
-function collectOperatorOptions() {
-  return {
-    model: opInputs.model.value.trim(),
-    reasoning: opInputs.reasoning.value,
-    steps: opInputs.steps.value,
-    delay: opInputs.delay.value,
-    monitor: opInputs.monitor.value,
-    voice: opInputs.voice.value,
-    tts: opInputs.tts.checked,
-    shell: opInputs.shell.checked,
-    codex_auth: opInputs.codex_auth.checked,
-  };
-}
-
-async function saveOperatorConfig() {
-  if (!apiBase) return;
-  opStatus.textContent = 'saving';
-  try {
-    const r = await fetch(apiUrl('/api/phone/operator/config'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ operator: collectOperatorOptions() }),
-    });
-    const data = await r.json();
-    if (!r.ok || !data.ok) throw new Error(data.error || 'failed');
-    operatorConfig = data.operator;
-    opStatus.textContent = 'saved';
-    setTimeout(() => { if (opStatus.textContent === 'saved') opStatus.textContent = 'idle'; }, 1400);
-  } catch (_e) { opStatus.textContent = 'save failed'; }
-}
-
-async function stopOperator() {
-  if (!apiBase) return;
-  opStatus.textContent = 'stopping';
-  try {
-    const r = await fetch(apiUrl('/api/phone/operator/stop'), { method: 'POST' });
-    const data = await r.json();
-    opStatus.textContent = data.ok ? 'stop sent' : 'stop failed';
-  } catch (_e) { opStatus.textContent = 'offline'; }
-}
-
-async function phoneStart() {
-  if (!apiBase) return;
-  try {
-    await fetch(apiUrl('/api/phone/start'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ target: target === 'chat' ? 'AIOS' : 'OPERATOR' }),
-    });
-  } catch (_e) { setState('offline', 'err'); }
-}
-
-function startHeartbeat() {
-  if (heartbeatTimer) clearInterval(heartbeatTimer);
-  if (!apiBase) return;
-  phoneStart();
-  heartbeatTimer = setInterval(phoneStart, 10000);
-}
-
-function startStatusRefresh() {
-  if (statusTimer) clearInterval(statusTimer);
-  if (!apiBase) return;
-  statusTimer = setInterval(checkStatus, 2500);
-}
-
-function stopScreen() { if (screenTimer) { clearInterval(screenTimer); screenTimer = null; } }
-
-function startScreen(immediate = false) {
-  stopScreen();
-  if (!apiBase || !prefs.stream || screenCollapsed) return;
-  const refresh = () => {
-    const url = `/api/phone/screen?monitor=${encodeURIComponent(activeMonitor)}&q=${prefs.quality}&max=${prefs.maxSize}&t=${Date.now()}`;
-    screenEl.src = apiUrl(url);
-  };
-  screenEl.onload = () => screenWrap.classList.add('live');
-  screenEl.onerror = () => screenWrap.classList.remove('live');
-  if (immediate || !screenEl.src) refresh();
-  screenTimer = setInterval(refresh, prefs.refreshMs);
-}
-
-/* OPERATOR STREAM */
-function startOperatorStream() {
-  if (operatorStreamStarting) return;
-  stopOperatorStream();
-  if (!apiBase) return;
-  operatorStreamStarting = true;
-  // Seed initial log
-  fetch(apiUrl('/api/phone/operator/log'), { cache: 'no-store' })
-    .then((r) => r.json())
-    .then((data) => {
-      if (!data || !data.events) return;
-      opStream.innerHTML = '';
-      stepEntries.clear();
-      lastEntryEl = null;
-      for (const evt of data.events) renderEvent(evt);
-      evtSeenSize = data.size || 0;
-      openSSE();
-      startOperatorLogPoll();
-    })
-    .catch(() => {
-      openSSE();
-      startOperatorLogPoll();
-    })
-    .finally(() => { operatorStreamStarting = false; });
-}
-
-function openSSE() {
-  try {
-    evtSource = new EventSource(apiUrl(`/api/phone/operator/events?since=${evtSeenSize}`));
-    evtSource.onmessage = (e) => {
-      try {
-        const evt = JSON.parse(e.data);
-        renderEvent(evt);
-        if (evt.size) evtSeenSize = Math.max(evtSeenSize, Number(evt.size) || 0);
-      } catch (_err) {}
-    };
-    evtSource.addEventListener('reset', () => {
-      opStream.innerHTML = '';
-      stepEntries.clear();
-      lastEntryEl = null;
-    });
-    evtSource.onerror = () => { /* will auto-retry per SSE */ };
-  } catch (_e) {}
-}
-
-function startOperatorLogPoll() {
-  if (operatorPollTimer) clearInterval(operatorPollTimer);
-  const poll = () => {
-    if (!apiBase) return;
-    fetch(apiUrl(`/api/phone/operator/log?since=${evtSeenSize}`), { cache: 'no-store' })
-      .then((r) => r.json())
-      .then((data) => {
-        if (!data || !data.events) return;
-        if (data.reset) {
-          opStream.innerHTML = '';
-          stepEntries.clear();
-          lastEntryEl = null;
-        }
-        for (const evt of data.events) renderEvent(evt);
-        evtSeenSize = data.size || evtSeenSize;
-      })
-      .catch(() => {});
-  };
-  operatorPollTimer = setInterval(poll, 800);
-}
-
-function stopOperatorStream() {
-  if (evtSource) { try { evtSource.close(); } catch (_e) {} evtSource = null; }
-  if (operatorPollTimer) { clearInterval(operatorPollTimer); operatorPollTimer = null; }
-}
-
-function fmtTs(ts) {
-  if (!ts) return '';
-  try {
-    const d = new Date(ts * 1000);
-    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
-  } catch (_e) { return ''; }
-}
-
-function appendUserPrompt(text) {
-  const el = document.createElement('div');
-  el.className = 'entry';
-  el.innerHTML = `<div class="row"><span class="badge" style="background:rgba(110,168,255,.18);color:#b9d3ff;">prompt</span><span class="ts">now</span></div><div class="body">${escapeHtml(text)}</div>`;
-  opStream.appendChild(el);
-  scrollOpToBottom();
-}
-
-function scrollOpToBottom() {
-  requestAnimationFrame(() => { opStream.scrollTop = opStream.scrollHeight; });
-}
-
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-}
-
-const THINKING_FLAVORS = [
-  'looking at the screen…',
-  'parsing what changed…',
-  'considering options…',
-  'planning next move…',
-  'estimating click targets…',
-  'checking if it worked…',
-  'reading the UI text…',
-  'figuring out where to click…',
-  'reasoning about layout…',
-  'matching task to screen…',
+/* aiOS Remote — phone client. */
+
+const $ = (selector) => document.querySelector(selector);
+const $$ = (selector) => [...document.querySelectorAll(selector)];
+
+const MODELS = [
+  { id: "luna", name: "Luna", note: "Fast and precise — the default" },
+  { id: "terra", name: "Terra", note: "Steadier on dense screens" },
+  { id: "sol", name: "Sol", note: "Strongest reasoning, slower" }
 ];
 
-function startThinkingAnimation(el) {
-  const start = performance.now();
-  const elapsedEl = el.querySelector('[data-elapsed]');
-  const flavorEl = el.querySelector('[data-flavor]');
-  let flavorIndex = Math.floor(Math.random() * THINKING_FLAVORS.length);
-  const tick = () => {
-    if (!el.isConnected) return;
-    const sec = (performance.now() - start) / 1000;
-    if (elapsedEl) elapsedEl.textContent = `${sec.toFixed(1)}s`;
-    el._raf = requestAnimationFrame(tick);
-  };
-  el._raf = requestAnimationFrame(tick);
-  el._flavorTimer = setInterval(() => {
-    if (!el.isConnected || !flavorEl) return;
-    flavorIndex = (flavorIndex + 1) % THINKING_FLAVORS.length;
-    flavorEl.style.opacity = '0';
-    setTimeout(() => {
-      flavorEl.textContent = THINKING_FLAVORS[flavorIndex];
-      flavorEl.style.opacity = '';
-    }, 180);
-  }, 1600);
+const EFFORTS = [
+  { id: "low", name: "Low", note: "Acts quickly" },
+  { id: "medium", name: "Medium", note: "Balanced" },
+  { id: "high", name: "High", note: "Thinks longer before each move" }
+];
+
+const RUNNING_STATES = new Set(["running", "starting", "thinking", "acting", "waiting"]);
+
+const prefs = {
+  get(key, fallback) { const value = localStorage.getItem(key); return value === null ? fallback : value; },
+  set(key, value) { localStorage.setItem(key, String(value)); },
+  bool(key, fallback) { const value = localStorage.getItem(key); return value === null ? fallback : value === "1"; }
+};
+
+const state = {
+  token: prefs.get("aios_remote_token", ""),
+  privateCode: prefs.get("aios_private_code", ""),
+  machines: [],
+  machineId: prefs.get("aios_machine_id", ""),
+  monitorId: "",
+  cursor: 0,
+  feedVersion: 0,
+  model: prefs.get("aios_model", "luna"),
+  effort: prefs.get("aios_effort", "low"),
+  steps: Number(prefs.get("aios_steps", 30)),
+  detailed: prefs.bool("aios_detailed", true),
+  haptics: prefs.bool("aios_haptics", true),
+  keepAwake: prefs.bool("aios_awake", false),
+  screenOpen: prefs.bool("aios_screen_open", true),
+  timers: [],
+  busy: false,
+  loading: false,
+  running: false,
+  frameUrl: "",
+  frameStamp: "",
+  frameAt: 0,
+  installPrompt: null,
+  wakeLock: null,
+  stickBottom: true,
+  lastStep: null
+};
+
+/* ── helpers ──────────────────────────────────────────── */
+
+function buzz(pattern = 8) {
+  if (state.haptics && navigator.vibrate) navigator.vibrate(pattern);
 }
 
-function stopThinkingAnimation(el) {
-  if (el._raf) cancelAnimationFrame(el._raf);
-  if (el._flavorTimer) clearInterval(el._flavorTimer);
+function toast(message) {
+  const node = $("#toast");
+  node.textContent = message;
+  node.classList.add("show");
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => node.classList.remove("show"), 2600);
 }
 
-function renderEvent(evt) {
-  if (!evt || !evt.type) return;
-  const ts = fmtTs(evt.ts);
-
-  if (evt.type === 'run_start') {
-    opStream.innerHTML = '';
-    stepEntries.clear();
-    lastEntryEl = null;
-    const el = document.createElement('div');
-    el.className = 'entry step';
-    el.innerHTML = `<div class="row"><span class="badge">run</span><span class="ts">${ts}</span></div><div class="body">operator boot · waiting for first thought</div>`;
-    opStream.appendChild(el);
-    opStatus.textContent = 'running';
-    opStatus.classList.add('live');
-    operatorState.running = true;
-    operatorState.asking = false;
-    operatorState.last_question = '';
-    renderFollowupBanner();
-    scrollOpToBottom();
-    return;
+async function copyText(value) {
+  if (!value) return;
+  try {
+    await navigator.clipboard.writeText(value);
+  } catch {
+    const area = document.createElement("textarea");
+    area.value = value;
+    document.body.appendChild(area);
+    area.select();
+    document.execCommand("copy");
+    area.remove();
   }
+  buzz();
+  toast("Copied to clipboard");
+}
 
-  if (evt.type === 'follow_up') {
-    appendUserFollowup(evt.text || '', !!evt.answering_ask);
-    return;
+function ago(timestamp) {
+  const seconds = Math.max(0, Math.floor((Date.now() - Number(timestamp || 0)) / 1000));
+  if (seconds < 10) return "just now";
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  return hours < 24 ? `${hours}h ago` : `${Math.floor(hours / 24)}d ago`;
+}
+
+function clockTime(value) {
+  return new Date(Number(value || Date.now())).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function icon(name, className = "ic") {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("class", className);
+  const use = document.createElementNS("http://www.w3.org/2000/svg", "use");
+  use.setAttribute("href", `#i-${name}`);
+  svg.appendChild(use);
+  return svg;
+}
+
+function labelOf(list, id) {
+  return (list.find((item) => item.id === id) || list[0]).name;
+}
+
+/* ── session ──────────────────────────────────────────── */
+
+function saveSession(token, code = "") {
+  state.token = token;
+  prefs.set("aios_remote_token", token);
+  if (code) {
+    state.privateCode = code;
+    prefs.set("aios_private_code", code);
   }
+}
 
-  if (evt.type === 'cleared') {
-    opStream.innerHTML = '';
-    stepEntries.clear();
-    lastEntryEl = null;
-    operatorState = { running: false, asking: false, last_question: '' };
-    renderFollowupBanner();
-    opStatus.textContent = 'cleared';
-    opStatus.classList.remove('live');
-    return;
-  }
+function clearSession() {
+  state.token = "";
+  state.privateCode = "";
+  localStorage.removeItem("aios_remote_token");
+  localStorage.removeItem("aios_private_code");
+  localStorage.removeItem("aios_machine_id");
+  stopPolling();
+  closeSheets();
+  showAuth();
+}
 
-  if (evt.type === 'step_begin') {
-    const el = document.createElement('div');
-    el.className = 'entry step';
-    el.dataset.step = evt.n;
-    el.innerHTML = `<div class="row"><span class="badge">step ${evt.n ?? '?'}</span><span class="ts">${ts}</span></div>`;
-    opStream.appendChild(el);
-    stepEntries.set(evt.n, el);
-    lastEntryEl = el;
-    // Animated "thinking" placeholder until the thought arrives.
-    const think = document.createElement('div');
-    think.className = 'entry thinking';
-    think.dataset.thinkingFor = evt.n;
-    think.innerHTML = `
-      <div class="row"><span class="badge thinking-badge">thinking</span><span class="ts" data-elapsed>0.0s</span></div>
-      <div class="thinking-body">
-        <span class="thinking-dots"><span></span><span></span><span></span></span>
-        <span class="thinking-flavor" data-flavor>looking at the screen…</span>
-      </div>`;
-    opStream.appendChild(think);
-    startThinkingAnimation(think);
-    scrollOpToBottom();
-    return;
-  }
+async function api(path, options = {}) {
+  const headers = new Headers(options.headers || {});
+  if (state.token) headers.set("Authorization", `Bearer ${state.token}`);
+  if (options.body && !(options.body instanceof Blob)) headers.set("Content-Type", "application/json");
+  const response = await fetch(path, { ...options, headers });
+  const data = response.headers.get("content-type")?.includes("application/json") ? await response.json() : null;
+  if (response.status === 401 && state.token && !path.includes("/account/")) clearSession();
+  if (!response.ok) throw new Error(data?.error || `Request failed (${response.status})`);
+  return data;
+}
 
-  if (evt.type === 'screenshot') {
-    if (!evt.frame) return;
-    const frameUrl = apiUrl(`/api/phone/operator/frame/${evt.frame}`);
-    // Piggyback: update the main screen preview with the operator's own
-    // freshly-captured frame so we don't wait for the next poll tick.
-    if (screenEl && !screenCollapsed) {
-      screenEl.src = frameUrl;
-      screenWrap.classList.add('live');
+function showAuth() {
+  $("#authView").classList.remove("hidden");
+  $("#appView").classList.add("hidden");
+  $("#welcomePane").classList.remove("hidden");
+  $("#loginForm").classList.add("hidden");
+  $("#createdPane").classList.add("hidden");
+}
+
+function showApp() {
+  $("#authView").classList.add("hidden");
+  $("#appView").classList.remove("hidden");
+  $("#pairCode").textContent = state.privateCode || "Unlock with your private code first";
+  startPolling();
+}
+
+/* ── overlays (sheets + immersive viewer) ─────────────── */
+
+let overlayCloser = null;
+
+function openOverlay(close) {
+  if (overlayCloser) overlayCloser();
+  overlayCloser = close;
+  history.pushState({ aiosOverlay: true }, "");
+}
+
+function dismissOverlay() {
+  if (!overlayCloser) return;
+  const close = overlayCloser;
+  overlayCloser = null;
+  close();
+  if (history.state?.aiosOverlay) history.back();
+}
+
+window.addEventListener("popstate", () => {
+  if (!overlayCloser) return;
+  const close = overlayCloser;
+  overlayCloser = null;
+  close();
+});
+
+function openSheet(id) {
+  $$(".sheet").forEach((sheet) => sheet.classList.toggle("hidden", sheet.id !== id));
+  $("#backdrop").classList.remove("hidden");
+  buzz();
+  openOverlay(hideSheets);
+}
+
+function hideSheets() {
+  $$(".sheet").forEach((sheet) => sheet.classList.add("hidden"));
+  $("#backdrop").classList.add("hidden");
+}
+
+function closeSheets() {
+  if (overlayCloser === hideSheets) dismissOverlay();
+  else hideSheets();
+}
+
+$("#backdrop").addEventListener("click", closeSheets);
+
+/** Renders a bottom-sheet picker and returns the choice through `onPick`. */
+function renderOptions(container, items, activeId, onPick) {
+  container.replaceChildren();
+  for (const item of items) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `option${item.id === activeId ? " on" : ""}`;
+    if (item.icon) {
+      const badge = document.createElement("span");
+      badge.className = "dot" + (item.online ? " online" : "");
+      button.appendChild(badge);
     }
-    const wrap = document.createElement('div');
-    wrap.className = 'frame-wrap';
-    const img = document.createElement('img');
-    img.loading = 'lazy';
-    img.alt = 'operator frame';
-    img.src = frameUrl;
-    img.addEventListener('click', (e) => { e.stopPropagation(); openZoom(img.src, { showLoading: false }); });
-    wrap.appendChild(img);
-    const target = lastEntryEl || opStream.lastElementChild;
-    if (target) target.appendChild(wrap);
-    else {
-      const el = document.createElement('div');
-      el.className = 'entry step';
-      el.innerHTML = `<div class="row"><span class="badge">frame</span><span class="ts">${ts}</span></div>`;
-      el.appendChild(wrap);
-      opStream.appendChild(el);
-      lastEntryEl = el;
+    const text = document.createElement("span");
+    text.className = "option-text";
+    const name = document.createElement("strong");
+    name.textContent = item.name;
+    text.appendChild(name);
+    if (item.note) {
+      const note = document.createElement("small");
+      note.textContent = item.note;
+      text.appendChild(note);
     }
-    scrollOpToBottom();
-    return;
-  }
-
-  if (evt.type === 'thought') {
-    // Kill the thinking placeholder for whatever step just thought.
-    document.querySelectorAll('.entry.thinking').forEach((node) => {
-      stopThinkingAnimation(node);
-      node.remove();
-    });
-    const el = document.createElement('div');
-    el.className = 'entry thought';
-    const thought = (evt.thought || '').trim();
-    const say = (evt.say || '').trim();
-    const meta = `plan: ${evt.actions || 0} action(s) · ${evt.elapsed_ms || 0}ms`;
-    el.innerHTML = `<div class="row"><span class="badge">thinking</span><span class="ts">${ts}</span></div>
-      <div class="body">${escapeHtml(thought) || '<em style="color:#5d667a">no thought</em>'}</div>
-      ${say ? `<div class="body" style="color:#cdd2dc;font-style:italic;">say · ${escapeHtml(say)}</div>` : ''}
-      <div class="body" style="font-size:11px;color:#5d667a;">${escapeHtml(meta)}</div>`;
-    opStream.appendChild(el);
-    lastEntryEl = el;
-    scrollOpToBottom();
-    return;
-  }
-
-  if (evt.type === 'action_done') {
-    const el = document.createElement('div');
-    el.className = 'entry action' + (evt.ok ? '' : ' fail');
-    const detail = (evt.detail || '').trim();
-    const ms = evt.elapsed_ms != null ? ` ${evt.elapsed_ms}ms` : '';
-    el.innerHTML = `<div class="row"><span class="badge">${escapeHtml(evt.action || '?')}</span><span class="ts">${ts}</span></div>
-      <div class="body">${evt.ok ? '✓' : '✗'} ${escapeHtml(detail)}${escapeHtml(ms)}</div>
-      ${evt.output ? `<div class="output">${escapeHtml(evt.output)}</div>` : ''}`;
-    opStream.appendChild(el);
-    lastEntryEl = el;
-    scrollOpToBottom();
-    return;
-  }
-
-  if (evt.type === 'step_end') {
-    return; // implicit; step header already added
-  }
-
-  if (evt.type === 'done') {
-    document.querySelectorAll('.entry.thinking').forEach((node) => {
-      stopThinkingAnimation(node); node.remove();
-    });
-    const el = document.createElement('div');
-    el.className = 'entry done' + (evt.ok ? '' : ' fail');
-    el.innerHTML = `<div class="row"><span class="badge">done</span><span class="ts">${ts}</span></div>
-      <div class="body">${evt.ok ? '✓' : '✗'} ${escapeHtml(evt.message || '')} · ${evt.steps || 0} step(s)</div>`;
-    opStream.appendChild(el);
-    opStatus.textContent = evt.ok ? 'done' : 'failed';
-    opStatus.classList.remove('live');
-    if (!evt.ok) opStatus.classList.add('err'); else opStatus.classList.remove('err');
-    operatorState.running = false;
-    operatorState.asking = false;
-    operatorState.last_question = '';
-    renderFollowupBanner();
-    haptic(evt.ok ? 'success' : 'err');
-    scrollOpToBottom();
-    return;
-  }
-
-  if (evt.type === 'ask') {
-    const el = document.createElement('div');
-    el.className = 'entry ask';
-    el.innerHTML = `<div class="row"><span class="badge">ask</span><span class="ts">${ts}</span></div>
-      <div class="body">${escapeHtml(evt.message || '')}</div>`;
-    opStream.appendChild(el);
-    lastEntryEl = el;
-    operatorState.asking = true;
-    operatorState.last_question = evt.message || '';
-    renderFollowupBanner();
-    haptic('heavy');
-    scrollOpToBottom();
-    return;
-  }
-
-  if (evt.type === 'log') {
-    const el = document.createElement('div');
-    el.className = 'entry';
-    el.innerHTML = `<div class="body" style="color:#8a92a3;font-size:12px;">${escapeHtml(evt.msg || '')}</div>`;
-    opStream.appendChild(el);
-    scrollOpToBottom();
-    return;
+    button.appendChild(text);
+    if (item.id === activeId) button.appendChild(icon("check", "ic tick"));
+    button.addEventListener("click", () => { buzz(); onPick(item.id); });
+    container.appendChild(button);
   }
 }
 
-/* ZOOM modal with pinch/pan */
-let zoomScale = 1, zoomX = 0, zoomY = 0;
-let zoomFitScale = 1;
-let pinchActive = false, pinchStartDist = 0, pinchStartScale = 1, pinchCx = 0, pinchCy = 0;
-let panActive = false, panStartX = 0, panStartY = 0, panStartTx = 0, panStartTy = 0;
-let lastTap = 0;
-let zoomImgReady = false;
+/* ── machines ─────────────────────────────────────────── */
 
-function openZoom(src, opts = {}) {
-  zoomImgReady = false;
-  zoomImg.style.transform = 'translate3d(0,0,0) scale(0)';
-  zoomImg.removeAttribute('src');
-  if (src) zoomImg.src = src;
-  zoomModal.hidden = false;
-  zoomLoading.hidden = !opts.showLoading || !!src && !opts.alsoLoading;
-  if (opts.showLoading) zoomLoading.textContent = 'capturing high-res frame…';
-  document.body.style.overflow = 'hidden';
-  haptic('light');
+function currentMachine() {
+  return state.machines.find((machine) => machine.id === state.machineId);
 }
 
-function swapZoomSrc(src) {
-  zoomImgReady = false;
-  zoomImg.src = src;
+function monitorsOf(machine) {
+  const list = machine?.status?.monitors;
+  return Array.isArray(list) && list.length ? list : [{ id: "primary", name: "Main display" }];
 }
 
-function fitZoomToStage() {
-  const sw = zoomStage.clientWidth, sh = zoomStage.clientHeight;
-  const iw = zoomImg.naturalWidth, ih = zoomImg.naturalHeight;
-  if (!iw || !ih || !sw || !sh) return;
-  zoomFitScale = Math.min(sw / iw, sh / ih);
-  zoomScale = zoomFitScale;
-  zoomX = (sw - iw * zoomScale) / 2;
-  zoomY = (sh - ih * zoomScale) / 2;
+function currentMonitor() {
+  const monitors = monitorsOf(currentMachine());
+  return monitors.find((monitor) => String(monitor.id) === String(state.monitorId)) || monitors[0];
+}
+
+/** The bridge sends labels like "Monitor 1  2560x1440 @ (0,0)" — keep the short part. */
+function monitorName(monitor, index = 0) {
+  const raw = String(monitor?.name || "").split(/\s{2,}/)[0].trim();
+  return raw || `Display ${index + 1}`;
+}
+
+function selectMachine(id) {
+  closeSheets();
+  if (state.machineId === id) return;
+  state.machineId = id;
+  state.cursor = 0;
+  state.feedVersion += 1;
+  state.monitorId = "";
+  state.lastStep = null;
+  state.frameStamp = "";
+  prefs.set("aios_machine_id", id);
+  resetTimeline("Loading this computer’s activity…");
+  clearMarkers();
+  $("#screenImage").classList.remove("loaded");
+  $("#screenPlaceholder").classList.remove("hidden");
+  renderMachine();
+  pollEvents();
+  refreshFrame();
+}
+
+function renderMachine() {
+  const machine = currentMachine();
+  const hasMachines = state.machines.length > 0;
+  $("#emptyState").classList.toggle("hidden", hasMachines);
+  $("#workspace").classList.toggle("hidden", !hasMachines);
+  $("#promptForm").classList.toggle("hidden", !hasMachines);
+  if (!machine) return;
+
+  const status = machine.status || {};
+  const operator = status.operator || {};
+  const runState = String(operator.state || status.state || "idle").toLowerCase();
+  const running = machine.online && RUNNING_STATES.has(runState);
+  const asking = Boolean(operator.asking);
+  state.running = running;
+
+  $("#machineName").textContent = machine.name;
+  $("#machineDot").className = `dot${machine.online ? (running ? " busy" : " online") : ""}`;
+  $("#machineMeta").textContent = machine.online
+    ? (running ? (asking ? "Needs your answer" : "OPERATOR is working") : `${machine.platform || "Windows"} · ready`)
+    : `Offline · last seen ${ago(machine.last_seen)}`;
+
+  $("#runTitle").textContent = asking
+    ? "Waiting for your answer"
+    : running ? (operator.task || "Working on your task") : "Ready for a task";
+  $("#runMeta").textContent = `${labelOf(MODELS, state.model)} · ${running ? "working" : "idle"}`;
+  $("#runDot").classList.toggle("on", running);
+  $("#stopBtn").classList.toggle("hidden", !running);
+  $("#promptInput").placeholder = running ? "Add a follow-up…" : "Ask your computer…";
+
+  const monitors = monitorsOf(machine);
+  if (!monitors.some((monitor) => String(monitor.id) === String(state.monitorId))) {
+    state.monitorId = String(monitors[0].id);
+  }
+  $("#monitorLabel").textContent = monitorName(currentMonitor());
+
+  applyWakeLock();
+}
+
+async function loadMachines() {
+  if (state.loading) return;
+  state.loading = true;
+  try {
+    const data = await api("/api/machines");
+    state.machines = data.machines || [];
+    if (!state.machines.some((machine) => machine.id === state.machineId)) {
+      state.machineId = state.machines[0]?.id || "";
+      if (state.machineId) prefs.set("aios_machine_id", state.machineId);
+    }
+    renderMachine();
+  } catch (error) {
+    if (state.token) console.debug(error);
+  } finally {
+    state.loading = false;
+  }
+}
+
+/* ── live screen: zoom, pan, click markers ────────────── */
+
+const viewer = {
+  zoom: 1,
+  fitWidth: 0,
+  pinch: null,
+  lastTap: 0,
+  markers: []
+};
+
+const scrollBox = () => $("#viewerScroll");
+
+function fitViewer() {
+  const image = $("#screenImage");
+  const box = scrollBox();
+  if (!image.naturalWidth || !box.clientWidth) return;
+  const ratio = image.naturalWidth / image.naturalHeight;
+  let width = box.clientWidth;
+  if (width / ratio > box.clientHeight) width = box.clientHeight * ratio;
+  viewer.fitWidth = width;
   applyZoom();
-  zoomImgReady = true;
 }
-
-zoomImg.addEventListener('load', () => {
-  fitZoomToStage();
-  zoomLoading.hidden = true;
-});
-
-zoomImg.addEventListener('error', () => {
-  zoomLoading.hidden = false;
-  zoomLoading.textContent = 'failed to load';
-});
-
-function closeZoom() {
-  zoomModal.hidden = true;
-  document.body.style.overflow = '';
-  panActive = false; pinchActive = false;
-}
-zoomClose.addEventListener('click', closeZoom);
 
 function applyZoom() {
-  zoomScale = clamp(zoomScale, zoomFitScale * 0.5, zoomFitScale * 24);
-  zoomImg.style.transform = `translate3d(${zoomX}px, ${zoomY}px, 0) scale(${zoomScale})`;
+  $("#viewerCanvas").style.width = `${Math.round(viewer.fitWidth * viewer.zoom)}px`;
+  const zoomed = viewer.zoom > 1.01;
+  $("#zoomChip").textContent = `${Math.round(viewer.zoom * 100)}%`;
+  $("#zoomChip").classList.toggle("hidden", !zoomed);
+  $("#zoomResetBtn").classList.toggle("hidden", !zoomed);
 }
 
-/* Touch handling */
-function touchList(e) {
-  return Array.from(e.touches || []).map((t) => ({ x: t.clientX, y: t.clientY }));
+function setZoom(next, focalX, focalY) {
+  const box = scrollBox();
+  const clamped = Math.min(6, Math.max(1, next));
+  if (Math.abs(clamped - viewer.zoom) < 0.001) return;
+  const rect = box.getBoundingClientRect();
+  const originX = focalX === undefined ? rect.width / 2 : focalX - rect.left;
+  const originY = focalY === undefined ? rect.height / 2 : focalY - rect.top;
+  const contentX = box.scrollLeft + originX;
+  const contentY = box.scrollTop + originY;
+  const factor = clamped / viewer.zoom;
+  viewer.zoom = clamped;
+  applyZoom();
+  box.scrollLeft = contentX * factor - originX;
+  box.scrollTop = contentY * factor - originY;
 }
 
-zoomStage.addEventListener('touchstart', (e) => {
-  if (!zoomImgReady) return;
-  e.preventDefault();
-  const pts = touchList(e);
-  if (pts.length === 1) {
-    panActive = true; pinchActive = false;
-    panStartX = pts[0].x; panStartY = pts[0].y;
-    panStartTx = zoomX; panStartTy = zoomY;
+function resetZoom() {
+  viewer.zoom = 1;
+  applyZoom();
+  scrollBox().scrollTo({ left: 0, top: 0, behavior: "smooth" });
+}
+
+function bindViewerGestures() {
+  const box = scrollBox();
+
+  box.addEventListener("touchstart", (event) => {
+    if (event.touches.length === 2) {
+      const [a, b] = event.touches;
+      viewer.pinch = {
+        distance: Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY),
+        zoom: viewer.zoom
+      };
+      event.preventDefault();
+    }
+  }, { passive: false });
+
+  box.addEventListener("touchmove", (event) => {
+    if (!viewer.pinch || event.touches.length !== 2) return;
+    event.preventDefault();
+    const [a, b] = event.touches;
+    const distance = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+    setZoom(viewer.pinch.zoom * (distance / viewer.pinch.distance), (a.clientX + b.clientX) / 2, (a.clientY + b.clientY) / 2);
+  }, { passive: false });
+
+  box.addEventListener("touchend", (event) => {
+    if (event.touches.length < 2) viewer.pinch = null;
+    if (event.touches.length || event.changedTouches.length !== 1) return;
     const now = Date.now();
-    if (now - lastTap < 280) { toggleDoubleZoom(pts[0].x, pts[0].y); lastTap = 0; panActive = false; }
-    else lastTap = now;
-  } else if (pts.length >= 2) {
-    panActive = false; pinchActive = true;
-    pinchStartDist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y) || 1;
-    pinchStartScale = zoomScale;
-    pinchCx = (pts[0].x + pts[1].x) / 2;
-    pinchCy = (pts[0].y + pts[1].y) / 2;
-  }
-}, { passive: false });
+    const touch = event.changedTouches[0];
+    if (now - viewer.lastTap < 300) {
+      viewer.lastTap = 0;
+      buzz();
+      if (viewer.zoom > 1.01) resetZoom();
+      else setZoom(2.6, touch.clientX, touch.clientY);
+    } else {
+      viewer.lastTap = now;
+    }
+  });
 
-zoomStage.addEventListener('touchmove', (e) => {
-  if (!zoomImgReady) return;
-  e.preventDefault();
-  const pts = touchList(e);
-  if (pinchActive && pts.length >= 2) {
-    const dist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y) || 1;
-    const cx = (pts[0].x + pts[1].x) / 2;
-    const cy = (pts[0].y + pts[1].y) / 2;
-    const newScale = pinchStartScale * (dist / pinchStartDist);
-    const k = newScale / zoomScale;
-    zoomX = cx - k * (cx - zoomX) + (cx - pinchCx);
-    zoomY = cy - k * (cy - zoomY) + (cy - pinchCy);
-    pinchCx = cx; pinchCy = cy;
-    zoomScale = newScale;
-    applyZoom();
-  } else if (panActive && pts.length === 1) {
-    zoomX = panStartTx + (pts[0].x - panStartX);
-    zoomY = panStartTy + (pts[0].y - panStartY);
-    applyZoom();
-  }
-}, { passive: false });
+  box.addEventListener("wheel", (event) => {
+    if (!event.ctrlKey && !event.metaKey) return;
+    event.preventDefault();
+    setZoom(viewer.zoom * (event.deltaY < 0 ? 1.12 : 0.89), event.clientX, event.clientY);
+  }, { passive: false });
 
-zoomStage.addEventListener('touchend', (e) => {
-  if ((e.touches || []).length === 0) { panActive = false; pinchActive = false; }
-}, { passive: false });
+  box.addEventListener("dblclick", (event) => {
+    if (viewer.zoom > 1.01) resetZoom();
+    else setZoom(2.6, event.clientX, event.clientY);
+  });
 
-/* Mouse + wheel for desktop */
-zoomStage.addEventListener('mousedown', (e) => {
-  if (!zoomImgReady) return;
-  panActive = true;
-  panStartX = e.clientX; panStartY = e.clientY;
-  panStartTx = zoomX; panStartTy = zoomY;
-});
-window.addEventListener('mousemove', (e) => {
-  if (!panActive) return;
-  zoomX = panStartTx + (e.clientX - panStartX);
-  zoomY = panStartTy + (e.clientY - panStartY);
-  applyZoom();
-});
-window.addEventListener('mouseup', () => { panActive = false; });
-
-zoomStage.addEventListener('wheel', (e) => {
-  if (!zoomImgReady) return;
-  e.preventDefault();
-  const dir = e.deltaY > 0 ? 0.88 : 1.135;
-  const newScale = zoomScale * dir;
-  const rect = zoomStage.getBoundingClientRect();
-  const cx = e.clientX - rect.left, cy = e.clientY - rect.top;
-  const k = newScale / zoomScale;
-  zoomX = cx - k * (cx - zoomX);
-  zoomY = cy - k * (cy - zoomY);
-  zoomScale = newScale;
-  applyZoom();
-}, { passive: false });
-
-function toggleDoubleZoom(cx, cy) {
-  const rect = zoomStage.getBoundingClientRect();
-  const x = cx - rect.left, y = cy - rect.top;
-  const target = zoomScale > zoomFitScale * 1.05 ? zoomFitScale : zoomFitScale * 3;
-  const k = target / zoomScale;
-  zoomX = x - k * (x - zoomX);
-  zoomY = y - k * (y - zoomY);
-  zoomScale = target;
-  applyZoom();
+  new ResizeObserver(() => fitViewer()).observe(box);
 }
+
+function clearMarkers() {
+  $("#markerLayer").replaceChildren();
+  viewer.markers = [];
+  $("#lastClickPill").classList.add("hidden");
+}
+
+/** Places a marker using screen-space coordinates from the desktop agent. */
+function markClick(payload) {
+  const x = Number(payload?.x);
+  const y = Number(payload?.y);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+  const monitor = currentMonitor();
+  const image = $("#screenImage");
+  const width = Number(monitor.width) || image.naturalWidth;
+  const height = Number(monitor.height) || image.naturalHeight;
+  if (!width || !height) return;
+
+  const left = ((x - Number(monitor.left || 0)) / width) * 100;
+  const top = ((y - Number(monitor.top || 0)) / height) * 100;
+  if (left < -5 || left > 105 || top < -5 || top > 105) return;
+
+  const marker = document.createElement("div");
+  marker.className = "marker";
+  marker.style.left = `${left}%`;
+  marker.style.top = `${top}%`;
+  marker.appendChild(document.createElement("i"));
+  $("#markerLayer").appendChild(marker);
+  viewer.markers.push(marker);
+  while (viewer.markers.length > 4) viewer.markers.shift().remove();
+  setTimeout(() => marker.classList.add("faded"), 2000);
+  setTimeout(() => { marker.remove(); viewer.markers = viewer.markers.filter((item) => item !== marker); }, 9000);
+
+  const pill = $("#lastClickPill");
+  pill.textContent = `${payload.button || "left"} click · ${Math.round(x)}, ${Math.round(y)}`;
+  pill.classList.remove("hidden");
+  clearTimeout(markClick.timer);
+  markClick.timer = setTimeout(() => pill.classList.add("hidden"), 6000);
+}
+
+async function refreshFrame() {
+  const machine = currentMachine();
+  if (!machine) return;
+  const monitor = encodeURIComponent(state.monitorId || "primary");
+  try {
+    const response = await fetch(`/api/machines/${encodeURIComponent(machine.id)}/frame/${monitor}?t=${Date.now()}`, {
+      headers: { Authorization: `Bearer ${state.token}` },
+      cache: "no-store"
+    });
+    if (!response.ok) { updateLive(); return; }
+    const stamp = response.headers.get("x-aios-updated-at") || "";
+    if (stamp && stamp === state.frameStamp) { updateLive(); return; }
+    const blob = await response.blob();
+    if (machine.id !== state.machineId) return;
+    state.frameStamp = stamp;
+    state.frameAt = Date.now();
+    const next = URL.createObjectURL(blob);
+    const image = $("#screenImage");
+    image.onload = () => {
+      if (state.frameUrl) URL.revokeObjectURL(state.frameUrl);
+      state.frameUrl = next;
+      image.classList.add("loaded");
+      $("#screenPlaceholder").classList.add("hidden");
+      if (!viewer.fitWidth) fitViewer();
+    };
+    image.src = next;
+    updateLive();
+  } catch {
+    /* A sleeping computer simply has no frame yet. */
+  }
+}
+
+function updateLive() {
+  const fresh = Date.now() - state.frameAt < 9000 && Boolean(currentMachine()?.online);
+  $("#livePill").classList.toggle("on", fresh);
+}
+
+/* ── timeline ─────────────────────────────────────────── */
+
+function resetTimeline(message) {
+  const feed = $("#timeline");
+  feed.replaceChildren();
+  const empty = document.createElement("div");
+  empty.className = "timeline-empty";
+  empty.appendChild(icon("spark"));
+  const text = document.createElement("p");
+  text.textContent = message;
+  empty.appendChild(text);
+  feed.appendChild(empty);
+  state.lastStep = null;
+  hideJump();
+}
+
+function nearBottom() {
+  const feed = $("#timeline");
+  return feed.scrollHeight - feed.scrollTop - feed.clientHeight < 90;
+}
+
+function hideJump() {
+  state.stickBottom = true;
+  $("#jumpBtn").classList.add("hidden");
+}
+
+function scrollFeed(force = false) {
+  const feed = $("#timeline");
+  if (force || state.stickBottom) {
+    feed.scrollTop = feed.scrollHeight;
+    hideJump();
+  } else {
+    $("#jumpBtn").classList.remove("hidden");
+  }
+}
+
+/** Turns a raw agent event into the shape the timeline renders. */
+function describe(event) {
+  const payload = event.payload || {};
+  const type = String(event.type || "log").toLowerCase();
+  const text = (value) => String(value || "").trim();
+
+  if (type === "prompt" || /follow.?up/.test(type)) {
+    return { kind: "user", body: text(payload.message || payload.text || payload.prompt) };
+  }
+  if (type === "step_begin") return { kind: "step", step: payload.n };
+  if (type === "screenshot") return { kind: "entry", tone: "muted", glyph: "monitor", title: "Looked at the screen" };
+  if (type === "command") return { kind: "entry", tone: "muted", glyph: "bolt", title: "Task received" };
+  if (type === "run_start") return { kind: "entry", tone: "muted", glyph: "bolt", title: text(payload.task) || "Task started" };
+  if (type === "debug_dir" || type === "step_end") return null;
+
+  if (type === "thought") {
+    const say = text(payload.say);
+    const thought = text(payload.thought);
+    const message = text(payload.message);
+    if (say) return { kind: "entry", tone: "say", glyph: "spark", title: "OPERATOR", body: say, extra: state.detailed ? thought : "" };
+    return { kind: "entry", tone: "think muted", glyph: "spark", title: "Thinking", body: thought || message };
+  }
+  if (type === "click_fx") {
+    return {
+      kind: "entry", tone: "click", glyph: "cursor",
+      title: `${text(payload.button) || "left"} click`,
+      mono: `${Math.round(Number(payload.x))}, ${Math.round(Number(payload.y))}`,
+      click: payload
+    };
+  }
+  if (type === "action_done") {
+    const result = payload.result || payload;
+    const action = result.action || {};
+    const name = text(action.type || payload.action) || "action";
+    const ok = result.ok !== false;
+    // A successful click already has its own entry with coordinates.
+    if (ok && /^click|^double_click|^right_click/.test(name)) return null;
+    return {
+      kind: "entry", tone: ok ? "act" : "err", glyph: ok ? "bolt" : "warn",
+      title: name.replace(/_/g, " "),
+      body: text(result.detail),
+      mono: text(result.output).slice(0, 400),
+      hint: result.elapsed_ms ? `${result.elapsed_ms} ms` : ""
+    };
+  }
+  if (type === "ask") {
+    return { kind: "entry", tone: "ask", glyph: "warn", title: "OPERATOR needs you", body: text(payload.message) };
+  }
+  if (type === "done") {
+    const ok = Boolean(payload.ok);
+    const stopped = /stop/i.test(text(payload.message));
+    return {
+      kind: "entry", tone: ok ? "ok" : "err", glyph: ok ? "check" : "stop",
+      title: ok ? "Finished" : stopped ? "Stopped" : "Run ended",
+      body: text(payload.message),
+      hint: payload.steps ? `${payload.steps} steps` : ""
+    };
+  }
+  if (type === "error") {
+    return { kind: "entry", tone: "err", glyph: "warn", title: text(payload.title) || "Error", body: text(payload.message || payload.detail) };
+  }
+  const body = text(payload.msg || payload.message || payload.text || payload.detail);
+  if (!body) return null;
+  return { kind: "entry", tone: "muted", glyph: "bolt", title: body.slice(0, 120) };
+}
+
+function addEvent(event, pending = false) {
+  if (event.type === "click_fx") markClick(event.payload || {});
+  if (event.type === "step_begin") $("#runMeta").textContent = `${labelOf(MODELS, state.model)} · step ${(event.payload || {}).n || ""}`;
+  if (event.type === "ask") buzz([16, 60, 16]);
+  if (event.type === "done") buzz([12, 40, 12]);
+
+  const info = describe(event);
+  if (!info) return;
+  const feed = $("#timeline");
+  feed.querySelector(".timeline-empty")?.remove();
+  const wasBottom = nearBottom();
+  const stamp = Number(event.created_at || Date.now());
+
+  if (info.kind === "step") {
+    if (state.lastStep === info.step) return;
+    state.lastStep = info.step;
+    const rule = document.createElement("div");
+    rule.className = "step-rule";
+    rule.textContent = `Step ${info.step ?? ""}`.trim();
+    feed.appendChild(rule);
+  } else if (info.kind === "user") {
+    if (!info.body) return;
+    // The optimistic bubble becomes the real one once the agent echoes it back.
+    if (!pending) {
+      const waiting = [...feed.querySelectorAll(".msg.pending")]
+        .find((node) => node.querySelector(".msg-bubble").textContent === info.body);
+      if (waiting) {
+        waiting.classList.remove("pending");
+        waiting.querySelector("time").textContent = clockTime(stamp);
+        return;
+      }
+    }
+    const row = document.createElement("div");
+    row.className = `msg${pending ? " pending" : ""}`;
+    const bubble = document.createElement("div");
+    bubble.className = "msg-bubble";
+    bubble.textContent = info.body;
+    const time = document.createElement("time");
+    time.textContent = pending ? "sending" : clockTime(stamp);
+    row.append(bubble, time);
+    row.addEventListener("click", () => {
+      $("#promptInput").value = info.body;
+      autoGrow();
+      $("#promptInput").focus();
+    });
+    feed.appendChild(row);
+  } else {
+    const entry = document.createElement("article");
+    entry.className = `entry ${info.tone}`;
+    const badge = document.createElement("div");
+    badge.className = "entry-icon";
+    badge.appendChild(icon(info.glyph));
+    const body = document.createElement("div");
+    body.className = "entry-body";
+    const head = document.createElement("div");
+    head.className = "entry-title";
+    const title = document.createElement("strong");
+    title.textContent = info.title;
+    head.appendChild(title);
+    const time = document.createElement("time");
+    time.textContent = info.hint ? `${clockTime(stamp)} · ${info.hint}` : clockTime(stamp);
+    head.appendChild(time);
+    body.appendChild(head);
+    if (info.body) {
+      const paragraph = document.createElement("p");
+      paragraph.textContent = info.body;
+      body.appendChild(paragraph);
+    }
+    if (info.mono) {
+      const mono = document.createElement("p");
+      mono.className = "mono";
+      mono.textContent = info.mono;
+      body.appendChild(mono);
+    }
+    if (info.extra) {
+      const extra = document.createElement("p");
+      extra.className = "mono";
+      extra.textContent = info.extra;
+      body.appendChild(extra);
+    }
+    entry.append(badge, body);
+    if (info.click) {
+      entry.addEventListener("click", () => {
+        openScreen();
+        markClick(info.click);
+        buzz();
+      });
+    }
+    feed.appendChild(entry);
+  }
+
+  while (feed.children.length > 250) feed.firstElementChild.remove();
+  state.stickBottom = wasBottom || pending;
+  scrollFeed();
+}
+
+async function pollEvents() {
+  const machine = currentMachine();
+  if (!machine) return;
+  const id = machine.id;
+  const version = state.feedVersion;
+  try {
+    const data = await api(`/api/machines/${encodeURIComponent(id)}/events?since=${state.cursor}`);
+    if (id !== state.machineId || version !== state.feedVersion) return;
+    for (const event of data.events || []) addEvent(event);
+    state.cursor = Number(data.cursor || state.cursor);
+  } catch (error) {
+    console.debug(error);
+  }
+}
+
+/* ── polling ──────────────────────────────────────────── */
+
+function startPolling() {
+  stopPolling();
+  loadMachines();
+  pollEvents();
+  refreshFrame();
+  state.timers.push(setInterval(loadMachines, 4000));
+  state.timers.push(setInterval(pollEvents, 1400));
+  state.timers.push(setInterval(refreshFrame, 2200));
+  state.timers.push(setInterval(updateLive, 3000));
+}
+
+function stopPolling() {
+  state.timers.forEach(clearInterval);
+  state.timers = [];
+}
+
+async function applyWakeLock() {
+  if (!("wakeLock" in navigator)) return;
+  const wanted = state.keepAwake && state.running && !document.hidden;
+  try {
+    if (wanted && !state.wakeLock) {
+      state.wakeLock = await navigator.wakeLock.request("screen");
+      state.wakeLock.addEventListener("release", () => { state.wakeLock = null; });
+    } else if (!wanted && state.wakeLock) {
+      await state.wakeLock.release();
+      state.wakeLock = null;
+    }
+  } catch {
+    /* Wake lock is a nicety; ignore refusals. */
+  }
+}
+
+/* ── commands ─────────────────────────────────────────── */
+
+async function sendCommand(type, payload = {}) {
+  const machine = currentMachine();
+  if (!machine) throw new Error("Choose a computer first.");
+  return api(`/api/machines/${encodeURIComponent(machine.id)}/commands`, {
+    method: "POST",
+    body: JSON.stringify({ type, payload })
+  });
+}
+
+function autoGrow() {
+  const input = $("#promptInput");
+  input.style.height = "auto";
+  input.style.height = `${Math.min(input.scrollHeight, window.innerHeight * 0.34)}px`;
+  $("#suggestions").classList.toggle("hidden", Boolean(input.value.trim()) || state.running);
+}
+
+function openScreen() {
+  if (!state.screenOpen) toggleScreen(true);
+}
+
+function toggleScreen(open) {
+  state.screenOpen = open;
+  prefs.set("aios_screen_open", open ? 1 : 0);
+  $("#viewer").classList.toggle("collapsed", !open);
+  $("#screenToggle").classList.toggle("up", !open);
+  $("#screenToggle").querySelector("span").textContent = open ? "Hide screen" : "Show screen";
+  if (open) setTimeout(fitViewer, 300);
+}
+
+function toggleImmersive(on) {
+  const view = $("#viewer");
+  view.classList.toggle("immersive", on);
+  $("#expandBtn").replaceChildren(icon(on ? "shrink" : "expand"));
+  setTimeout(fitViewer, 60);
+  if (on) openOverlay(() => toggleImmersive(false));
+  else if (overlayCloser) dismissOverlay();
+}
+
+/* ── dictation ────────────────────────────────────────── */
+
+const SpeechRecognitionClass = window.SpeechRecognition || window.webkitSpeechRecognition;
+let recognition = null;
+let recognitionBase = "";
+
+function stopDictation() {
+  if (recognition) {
+    recognition.onend = null;
+    recognition.stop();
+    recognition = null;
+  }
+  $("#micBtn").classList.remove("rec");
+  $("#listening").classList.add("hidden");
+  $(".composer").classList.remove("rec");
+}
+
+function startDictation() {
+  if (!SpeechRecognitionClass) {
+    toast("Dictation needs Chrome or Safari — try the mic on your keyboard.");
+    return;
+  }
+  recognition = new SpeechRecognitionClass();
+  recognition.lang = navigator.language || "en-US";
+  recognition.continuous = true;
+  recognition.interimResults = true;
+  recognitionBase = $("#promptInput").value.replace(/\s+$/, "");
+
+  recognition.onresult = (event) => {
+    let final = "";
+    let interim = "";
+    for (let index = event.resultIndex; index < event.results.length; index += 1) {
+      const result = event.results[index];
+      if (result.isFinal) final += result[0].transcript;
+      else interim += result[0].transcript;
+    }
+    if (final) recognitionBase = `${recognitionBase} ${final.trim()}`.trim();
+    $("#promptInput").value = interim ? `${recognitionBase} ${interim.trim()}`.trim() : recognitionBase;
+    $("#listeningText").textContent = interim || "Listening…";
+    autoGrow();
+  };
+  recognition.onerror = (event) => {
+    stopDictation();
+    if (event.error === "not-allowed") toast("Microphone access was blocked.");
+    else if (event.error !== "aborted") toast("Dictation stopped.");
+  };
+  recognition.onend = () => stopDictation();
+
+  try {
+    recognition.start();
+  } catch {
+    stopDictation();
+    return;
+  }
+  buzz(12);
+  $("#micBtn").classList.add("rec");
+  $(".composer").classList.add("rec");
+  $("#listeningText").textContent = "Listening…";
+  $("#listening").classList.remove("hidden");
+}
+
+/* ── wiring: auth ─────────────────────────────────────── */
+
+$("#createAccountBtn").addEventListener("click", async () => {
+  const button = $("#createAccountBtn");
+  button.disabled = true;
+  button.textContent = "Creating…";
+  try {
+    const data = await api("/api/account/create", { method: "POST", body: "{}" });
+    saveSession(data.token, data.code);
+    $("#privateCode").textContent = data.code;
+    $("#welcomePane").classList.add("hidden");
+    $("#createdPane").classList.remove("hidden");
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = "Create my remote";
+  }
+});
+
+$("#showLoginBtn").addEventListener("click", () => {
+  $("#welcomePane").classList.add("hidden");
+  $("#loginForm").classList.remove("hidden");
+  $("#loginCode").focus();
+});
+$("#loginBackBtn").addEventListener("click", () => {
+  $("#loginForm").classList.add("hidden");
+  $("#welcomePane").classList.remove("hidden");
+});
+$("#loginForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const code = $("#loginCode").value.trim();
+  $("#loginError").textContent = "";
+  try {
+    const data = await api("/api/account/login", { method: "POST", body: JSON.stringify({ code }) });
+    saveSession(data.token, code.toUpperCase());
+    showApp();
+  } catch (error) {
+    $("#loginError").textContent = error.message;
+  }
+});
+$("#privateCode").addEventListener("click", () => copyText(state.privateCode));
+$("#copyCodeBtn").addEventListener("click", () => copyText(state.privateCode));
+$("#enterRemoteBtn").addEventListener("click", showApp);
+
+/* ── wiring: sheets ───────────────────────────────────── */
+
+$("#machineBtn").addEventListener("click", () => {
+  renderOptions(
+    $("#machineOptions"),
+    state.machines.map((machine) => ({
+      id: machine.id,
+      name: machine.name,
+      note: machine.online ? "Online" : `Last seen ${ago(machine.last_seen)}`,
+      icon: true,
+      online: machine.online
+    })),
+    state.machineId,
+    selectMachine
+  );
+  openSheet("machineSheet");
+});
+
+$("#monitorBtn").addEventListener("click", () => {
+  const monitors = monitorsOf(currentMachine());
+  renderOptions(
+    $("#monitorOptions"),
+    monitors.map((monitor, index) => ({
+      id: String(monitor.id ?? index),
+      name: monitorName(monitor, index),
+      note: monitor.width ? `${monitor.width} × ${monitor.height}` : ""
+    })),
+    String(state.monitorId),
+    (id) => {
+      state.monitorId = id;
+      state.frameStamp = "";
+      $("#monitorLabel").textContent = monitorName(currentMonitor());
+      clearMarkers();
+      closeSheets();
+      refreshFrame();
+    }
+  );
+  openSheet("monitorSheet");
+});
+
+function openModelSheet() {
+  renderOptions($("#modelOptions"), MODELS, state.model, (id) => {
+    state.model = id;
+    prefs.set("aios_model", id);
+    $("#modelLabel").textContent = labelOf(MODELS, id);
+    $("#settingsModelValue").textContent = labelOf(MODELS, id);
+    closeSheets();
+    renderMachine();
+  });
+  openSheet("modelSheet");
+}
+
+function openEffortSheet() {
+  renderOptions($("#effortOptions"), EFFORTS, state.effort, (id) => {
+    state.effort = id;
+    prefs.set("aios_effort", id);
+    $("#effortLabel").textContent = labelOf(EFFORTS, id);
+    $("#settingsEffortValue").textContent = labelOf(EFFORTS, id);
+    closeSheets();
+  });
+  openSheet("effortSheet");
+}
+
+$("#modelBtn").addEventListener("click", openModelSheet);
+$("#effortBtn").addEventListener("click", openEffortSheet);
+$("#settingsModelRow").addEventListener("click", openModelSheet);
+$("#settingsEffortRow").addEventListener("click", openEffortSheet);
+$("#settingsBtn").addEventListener("click", () => openSheet("settingsSheet"));
+$("#addMachineBtn").addEventListener("click", () => openSheet("pairSheet"));
+$("#emptyAddBtn").addEventListener("click", () => openSheet("pairSheet"));
+$("#pairCode").addEventListener("click", () => copyText(state.privateCode));
+$("#pairCopyBtn").addEventListener("click", () => {
+  if (state.privateCode) copyText(state.privateCode);
+  else toast("Unlock with your private code first.");
+});
+
+$("#renameBtn").addEventListener("click", () => {
+  $("#renameInput").value = currentMachine()?.name || "";
+  openSheet("renameSheet");
+});
+$("#renameForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const machine = currentMachine();
+  const name = $("#renameInput").value.trim();
+  if (!machine || !name) return;
+  try {
+    await api(`/api/machines/${encodeURIComponent(machine.id)}`, { method: "PATCH", body: JSON.stringify({ name }) });
+    machine.name = name;
+    renderMachine();
+    closeSheets();
+    toast("Renamed");
+  } catch (error) {
+    toast(error.message);
+  }
+});
+
+$("#stepsInput").addEventListener("change", (event) => {
+  const value = Math.min(100, Math.max(1, Number(event.target.value) || 30));
+  state.steps = value;
+  event.target.value = value;
+  prefs.set("aios_steps", value);
+});
+$("#detailsToggle").addEventListener("change", (event) => {
+  state.detailed = event.target.checked;
+  prefs.set("aios_detailed", state.detailed ? 1 : 0);
+  applyFilter();
+});
+$("#wakeToggle").addEventListener("change", (event) => {
+  state.keepAwake = event.target.checked;
+  prefs.set("aios_awake", state.keepAwake ? 1 : 0);
+  applyWakeLock();
+});
+$("#hapticToggle").addEventListener("change", (event) => {
+  state.haptics = event.target.checked;
+  prefs.set("aios_haptics", state.haptics ? 1 : 0);
+  buzz();
+});
+$("#logoutBtn").addEventListener("click", clearSession);
+
+/* ── wiring: workspace ────────────────────────────────── */
+
+function applyFilter() {
+  $("#timeline").classList.toggle("lean", !state.detailed);
+  $("#filterBtn").textContent = state.detailed ? "All" : "Key";
+  $("#detailsToggle").checked = state.detailed;
+}
+
+$("#filterBtn").addEventListener("click", () => {
+  state.detailed = !state.detailed;
+  prefs.set("aios_detailed", state.detailed ? 1 : 0);
+  applyFilter();
+  buzz();
+});
+
+$("#screenToggle").addEventListener("click", () => { buzz(); toggleScreen(!state.screenOpen); });
+$("#expandBtn").addEventListener("click", () => toggleImmersive(!$("#viewer").classList.contains("immersive")));
+$("#zoomResetBtn").addEventListener("click", resetZoom);
+$("#jumpBtn").addEventListener("click", () => scrollFeed(true));
+$("#timeline").addEventListener("scroll", () => { if (nearBottom()) hideJump(); });
+
+$("#stopBtn").addEventListener("click", async () => {
+  buzz(20);
+  try {
+    await sendCommand("stop");
+    toast("Stop requested");
+  } catch (error) {
+    toast(error.message);
+  }
+});
+
+$("#clearChatBtn").addEventListener("click", async () => {
+  const machine = currentMachine();
+  if (!machine || !window.confirm("Clear this computer's activity?")) return;
+  const button = $("#clearChatBtn");
+  button.disabled = true;
+  try {
+    await api(`/api/machines/${encodeURIComponent(machine.id)}/events`, { method: "DELETE" });
+    state.feedVersion += 1;
+    state.cursor = 0;
+    resetTimeline("Cleared. Ask your computer to do something.");
+    toast("Timeline cleared");
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    button.disabled = false;
+  }
+});
+
+$("#promptInput").addEventListener("input", autoGrow);
+$("#promptInput").addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+    event.preventDefault();
+    $("#promptForm").requestSubmit();
+  }
+});
+$$(".sugg").forEach((button) => button.addEventListener("click", () => {
+  $("#promptInput").value = button.textContent;
+  autoGrow();
+  $("#promptInput").focus();
+}));
+
+$("#micBtn").addEventListener("click", () => (recognition ? stopDictation() : startDictation()));
+$("#micStopBtn").addEventListener("click", stopDictation);
+
+$("#promptForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  stopDictation();
+  const prompt = $("#promptInput").value.trim();
+  if (!prompt || state.busy) return;
+  const machine = currentMachine();
+  const type = state.running ? "followup" : "prompt";
+  state.busy = true;
+  $("#sendBtn").disabled = true;
+  buzz(12);
+  addEvent({ type: "prompt", payload: { message: prompt } }, true);
+  try {
+    await sendCommand(type, {
+      prompt,
+      model: state.model,
+      max_steps: state.steps,
+      reasoning_effort: state.effort
+    });
+    $("#promptInput").value = "";
+    autoGrow();
+    if (!machine?.online) toast("Queued until that computer reconnects");
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    state.busy = false;
+    $("#sendBtn").disabled = false;
+  }
+});
+
+/* ── wiring: platform ─────────────────────────────────── */
+
+window.addEventListener("beforeinstallprompt", (event) => {
+  event.preventDefault();
+  state.installPrompt = event;
+  $("#installBtn").classList.remove("hidden");
+});
+$("#installBtn").addEventListener("click", async () => {
+  if (!state.installPrompt) return;
+  state.installPrompt.prompt();
+  await state.installPrompt.userChoice;
+  state.installPrompt = null;
+  $("#installBtn").classList.add("hidden");
+});
+window.addEventListener("appinstalled", () => toast("aiOS Remote installed"));
+window.addEventListener("online", () => { toast("Back online"); loadMachines(); });
+window.addEventListener("resize", () => fitViewer());
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden || !state.token) return;
+  loadMachines();
+  pollEvents();
+  refreshFrame();
+  applyWakeLock();
+});
+
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
+
+/* ── boot ─────────────────────────────────────────────── */
+
+$("#modelLabel").textContent = labelOf(MODELS, state.model);
+$("#effortLabel").textContent = labelOf(EFFORTS, state.effort);
+$("#settingsModelValue").textContent = labelOf(MODELS, state.model);
+$("#settingsEffortValue").textContent = labelOf(EFFORTS, state.effort);
+$("#stepsInput").value = state.steps;
+$("#wakeToggle").checked = state.keepAwake;
+$("#hapticToggle").checked = state.haptics;
+applyFilter();
+toggleScreen(state.screenOpen);
+bindViewerGestures();
+autoGrow();
+
+if (new URLSearchParams(location.search).has("compose")) {
+  setTimeout(() => $("#promptInput").focus(), 400);
+}
+
+state.token ? showApp() : showAuth();
