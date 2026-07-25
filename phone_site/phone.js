@@ -30,6 +30,18 @@ const AI_PROVIDERS = [
 
 const RUNNING_STATES = new Set(["running", "starting", "thinking", "acting", "waiting"]);
 const MAX_CLARIFIER_QUESTIONS = 10;
+
+/* History + session hygiene. Coming back to the app should feel like opening
+   a fresh page, with everything that happened parked in History. */
+const HISTORY_KEY = "aios_history_v1";
+const MAX_HISTORY_RUNS = 25;
+const MAX_RUN_EVENTS = 400;
+const HISTORY_BUDGET = 1_200_000;      // characters of JSON, well inside the quota
+const SESSION_RESET_MS = 30 * 60 * 1000;
+const IDLE_RUN_CLOSE_MS = 3 * 60 * 1000;
+const EVENT_PAGE = 200;                // the relay's page size
+const MAX_DRAIN_PAGES = 40;
+const SERVER_PRUNE_EVENTS = 600;       // archived backlog worth deleting server-side
 const REMOTE_API_ORIGIN = location.hostname.endsWith("github.io")
   ? "https://aios-remote-control.contact-wallerstedt.chatgpt.site"
   : "";
@@ -84,6 +96,12 @@ const state = {
   wakeLock: null,
   stickBottom: true,
   lastStep: null,
+  history: [],
+  liveRun: null,
+  sessionMachineId: "",
+  viewingRunId: "",
+  replaying: false,
+  draining: false,
   clarifierTimer: null,
   clarifierTimeout: null,
   clarifierSequence: 0,
@@ -395,9 +413,12 @@ function monitorName(monitor, index = 0) {
 function selectMachine(id) {
   closeSheets();
   if (state.machineId === id) return;
+  closeRun("ended");
   state.machineId = id;
   state.cursor = 0;
   state.feedVersion += 1;
+  state.viewingRunId = "";
+  $("#historyBanner").classList.add("hidden");
   state.monitorId = "";
   state.lastStep = null;
   state.frameStamp = "";
@@ -410,7 +431,7 @@ function selectMachine(id) {
   $("#screenImage").classList.remove("loaded");
   $("#screenPlaceholder").classList.remove("hidden");
   renderMachine();
-  pollEvents();
+  beginSession();
   requestStream();
   refreshFrame();
 }
@@ -476,6 +497,9 @@ async function loadMachines() {
       if (state.machineId) prefs.set("aios_machine_id", state.machineId);
     }
     renderMachine();
+    // First sight of a computer (boot, or one that just finished pairing)
+    // opens its session: archive whatever is old, start on a clean feed.
+    if (state.machineId && state.sessionMachineId !== state.machineId) beginSession();
   } catch (error) {
     if (state.token) console.debug(error);
   } finally {
@@ -986,10 +1010,13 @@ function describe(event) {
 }
 
 function addEvent(event, pending = false) {
-  if (event.type === "click_fx") markClick(event.payload || {});
-  if (event.type === "step_begin") $("#runMeta").textContent = `${labelOf(MODELS, state.model)} · step ${(event.payload || {}).n || ""}`;
-  if (event.type === "ask") buzz([16, 60, 16]);
-  if (event.type === "done") buzz([12, 40, 12]);
+  // Replaying history must not move the live screen or buzz the phone.
+  if (!state.replaying) {
+    if (event.type === "click_fx") markClick(event.payload || {});
+    if (event.type === "step_begin") $("#runMeta").textContent = `${labelOf(MODELS, state.model)} · step ${(event.payload || {}).n || ""}`;
+    if (event.type === "ask") buzz([16, 60, 16]);
+    if (event.type === "done") buzz([12, 40, 12]);
+  }
 
   const info = describe(event);
   if (!info) return;
@@ -1088,34 +1115,312 @@ function addEvent(event, pending = false) {
   scrollFeed();
 }
 
-async function pollEvents() {
+/* ── history ──────────────────────────────────────────── */
+
+function loadHistory() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(HISTORY_KEY) || "[]");
+    state.history = Array.isArray(saved) ? saved : [];
+  } catch {
+    state.history = [];
+  }
+  state.liveRun = null;
+}
+
+/** Persist, shedding the oldest runs until the browser is happy to store it. */
+function saveHistory() {
+  let attempt = state.history.slice(0, MAX_HISTORY_RUNS);
+  while (attempt.length) {
+    const payload = JSON.stringify(attempt);
+    if (payload.length <= HISTORY_BUDGET) {
+      try {
+        localStorage.setItem(HISTORY_KEY, payload);
+        state.history = attempt;
+        return;
+      } catch {
+        /* Quota — drop the oldest run and try again. */
+      }
+    }
+    attempt = attempt.slice(0, -1);
+  }
+  try { localStorage.removeItem(HISTORY_KEY); } catch { /* private mode */ }
+  state.history = attempt;
+}
+
+function machineHistory() {
+  return state.history.filter((run) => run.machineId === state.machineId);
+}
+
+function closeRun(status = "ended", stamp = Date.now()) {
+  const run = state.liveRun;
+  state.liveRun = null;
+  if (!run || run.status !== "open") return;
+  run.status = status;
+  run.endedAt = stamp;
+  saveHistory();
+}
+
+function openRun(task, stamp) {
+  closeRun("ended", stamp);
+  const run = {
+    id: `r${stamp.toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+    machineId: state.machineId,
+    task: String(task || "").slice(0, 400),
+    startedAt: stamp,
+    endedAt: 0,
+    status: "open",
+    steps: 0,
+    cost: "",
+    events: [],
+  };
+  state.liveRun = run;
+  state.history.unshift(run);
+  saveHistory();
+  return run;
+}
+
+/** Remember what you typed, even if the PC never manages to start the run. */
+function notePrompt(text) {
+  const stamp = Date.now();
+  const run = state.liveRun && state.liveRun.status === "open" && stamp - state.liveRun.startedAt < 60_000
+    ? state.liveRun
+    : openRun(text, stamp);
+  if (!run.task) run.task = String(text || "").slice(0, 400);
+  run.events.push({ type: "prompt", payload: { message: text }, created_at: stamp });
+  saveHistory();
+}
+
+function recordEvent(event) {
+  const type = String(event.type || "").toLowerCase();
+  if (type === "clarification") return;
+  const payload = event.payload || {};
+  const stamp = Number(event.created_at || Date.now());
+  if (type === "run_start") {
+    // The task you typed already opened a run here. Let the PC's run_start
+    // adopt it instead of splitting one task across two history rows.
+    const pending = state.liveRun;
+    const adoptable = pending && pending.status === "open" && !pending.started
+      && stamp - pending.startedAt < 120_000;
+    if (adoptable) pending.started = true;
+    else openRun(payload.task, stamp).started = true;
+  }
+  let run = state.liveRun;
+  if (!run || run.status !== "open") run = openRun(payload.task || "", stamp);
+  if (type === "run_start" && payload.task) run.task = String(payload.task).slice(0, 400);
+  run.events.push({ type, payload, created_at: stamp });
+  if (run.events.length > MAX_RUN_EVENTS) run.events.splice(0, run.events.length - MAX_RUN_EVENTS);
+  if (type === "step_begin") run.steps = Math.max(run.steps, Number(payload.n) || 0);
+  if (type === "done") {
+    run.steps = Number(payload.steps) || run.steps;
+    run.cost = costLine(payload.cost);
+    closeRun(payload.ok ? "done" : /stop/i.test(String(payload.message || "")) ? "stopped" : "failed", stamp);
+    return;
+  }
+  saveHistory();
+}
+
+/** A run whose PC went idle without a done event is over, whatever it thinks. */
+function closeStaleRun() {
+  const run = state.liveRun;
+  if (!run || run.status !== "open" || state.running) return;
+  const last = run.events.length ? Number(run.events[run.events.length - 1].created_at || 0) : run.startedAt;
+  if (Date.now() - Math.max(last, run.startedAt) > IDLE_RUN_CLOSE_MS) closeRun("ended");
+}
+
+function runLabel(run) {
+  return run.task || (run.status === "open" ? "Running…" : "Untitled run");
+}
+
+function runMetaLine(run) {
+  const parts = [ago(run.endedAt || run.startedAt)];
+  if (run.steps) parts.push(`${run.steps} step${run.steps === 1 ? "" : "s"}`);
+  if (run.cost) parts.push(run.cost.split(" · ")[0]);
+  return parts.join(" · ");
+}
+
+function renderHistory() {
+  const list = $("#historyList");
+  const runs = machineHistory();
+  list.replaceChildren();
+  if (!runs.length) {
+    const empty = document.createElement("p");
+    empty.className = "sheet-copy";
+    empty.textContent = "Nothing yet. Finished runs land here automatically.";
+    list.appendChild(empty);
+    return;
+  }
+  for (const run of runs) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `history-row${run.id === state.viewingRunId ? " on" : ""}`;
+    const dot = document.createElement("span");
+    dot.className = `history-dot ${run.status}`;
+    const text = document.createElement("span");
+    text.className = "history-text";
+    const title = document.createElement("strong");
+    title.textContent = runLabel(run);
+    const meta = document.createElement("small");
+    meta.textContent = runMetaLine(run);
+    text.append(title, meta);
+    button.append(dot, text);
+    button.addEventListener("click", () => openHistoryRun(run.id));
+    list.appendChild(button);
+  }
+}
+
+function replayEvents(events) {
+  state.replaying = true;
+  const feed = $("#timeline");
+  feed.replaceChildren();
+  state.lastStep = null;
+  for (const event of events) addEvent(event);
+  state.replaying = false;
+  scrollFeed(true);
+}
+
+function openHistoryRun(id) {
+  const run = state.history.find((item) => item.id === id);
+  if (!run) return;
+  closeSheets();
+  state.viewingRunId = run.id === state.liveRun?.id ? "" : run.id;
+  if (!state.viewingRunId) {
+    backToLive();
+    return;
+  }
+  $("#historyBannerText").textContent = `${runLabel(run)} · ${runMetaLine(run)}`;
+  $("#historyBanner").classList.remove("hidden");
+  replayEvents(run.events || []);
+  buzz();
+}
+
+function backToLive() {
+  if (!state.viewingRunId) return;
+  state.viewingRunId = "";
+  $("#historyBanner").classList.add("hidden");
+  const events = state.liveRun?.events || [];
+  if (events.length) replayEvents(events);
+  else resetTimeline("Ready. Ask your computer to do something.");
+}
+
+/* ── polling ──────────────────────────────────────────── */
+
+/** Pull everything new, archive it, and show it unless we are reading history.
+ *  `silent` catches up without redrawing — how a fresh session starts clean. */
+async function drainEvents(silent = false) {
   const machine = currentMachine();
-  if (!machine) return;
+  if (!machine || state.draining) return 0;
   const id = machine.id;
   const version = state.feedVersion;
+  state.draining = true;
+  let seen = 0;
   try {
-    const data = await api(`/api/machines/${encodeURIComponent(id)}/events?since=${state.cursor}`);
-    if (id !== state.machineId || version !== state.feedVersion) return;
-    for (const event of data.events || []) {
-      if (String(event.type || "").toLowerCase() === "clarification") applyClarification(event.payload || {});
-      else addEvent(event);
+    for (let page = 0; page < MAX_DRAIN_PAGES; page += 1) {
+      const data = await api(`/api/machines/${encodeURIComponent(id)}/events?since=${state.cursor}`);
+      if (id !== state.machineId || version !== state.feedVersion) return seen;
+      const events = data.events || [];
+      for (const event of events) {
+        if (String(event.type || "").toLowerCase() === "clarification") {
+          if (!silent) applyClarification(event.payload || {});
+          continue;
+        }
+        recordEvent(event);
+        if (!silent && !state.viewingRunId) addEvent(event);
+      }
+      seen += events.length;
+      state.cursor = Number(data.cursor || state.cursor);
+      saveCursor();
+      if (events.length < EVENT_PAGE) break;
     }
-    state.cursor = Number(data.cursor || state.cursor);
+  } catch (error) {
+    console.debug(error);
+  } finally {
+    state.draining = false;
+  }
+  return seen;
+}
+
+async function pollEvents() {
+  await drainEvents(false);
+  closeStaleRun();
+}
+
+function cursorKey() {
+  return `aios_cursor_${state.machineId}`;
+}
+
+function loadCursor() {
+  state.cursor = Number(prefs.get(cursorKey(), 0)) || 0;
+}
+
+function saveCursor() {
+  if (state.machineId) prefs.set(cursorKey(), state.cursor);
+}
+
+function markSeen() {
+  prefs.set("aios_seen_at", Date.now());
+}
+
+/** Start clean after a long absence: archive the backlog, show an empty feed. */
+async function beginSession(force = false) {
+  if (!state.machineId) return;
+  state.sessionMachineId = state.machineId;
+  const away = Date.now() - Number(prefs.get("aios_seen_at", 0));
+  const fresh = force || away > SESSION_RESET_MS || !Number(prefs.get(cursorKey(), 0));
+  loadCursor();
+  state.viewingRunId = "";
+  $("#historyBanner").classList.add("hidden");
+  // Nothing half-finished survives a reopen: no stuck send, no stale draft
+  // questions, no pending bubble waiting on a reply that never came.
+  state.busy = false;
+  state.draining = false;
+  $("#sendBtn").disabled = false;
+  clearClarifier();
+  clearMarkers();
+  if (!fresh) {
+    // A refresh or a quick trip to another app should feel like nothing
+    // happened: put the run you were watching back on screen.
+    const recent = machineHistory()[0];
+    if (recent && recent.events.length
+        && Date.now() - (recent.endedAt || recent.startedAt) < SESSION_RESET_MS) {
+      if (recent.status === "open") state.liveRun = recent;
+      replayEvents(recent.events);
+    }
+    await pollEvents();
+    markSeen();
+    return;
+  }
+  state.feedVersion += 1;
+  const archived = await drainEvents(true);
+  closeRun("ended");
+  resetTimeline("Ready. Ask your computer to do something.");
+  markSeen();
+  if (archived >= SERVER_PRUNE_EVENTS && !state.running) await pruneServerEvents();
+  await pollEvents();
+}
+
+/** The backlog is safely in History, so let the relay forget it. */
+async function pruneServerEvents() {
+  const machine = currentMachine();
+  if (!machine || state.running) return;
+  try {
+    await api(`/api/machines/${encodeURIComponent(machine.id)}/events`, { method: "DELETE" });
+    state.cursor = 0;
+    saveCursor();
   } catch (error) {
     console.debug(error);
   }
 }
 
-/* ── polling ──────────────────────────────────────────── */
-
 function startPolling() {
   stopPolling();
+  loadHistory();
+  state.sessionMachineId = "";
   loadMachines();
-  pollEvents();
   requestStream();
   startFrameLoop();
   state.timers.push(setInterval(loadMachines, 4000));
   state.timers.push(setInterval(pollEvents, 1400));
+  state.timers.push(setInterval(markSeen, 20_000));
   state.streamLeaseTimer = setInterval(requestStream, 8000);
   state.timers.push(setInterval(updateLive, 1000));
 }
@@ -1759,13 +2064,39 @@ $("#clearChatBtn").addEventListener("click", async () => {
     await api(`/api/machines/${encodeURIComponent(machine.id)}/events`, { method: "DELETE" });
     state.feedVersion += 1;
     state.cursor = 0;
+    saveCursor();
+    closeRun("ended");
+    state.viewingRunId = "";
+    $("#historyBanner").classList.add("hidden");
     resetTimeline("Cleared. Ask your computer to do something.");
-    toast("Timeline cleared");
+    toast("Timeline cleared — earlier runs are still in History");
   } catch (error) {
     toast(error.message);
   } finally {
     button.disabled = false;
   }
+});
+
+$("#historyBtn").addEventListener("click", () => {
+  renderHistory();
+  openSheet("historySheet");
+});
+
+$("#backToLiveBtn").addEventListener("click", () => {
+  backToLive();
+  buzz();
+});
+
+$("#clearHistoryBtn").addEventListener("click", () => {
+  if (!window.confirm("Delete the saved history on this phone?")) return;
+  const keep = state.history.filter((run) => run.machineId !== state.machineId);
+  state.history = keep;
+  state.liveRun = null;
+  state.viewingRunId = "";
+  $("#historyBanner").classList.add("hidden");
+  saveHistory();
+  renderHistory();
+  toast("History cleared");
 });
 
 $("#promptInput").addEventListener("input", () => {
@@ -1804,9 +2135,11 @@ $("#promptForm").addEventListener("submit", async (event) => {
   if (!prompt || state.busy) return;
   const machine = currentMachine();
   const type = state.running ? "followup" : "prompt";
+  backToLive();
   state.busy = true;
   $("#sendBtn").disabled = true;
   buzz(12);
+  notePrompt(prompt);
   addEvent({ type: "prompt", payload: { message: prompt } }, true);
   try {
     await sendCommand(type, {
@@ -1846,9 +2179,13 @@ window.addEventListener("appinstalled", () => toast("aiOS Remote installed"));
 window.addEventListener("online", () => { toast("Back online"); loadMachines(); });
 window.addEventListener("resize", () => fitViewer());
 document.addEventListener("visibilitychange", () => {
-  if (document.hidden || !state.token) return;
-  loadMachines();
-  pollEvents();
+  if (!state.token) return;
+  if (document.hidden) {
+    markSeen();
+    return;
+  }
+  const away = Date.now() - Number(prefs.get("aios_seen_at", 0));
+  loadMachines().then(() => (away > SESSION_RESET_MS ? beginSession(true) : pollEvents()));
   requestStream();
   startFrameLoop();
   refreshFrame();

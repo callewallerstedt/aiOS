@@ -379,6 +379,31 @@ h3 { font-size: 17px; letter-spacing: -.02em; font-weight: 700; margin: 0 0 16px
 .entry.muted .entry-title strong { font-size: 11.5px; font-weight: 500; color: var(--text-3); }
 .entry.muted .entry-body { padding-top: 1px; }
 
+/* history */
+.history-banner {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 8px 16px; border-bottom: 1px solid var(--line);
+  background: var(--surface); color: var(--text-2); font-size: 12px;
+}
+.history-banner.hidden { display: none; }
+.history-banner > span { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.history-banner .chip { flex: 0 0 auto; }
+.history-list { display: grid; gap: 4px; max-height: 46vh; overflow-y: auto; margin-bottom: 6px; }
+.history-row {
+  display: grid; grid-template-columns: 10px minmax(0, 1fr); align-items: center; gap: 11px;
+  width: 100%; padding: 11px 12px; border: 0; border-radius: var(--r-md);
+  background: var(--surface-2); color: var(--text); text-align: left; cursor: pointer;
+}
+.history-row.on { background: var(--surface-3); box-shadow: inset 0 0 0 1px var(--line-2); }
+.history-text { display: grid; gap: 2px; min-width: 0; }
+.history-text strong { font-size: 13.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.history-text small { color: var(--text-3); font-size: 11px; }
+.history-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--surface-3); }
+.history-dot.open { background: var(--red); animation: pulse 1.6s ease-in-out infinite; }
+.history-dot.done { background: #46d17f; }
+.history-dot.failed { background: var(--red); }
+.history-dot.stopped, .history-dot.ended { background: var(--text-3); }
+
 .entry .entry-cost {
   margin-top: 5px; color: var(--text); font-size: 13.5px; font-weight: 640;
   font-variant-numeric: tabular-nums;

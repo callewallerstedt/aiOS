@@ -45,6 +45,7 @@
   <symbol id="i-pc" viewBox="0 0 24 24"><rect x="4" y="3.5" width="16" height="17" rx="2.5"/><path d="M8 8h8M8 12h8M8 16h4"/></symbol>
   <symbol id="i-warn" viewBox="0 0 24 24"><path d="M12 8v5M12 16.5v.01"/><circle cx="12" cy="12" r="8.5"/></symbol>
   <symbol id="i-edit" viewBox="0 0 24 24"><path d="M5 19h3l9.5-9.5a2.1 2.1 0 0 0-3-3L5 16v3Z"/></symbol>
+  <symbol id="i-history" viewBox="0 0 24 24"><path d="M12 8v4.5l3 1.8"/><path d="M3.6 9.2A8.6 8.6 0 1 1 3 12.6"/><path d="M3.2 4.8v4.6h4.6"/></symbol>
 </svg>
 
 <!-- ───────────────────────── AUTH ───────────────────────── -->
@@ -156,10 +157,15 @@
           </div>
         </div>
         <div class="run-actions">
+          <button id="historyBtn" class="iconbtn sm" type="button" aria-label="Previous runs"><svg class="ic"><use href="#i-history"/></svg></button>
           <button id="filterBtn" class="ghostbtn" type="button">All</button>
           <button id="clearChatBtn" class="iconbtn sm" type="button" aria-label="Clear timeline"><svg class="ic"><use href="#i-trash"/></svg></button>
           <button id="stopBtn" class="stopbtn hidden" type="button"><svg class="ic"><use href="#i-stop"/></svg>Stop</button>
         </div>
+      </div>
+      <div id="historyBanner" class="history-banner hidden">
+        <span id="historyBannerText">Viewing a past run</span>
+        <button id="backToLiveBtn" class="chip" type="button">Back to live</button>
       </div>
       <div id="timeline" class="timeline">
         <div class="timeline-empty">
@@ -222,6 +228,14 @@
   <div id="machineOptions" class="options"></div>
   <button id="renameBtn" class="btn btn-quiet btn-block"><svg class="ic"><use href="#i-edit"/></svg> Rename this computer</button>
   <button id="addMachineBtn" class="btn btn-quiet btn-block"><svg class="ic"><use href="#i-plus"/></svg> Pair another PC</button>
+</section>
+
+<section id="historySheet" class="sheet hidden" role="dialog" aria-modal="true">
+  <div class="grabber"></div>
+  <h3>History</h3>
+  <p class="sheet-copy">Runs from this computer. Your timeline starts clean each time you come back.</p>
+  <div id="historyList" class="history-list"></div>
+  <button id="clearHistoryBtn" class="btn btn-quiet btn-block"><svg class="ic"><use href="#i-trash"/></svg> Clear history</button>
 </section>
 
 <section id="monitorSheet" class="sheet hidden" role="dialog" aria-modal="true">
