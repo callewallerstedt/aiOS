@@ -404,6 +404,17 @@ h3 { font-size: 17px; letter-spacing: -.02em; font-weight: 700; margin: 0 0 16px
 .history-dot.failed { background: var(--red); }
 .history-dot.stopped, .history-dot.ended { background: var(--text-3); }
 
+.entry-list { margin: 6px 0 0; padding: 0; list-style: none; display: grid; gap: 3px; }
+.entry-list li {
+  position: relative; padding-left: 13px; color: var(--text-2);
+  font-size: 12.5px; line-height: 1.45; overflow-wrap: anywhere;
+}
+.entry-list li::before {
+  content: ""; position: absolute; left: 2px; top: 8px;
+  width: 4px; height: 4px; border-radius: 50%; background: var(--text-3);
+}
+.entry.err .entry-list li::before { background: var(--red); }
+
 .entry .entry-cost {
   margin-top: 5px; color: var(--text); font-size: 13.5px; font-weight: 640;
   font-variant-numeric: tabular-nums;

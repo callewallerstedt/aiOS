@@ -943,7 +943,30 @@ function describe(event) {
   if (type === "command") return { kind: "entry", tone: "muted", glyph: "bolt", title: "Task received" };
   if (type === "run_start") return { kind: "entry", tone: "muted", glyph: "bolt", title: text(payload.task) || "Task started" };
   if (type === "planning_begin") return { kind: "entry", tone: "think", glyph: "spark", title: `Planning with ${text(payload.model) || "planner"}` };
-  if (type === "plan") return { kind: "entry", tone: "think", glyph: "spark", title: "Plan ready", body: text(payload.plan) };
+  if (type === "plan") {
+    const todo = Array.isArray(payload.todo) ? payload.todo : [];
+    const checks = Array.isArray(payload.done_when) ? payload.done_when : [];
+    return {
+      kind: "entry", tone: "think", glyph: "spark",
+      title: todo.length ? `Plan ready · ${todo.length} steps` : "Plan ready",
+      body: text(payload.plan),
+      list: todo.map((item, index) => `${index + 1}. ${item}`),
+      extra: checks.length ? `Done when: ${checks.join(" · ")}` : ""
+    };
+  }
+  if (type === "verify_begin") {
+    return { kind: "entry", tone: "think muted", glyph: "check", title: "Checking it really did the task" };
+  }
+  if (type === "verified") {
+    const passed = String(payload.verdict) === "pass";
+    const missing = Array.isArray(payload.missing) ? payload.missing : [];
+    return {
+      kind: "entry", tone: passed ? "ok" : "err", glyph: passed ? "check" : "warn",
+      title: passed ? "Checked — the task is done" : "Not done yet",
+      body: text(payload.reason),
+      list: missing.map((item) => `Still missing: ${item}`)
+    };
+  }
   if (type === "debug_dir" || type === "step_end") return null;
 
   if (type === "thought") {
@@ -994,7 +1017,8 @@ function describe(event) {
       : "";
     return {
       kind: "entry", tone: ok ? "ok" : "err", glyph: ok ? "check" : "stop",
-      title: ok ? "Finished" : stopped ? "Stopped" : "Run ended",
+      title: ok ? (payload.verified ? "Finished · checked" : "Finished")
+        : stopped ? "Stopped" : "Run ended",
       body: text(payload.message),
       cost: costLine(payload.cost),
       mono: usageText,
@@ -1085,6 +1109,16 @@ function addEvent(event, pending = false) {
       cost.className = "entry-cost";
       cost.textContent = info.cost;
       body.appendChild(cost);
+    }
+    if (info.list?.length) {
+      const list = document.createElement("ul");
+      list.className = "entry-list";
+      for (const item of info.list) {
+        const row = document.createElement("li");
+        row.textContent = item;
+        list.appendChild(row);
+      }
+      body.appendChild(list);
     }
     if (info.mono) {
       const mono = document.createElement("p");

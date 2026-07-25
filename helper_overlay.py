@@ -6051,6 +6051,14 @@ class HelperOverlay:
         elif kind == "plan":
             record["model"] = event.get("model", "")
             record["plan"] = (event.get("plan") or "")[:8000]
+            record["todo"] = [str(item)[:240] for item in (event.get("todo") or [])][:12]
+            record["done_when"] = [str(item)[:200] for item in (event.get("done_when") or [])][:8]
+        elif kind == "verify_begin":
+            record["model"] = event.get("model", "")
+        elif kind == "verified":
+            record["verdict"] = event.get("verdict", "")
+            record["reason"] = (event.get("reason") or "")[:400]
+            record["missing"] = [str(item)[:200] for item in (event.get("missing") or [])][:6]
         elif kind == "action_done":
             result = event.get("result") or {}
             atype = (result.get("action") or {}).get("type") or "?"
@@ -6081,6 +6089,7 @@ class HelperOverlay:
             record["ok"] = bool(event.get("ok"))
             record["steps"] = event.get("steps")
             record["message"] = event.get("message", "")
+            record["verified"] = bool(event.get("verified"))
             record["usage"] = event.get("usage") or {}
             try:
                 record["cost"] = model_pricing.estimate_cost(
@@ -6165,6 +6174,24 @@ class HelperOverlay:
             self._agent_operator_log_line("step", f"\n[{self._ts()}] Planning with {event.get('model', 'planner')}\n")
         elif kind == "plan":
             self._agent_operator_log_line("status", (event.get("plan") or "").rstrip() + "\n")
+            todo = event.get("todo") or []
+            if todo:
+                self._agent_operator_log_line("status", "TODO:\n")
+                for index, item in enumerate(todo, 1):
+                    self._agent_operator_log_line("dim", f"  {index}. {item}\n")
+            for item in event.get("done_when") or []:
+                self._agent_operator_log_line("dim", f"  done when: {item}\n")
+        elif kind == "verify_begin":
+            if self.agent_operator_status_var:
+                self.agent_operator_status_var.set("Checking the result")
+            self._agent_operator_log_line("step", f"\n[{self._ts()}] Checking whether the task is really done\n")
+        elif kind == "verified":
+            passed = str(event.get("verdict")) == "pass"
+            self._agent_operator_log_line(
+                "ok" if passed else "err",
+                f"CHECK {'passed' if passed else 'failed'}: {event.get('reason', '')}\n")
+            for item in event.get("missing") or []:
+                self._agent_operator_log_line("err", f"  still missing: {item}\n")
         elif kind == "screenshot":
             self.agent_operator_current_image = event.get("image")
             self._agent_operator_redraw_preview()

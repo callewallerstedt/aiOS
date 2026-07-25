@@ -1,6 +1,7 @@
 import base64
 import io
 import json
+import os
 import re
 import threading
 from typing import Any
@@ -19,7 +20,14 @@ def client():
         if not config.OPENAI_API_KEY:
             raise RuntimeError("OPENAI_API_KEY missing. Copy .env.example to .env and set it.")
         from openai import OpenAI
-        _client = OpenAI(api_key=config.OPENAI_API_KEY)
+        # The SDK defaults to a 10-minute timeout with retries on top, so one
+        # stalled request looks exactly like a frozen agent. Fail fast enough
+        # that the loop can report it and move on.
+        _client = OpenAI(
+            api_key=config.OPENAI_API_KEY,
+            timeout=float(os.environ.get("AIOS_MODEL_TIMEOUT", "150")),
+            max_retries=2,
+        )
     return _client
 
 

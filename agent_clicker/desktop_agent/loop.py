@@ -21,7 +21,17 @@ from PIL import Image
 from agent import vlm
 
 
-def _system_info_block() -> str:
+def _now_block() -> str:
+    """The clock, spelled out. Models reason badly about "tomorrow" without it."""
+    now = datetime.now(timezone.utc).astimezone()
+    tz = now.strftime("%Z") or now.strftime("%z")
+    return (
+        f"Now: {now.strftime('%A %d %B %Y, %H:%M')} ({tz}, UTC{now.strftime('%z')}) · "
+        f"ISO {now.strftime('%Y-%m-%d')} · week {now.isocalendar().week}"
+    )
+
+
+def _system_info_block(monitor=None, shell_enabled: bool = False) -> str:
     try:
         host = socket.gethostname()
     except Exception:
@@ -34,19 +44,28 @@ def _system_info_block() -> str:
         lang = locale.getdefaultlocale()[0] or "?"
     except Exception:
         lang = "?"
-    now = datetime.now(timezone.utc).astimezone()
-    tz = now.strftime("%Z") or now.strftime("%z")
+    screen = ""
+    if monitor is not None:
+        screen = (f"Screen: {getattr(monitor, 'width', '?')}x{getattr(monitor, 'height', '?')} "
+                  f"at ({getattr(monitor, 'left', 0)},{getattr(monitor, 'top', 0)}) "
+                  f"— {getattr(monitor, 'label', 'display')}\n")
     return (
         "--- SYSTEM INFO ---\n"
         f"OS: {platform.system()} {platform.release()} ({platform.version()})\n"
         f"Machine: {platform.machine()}\n"
         f"User: {user}@{host}\n"
         f"Locale: {lang}\n"
-        f"Local time: {now.strftime('%Y-%m-%d %H:%M:%S')} {tz}\n"
+        + screen
+        + f"PowerShell available: {'yes' if shell_enabled else 'no'}\n"
+        + f"{_now_block()}\n"
+        "Anything relative — today, tomorrow, this Friday, next month, "
+        "'the latest' — is measured from that clock. Each step's CONTEXT line "
+        "carries the current time; use it instead of guessing.\n"
         "--- END SYSTEM INFO ---\n"
     )
 from agent.config import MODEL as DEFAULT_MODEL
 from .prompts import SYSTEM_PROMPT
+from .progress import LoopWatch, action_signature, checklist_block, frame_fingerprint, parse_plan
 from .screen import Monitor, capture
 from .actions import execute, ExecResult, any_button_held, any_key_held, release_all
 
@@ -56,10 +75,45 @@ DEBUG_ROOT = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "debug_runs")
 
 PLANNER_SYSTEM_PROMPT = """You are the pre-run planner for a desktop computer-use agent.
-Study the user's task and current screenshot, then make a concise, robust execution plan.
-Identify the likely app, the safest sequence of UI goals, checkpoints to verify, and any
-important ambiguity. Do not emit clicks or coordinates and do not claim the task is done.
-Return exactly one JSON object: {"plan":"clear numbered plan"}."""
+Study the user's task and current screenshot, then produce a short execution plan AND a
+todo list the agent will tick off as it works.
+
+Return exactly one JSON object:
+
+{
+  "plan":      "a few sentences: the app to use, the approach, the risky parts",
+  "todo":      ["one concrete milestone per item, in order, 3-10 items"],
+  "done_when": ["observable end conditions someone could confirm from a screenshot"]
+}
+
+Rules:
+- Each todo item is a milestone the agent can finish and see finished, not a
+  mouse movement. "Open the compose window" — not "click at 1200,400".
+- done_when describes what the SCREEN must show when the task is genuinely
+  complete, in the user's terms. If the user asked to send something, the
+  proof is that it was sent — not that a draft exists.
+- Cover the whole of the user's request, including parts that are easy to
+  forget (attachments, recipients, saving, confirming a dialog).
+- No coordinates. Never claim the task is already done."""
+
+VERIFIER_SYSTEM_PROMPT = """You check whether a desktop computer-use agent actually did
+what the user asked, before the run is allowed to finish.
+
+You are given the user's TASK, the agent's own closing message, its todo list and
+end conditions, and the FINAL SCREENSHOT of the desktop.
+
+Return exactly one JSON object:
+
+{"verdict":"pass"|"fail", "reason":"one line of evidence", "missing":["what is still undone"]}
+
+Judge from the screenshot, not from the agent's confidence. The agent claiming
+success is not evidence. If the screen does not show the requested outcome, or
+shows only part of it, the verdict is "fail" and `missing` says exactly what is
+left. Be fair: judge the user's request as asked, not a stricter version of it,
+and pass work that is genuinely finished even if the route differed from the
+plan. If the task's result simply cannot be confirmed from a screenshot (it
+happened in a file, or off-screen), say so in `reason` and pass unless
+something visible contradicts it."""
 
 
 def _slug(s: str, maxlen: int = 40) -> str:
@@ -305,7 +359,7 @@ class AgentLoop:
              user_context="", planner_model=""):
         attachments = attachments or []
         user_context = (user_context or "").strip()
-        effective_system = SYSTEM_PROMPT + "\n\n" + _system_info_block()
+        effective_system = SYSTEM_PROMPT + "\n\n" + _system_info_block(monitor, shell_enabled)
         if user_context:
             effective_system = (
                 effective_system
@@ -313,7 +367,16 @@ class AgentLoop:
                 + user_context
                 + "\n--- END USER CONTEXT ---\n"
             )
+        # Pinned messages survive history trimming. The task, the plan and the
+        # user's own follow-ups are exactly what a long run must not forget —
+        # and dropping them at step nine is why long runs used to wander.
+        pinned_msgs: list[dict] = []
         history_msgs: list[dict] = []
+        plan_data = {"plan": "", "todo": [], "done_when": []}
+        watch = LoopWatch()
+        verify_failures = 0
+        last_status = ""
+        rec_actions_last = 0
         last_was_ask = False
         # Mid-step trail: screenshots captured AFTER actions in the prior step,
         # attached to the NEXT user message so the model sees the process.
@@ -431,7 +494,9 @@ class AgentLoop:
 
         try:
             planner_model = (planner_model or "").strip()
-            if planner_model and planner_model.lower() not in {"off", "none", "disabled"}:
+            if planner_model.lower() in {"off", "none", "disabled"}:
+                planner_model = ""  # never let "off" reach the API as a model name
+            if planner_model:
                 if self._stop.is_set():
                     self.on_event({"type": "done", "ok": False, "message": "stopped by user", "steps": 0})
                     return
@@ -456,21 +521,18 @@ class AgentLoop:
                         reasoning_effort="high",
                     )
                     _add_usage(vlm.take_last_usage())
-                    parsed_plan = vlm.parse_json_lenient(raw_plan)
-                    plan = str(parsed_plan.get("plan") or "").strip()[:8000]
-                    if not plan:
+                    plan_data = parse_plan(vlm.parse_json_lenient(raw_plan))
+                    if not plan_data["plan"] and not plan_data["todo"]:
                         raise ValueError("planner returned an empty plan")
-                    history_msgs.append({
-                        "role": "user",
-                        "content": (
-                            "PRE-RUN PLAN from the planning model:\n"
-                            f"{plan}\n\nUse this as guidance, but verify every step against the live screen "
-                            "and adapt when the UI differs."
-                        ),
-                    })
-                    self.on_event({"type": "plan", "model": planner_model, "plan": plan})
+                    self.on_event({"type": "plan", "model": planner_model,
+                                   "plan": plan_data["plan"], "todo": plan_data["todo"],
+                                   "done_when": plan_data["done_when"]})
                 except Exception as exc:
                     self.on_event({"type": "log", "msg": f"pre-run planner failed; continuing without it: {exc}"})
+
+            # Pinned first so it stays in front of the model for the whole run,
+            # with or without a planner.
+            pinned_msgs.append({"role": "user", "content": checklist_block(task, plan_data)})
 
             for n in range(1, max_steps + 1):
                 if self._stop.is_set():
@@ -490,6 +552,8 @@ class AgentLoop:
                     return
                 W, H = img.size
                 self.on_event({"type": "screenshot", "n": n, "image": img, "size": [W, H]})
+                # Did the last step's actions actually move anything?
+                screen = watch.note_screen(frame_fingerprint(img), acted=bool(rec_actions_last))
                 # Debug: save primary screenshot for this step.
                 sd = _step_dir(n)
                 if sd:
@@ -534,8 +598,10 @@ class AgentLoop:
                                 user_content.append(vlm.image_part(im_url, detail="high"))
                             except Exception:
                                 pass
-                    # Persist text into history so subsequent steps still see it.
-                    history_msgs.append({"role": "user", "content": blob})
+                    # Pin it: what the user says mid-run must outlive trimming.
+                    pinned_msgs.append({"role": "user", "content": blob})
+                    if len(pinned_msgs) > 8:
+                        del pinned_msgs[1:len(pinned_msgs) - 7]
                     last_was_ask = False
                 # 2.0) First-turn user attachments (images / text files).
                 if n == 1 and attachments:
@@ -570,17 +636,31 @@ class AgentLoop:
                         user_content.append(vlm.image_part(trail_url, detail="low"))
                     user_content.append(vlm.text_part("--- end trail ---"))
                 # 2b) Current high-detail screenshot.
+                remaining = max_steps - n
+                budget = ("This is the LAST step — finish or report honestly."
+                          if remaining == 0 else
+                          f"{remaining} step(s) left after this one."
+                          + (" Running short: go straight for the goal."
+                             if remaining <= 3 else ""))
+                # The model cannot tell that its last actions did nothing — the
+                # screenshot simply looks the same. Say it outright.
+                movement = ""
+                if rec_actions_last and not screen["moved"]:
+                    movement = ("The screen did NOT change after your last actions — they had no "
+                               "effect. Do not repeat them; try a different route.\n")
                 user_content.append(vlm.text_part(
                     f"STEP {n}/{max_steps}\nTASK: {task}\n"
+                    f"CONTEXT: {_now_block()}\n"
                     f"The screenshot image shown to you is {sent_w}x{sent_h} px "
                     f"(top-left = 0,0). Output coordinates in the SHOWN IMAGE'S "
                     f"{sent_w}x{sent_h} pixel space.\n"
-                    + (f"Previous step status: {history_msgs[-1].get('status','?')}\n"
-                       if history_msgs else "")
+                    + movement
+                    + (f"Previous step status: {last_status}\n" if last_status else "")
+                    + f"{budget}\n"
                     + "Now think and reply with JSON."
                 ))
                 user_content.append(vlm.image_part(data_url))
-                msgs = list(history_msgs) + [{"role": "user", "content": user_content}]
+                msgs = list(pinned_msgs) + list(history_msgs) + [{"role": "user", "content": user_content}]
                 # Trail is consumed; reset before this step's actions repopulate it.
                 mid_trail = []
 
@@ -624,6 +704,8 @@ class AgentLoop:
                     history_msgs.append({"role": "assistant", "content": rec.raw or ""})
                     history_msgs.append({"role": "user", "content":
                         f"Your last reply could not be parsed: {e}. Reply with ONE valid JSON object only."})
+                    rec_actions_last = 0
+                    last_status = "unparseable reply"
                     continue
                 rec.think_ms = int((time.time() - t0) * 1000)
 
@@ -645,10 +727,43 @@ class AgentLoop:
                                "elapsed_ms": rec.think_ms, "raw": rec.raw})
 
                 # 4) Terminal statuses
-                if rec.status in ("done", "fail"):
+                if rec.status == "fail":
                     self.on_event({"type": "step_end", "n": n, "record": _rec_dict(rec)})
-                    self.on_event({"type": "done", "ok": rec.status == "done",
-                                   "message": rec.message, "steps": n})
+                    self.on_event({"type": "done", "ok": False, "message": rec.message, "steps": n})
+                    return
+                if rec.status == "done":
+                    # Claiming done is not being done. Check the screen against
+                    # what the user actually asked for before ending the run.
+                    self.on_event({"type": "step_end", "n": n, "record": _rec_dict(rec)})
+                    check = self._verify_completion(
+                        task=task, plan=plan_data, closing=rec.message or rec.thought,
+                        monitor=monitor, model=(planner_model or model), backend=backend,
+                        add_usage=_add_usage, step_dir=sd,
+                    )
+                    if check:
+                        self.on_event({"type": "verified", "n": n, **check})
+                    if check and check.get("verdict") == "fail" and verify_failures < 2:
+                        verify_failures += 1
+                        missing = check.get("missing") or []
+                        pinned_msgs.append({"role": "user", "content": (
+                            "COMPLETION CHECK FAILED — the run is NOT finished.\n"
+                            f"Reason: {check.get('reason') or 'the screen does not show the requested result'}\n"
+                            + ("Still missing:\n" + "\n".join(f"  - {item}" for item in missing)
+                               if missing else "")
+                            + "\nKeep working: fix what is missing, then report done again. "
+                              "If it genuinely cannot be done, use status \"fail\" or \"ask\"."
+                        )})
+                        history_msgs.append({"role": "assistant", "content": rec.raw})
+                        last_status = "done (rejected by completion check)"
+                        watch.cleared()
+                        rec_actions_last = 0
+                        continue
+                    message = rec.message
+                    if check and check.get("verdict") == "fail":
+                        message = (message + " — completion check still disagrees: "
+                                   + str(check.get("reason") or "")).strip()
+                    self.on_event({"type": "done", "ok": True, "message": message, "steps": n,
+                                   "verified": bool(check and check.get("verdict") == "pass")})
                     return
                 if rec.status == "ask":
                     history_msgs.append({"role": "assistant", "content": rec.raw or ""})
@@ -664,9 +779,34 @@ class AgentLoop:
                     if self._stop.is_set():
                         self.on_event({"type": "done", "ok": False, "message": "stopped", "steps": n})
                         return
+                    rec_actions_last = 0
+                    last_status = "asked the user"
+                    watch.cleared()
                     continue
 
+                # 4b) Going in circles? Say so before spending another step on it.
+                watch.note_actions(action_signature(rec.actions))
+                stuck = watch.verdict(n)
+                if stuck["level"] == "abort":
+                    self.on_event({"type": "log", "msg": f"stuck: {stuck['reason']}"})
+                    self.on_event({"type": "step_end", "n": n, "record": _rec_dict(rec)})
+                    self.on_event({"type": "done", "ok": False, "steps": n, "message": (
+                        f"Stopped: no progress — {stuck['reason']}. "
+                        "The screen stopped responding to these actions, so the run was "
+                        "ended instead of repeating them. Tell me what to try instead.")})
+                    return
+                if stuck["level"] == "nudge":
+                    history_msgs.append({"role": "user", "content": (
+                        f"PROGRESS WARNING: {stuck['reason']}. What you are doing is not "
+                        "working. Do NOT repeat it. Look at the screenshot again and pick a "
+                        "different route: a different element, keyboard instead of mouse, "
+                        "scroll to reveal what you need, or the shell if it is enabled. "
+                        "If nothing can work here, say so with status \"ask\" or \"fail\" "
+                        "instead of trying again.")})
+                    self.on_event({"type": "log", "msg": f"nudged: {stuck['reason']}"})
+
                 # 5) Execute actions
+                rec_actions_last = len(rec.actions)
                 t0 = time.time()
                 for i, action in enumerate(rec.actions):
                     if self._stop.is_set():
@@ -732,9 +872,9 @@ class AgentLoop:
                     self.on_event({"type": "done", "ok": False, "message": "stopped by user", "steps": n})
                     return
                 history_msgs.append({"role": "assistant", "content": rec.raw})
+                ok_count = sum(1 for r in rec.results if r["ok"])
                 lines = [f"Step {n} executed {len(rec.results)} actions, "
-                         f"{sum(1 for r in rec.results if r['ok'])} ok. "
-                         f"Status was '{rec.status}'."]
+                         f"{ok_count} ok. Status was '{rec.status}'."]
                 # surface any rich output (shell stdout/stderr etc.) verbatim
                 for i, r in enumerate(rec.results):
                     if r.get("output"):
@@ -742,10 +882,14 @@ class AgentLoop:
                     elif not r["ok"]:
                         lines.append(f"[action {i} FAILED] {r['detail']}")
                 history_msgs.append({"role": "user", "content": "\n".join(lines)})
+                last_status = rec.status
 
-                # Keep history bounded (avoid runaway context).
+                # Keep history bounded — in whole assistant/user pairs, so the
+                # trimmed conversation never starts on a dangling reply.
                 if len(history_msgs) > 16:
                     history_msgs = history_msgs[-16:]
+                    if history_msgs and history_msgs[0].get("role") == "user":
+                        history_msgs = history_msgs[1:]
 
                 # Debug: dump per-step actions + results + parsed thought.
                 if sd:
@@ -763,8 +907,25 @@ class AgentLoop:
 
                 self.on_event({"type": "step_end", "n": n, "record": _rec_dict(rec)})
 
-            self.on_event({"type": "done", "ok": False, "message": "max_steps reached",
-                           "steps": max_steps})
+            # Out of steps. Check anyway: agents often finish the work and then
+            # forget to say so, and if it isn't finished the user deserves to
+            # know exactly what is left rather than "max_steps reached".
+            check = self._verify_completion(
+                task=task, plan=plan_data, closing="(ran out of steps)",
+                monitor=monitor, model=(planner_model or model), backend=backend,
+                add_usage=_add_usage,
+            )
+            if check:
+                self.on_event({"type": "verified", "n": max_steps, **check})
+            passed = bool(check and check.get("verdict") == "pass")
+            missing = "; ".join(check.get("missing") or []) if check else ""
+            self.on_event({
+                "type": "done", "ok": passed, "steps": max_steps, "verified": passed,
+                "message": ("Ran out of steps, but the check says the task is done: "
+                            + str(check.get("reason") or "") if passed else
+                            "Ran out of steps before finishing."
+                            + (f" Still missing: {missing}" if missing else "")),
+            })
         except Exception as e:
             self.on_event({"type": "log", "msg": f"FATAL: {e}\n{traceback.format_exc()}"})
             self.on_event({"type": "done", "ok": False, "message": f"fatal: {e}", "steps": 0})
@@ -790,6 +951,60 @@ class AgentLoop:
 
     def _fire_click_event(self, x: int, y: int, button: str):
         self.on_event({"type": "click_fx", "x": x, "y": y, "button": button})
+
+    def _verify_completion(self, *, task, plan, closing, monitor, model, backend,
+                           add_usage, step_dir=None) -> dict:
+        """Ask a second opinion whether the task is really finished.
+
+        Returns {} when the check itself could not run — a broken checker must
+        never hold a finished run hostage.
+        """
+        self.on_event({"type": "verify_begin", "model": model})
+        try:
+            image = capture(monitor)
+            url, _ = vlm.encode_image(image)
+            wanted = ""
+            if plan.get("done_when"):
+                wanted = "\nThe plan said this is done when:\n" + "\n".join(
+                    f"  - {item}" for item in plan["done_when"])
+            todo = ""
+            if plan.get("todo"):
+                todo = "\nThe todo list was:\n" + "\n".join(
+                    f"  {index}. {item}" for index, item in enumerate(plan["todo"], 1))
+            content = [
+                vlm.text_part(
+                    f"TASK the user asked for: {task}\n"
+                    f"{_now_block()}\n"
+                    f"The agent says it is finished. Its closing message: {closing or '(none)'}"
+                    f"{todo}{wanted}\n\n"
+                    "Here is the desktop right now. Did it actually do what the user asked?"
+                ),
+                vlm.image_part(url, detail="high"),
+            ]
+            raw = vlm.chat_raw(VERIFIER_SYSTEM_PROMPT, [{"role": "user", "content": content}],
+                               model=model, backend=backend, reasoning_effort="low")
+            add_usage(vlm.take_last_usage())
+            parsed = vlm.parse_json_lenient(raw)
+            verdict = str(parsed.get("verdict") or "").strip().lower()
+            if verdict not in {"pass", "fail"}:
+                verdict = "pass"
+            result = {
+                "verdict": verdict,
+                "reason": str(parsed.get("reason") or "").strip()[:400],
+                "missing": [str(item).strip()[:200]
+                            for item in (parsed.get("missing") or []) if str(item).strip()][:6],
+            }
+            if step_dir:
+                try:
+                    image.save(os.path.join(step_dir, "verify.png"))
+                    with open(os.path.join(step_dir, "verify.json"), "w", encoding="utf-8") as fh:
+                        json.dump({"raw": raw, **result}, fh, indent=2)
+                except Exception:
+                    pass
+            return result
+        except Exception as exc:
+            self.on_event({"type": "log", "msg": f"completion check skipped: {exc}"})
+            return {}
 
 
 def _exec_dict(r: ExecResult) -> dict:
