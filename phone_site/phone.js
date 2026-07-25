@@ -64,7 +64,14 @@ const state = {
   installPrompt: null,
   wakeLock: null,
   stickBottom: true,
-  lastStep: null
+  lastStep: null,
+  clarifierTimer: null,
+  clarifierTimeout: null,
+  clarifierSequence: 0,
+  clarifierRequestId: "",
+  clarifierDraft: "",
+  clarifierQuestions: [],
+  clarifierLoading: false
 };
 
 /* ── helpers ──────────────────────────────────────────── */
@@ -292,6 +299,7 @@ function selectMachine(id) {
   prefs.set("aios_machine_id", id);
   resetTimeline("Loading this computer’s activity…");
   clearMarkers();
+  clearClarifier();
   $("#screenImage").classList.remove("loaded");
   $("#screenPlaceholder").classList.remove("hidden");
   renderMachine();
@@ -743,7 +751,10 @@ async function pollEvents() {
   try {
     const data = await api(`/api/machines/${encodeURIComponent(id)}/events?since=${state.cursor}`);
     if (id !== state.machineId || version !== state.feedVersion) return;
-    for (const event of data.events || []) addEvent(event);
+    for (const event of data.events || []) {
+      if (String(event.type || "").toLowerCase() === "clarification") applyClarification(event.payload || {});
+      else addEvent(event);
+    }
     state.cursor = Number(data.cursor || state.cursor);
   } catch (error) {
     console.debug(error);
@@ -800,6 +811,113 @@ function autoGrow() {
   input.style.height = "auto";
   input.style.height = `${Math.min(input.scrollHeight, window.innerHeight * 0.34)}px`;
   $("#suggestions").classList.toggle("hidden", Boolean(input.value.trim()) || state.running);
+}
+
+function clearClarifier(clearQuestions = true) {
+  clearTimeout(state.clarifierTimer);
+  clearTimeout(state.clarifierTimeout);
+  state.clarifierTimer = null;
+  state.clarifierTimeout = null;
+  state.clarifierLoading = false;
+  state.clarifierRequestId = "";
+  state.clarifierDraft = "";
+  if (clearQuestions) state.clarifierQuestions = [];
+  $("#clarifier").classList.add("hidden");
+}
+
+function renderClarifier() {
+  const panel = $("#clarifier");
+  const list = $("#clarifierQuestions");
+  const questions = state.clarifierQuestions || [];
+  if (!state.clarifierLoading && !questions.length) {
+    panel.classList.add("hidden");
+    return;
+  }
+  panel.classList.remove("hidden");
+  panel.classList.toggle("loading", state.clarifierLoading);
+  list.replaceChildren();
+
+  const openCount = questions.filter((question) => !question.answered).length;
+  $("#clarifierStatus").textContent = state.clarifierLoading
+    ? (questions.length ? "Updating…" : "Reading your draft…")
+    : openCount ? `${openCount} ${openCount === 1 ? "detail" : "details"} to decide` : "Covered";
+
+  for (const question of questions) {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = `clarifier-question${question.answered ? " answered" : ""}`;
+    row.setAttribute("aria-label", `${question.answered ? "Answered" : "Clarify"}: ${question.question}`);
+    const check = document.createElement("span");
+    check.className = "clarifier-check";
+    check.appendChild(icon("check"));
+    const text = document.createElement("p");
+    text.textContent = question.question;
+    const answer = document.createElement("span");
+    answer.className = "clarifier-answer";
+    answer.textContent = question.answered ? "covered" : "";
+    row.append(check, text, answer);
+    row.addEventListener("click", () => {
+      const input = $("#promptInput");
+      input.focus();
+      input.setSelectionRange(input.value.length, input.value.length);
+      buzz();
+    });
+    list.appendChild(row);
+  }
+}
+
+function scheduleClarification() {
+  clearTimeout(state.clarifierTimer);
+  const draft = $("#promptInput").value.trim();
+  const machine = currentMachine();
+  if (draft.length < 10 || !machine?.online || !state.token) {
+    clearClarifier();
+    return;
+  }
+  state.clarifierTimer = setTimeout(() => requestClarification(draft), 700);
+}
+
+async function requestClarification(draft) {
+  if ($("#promptInput").value.trim() !== draft) return;
+  const requestId = `${state.machineId}:${Date.now()}:${++state.clarifierSequence}`;
+  state.clarifierRequestId = requestId;
+  state.clarifierDraft = draft;
+  state.clarifierLoading = true;
+  renderClarifier();
+  clearTimeout(state.clarifierTimeout);
+  state.clarifierTimeout = setTimeout(() => {
+    if (state.clarifierRequestId !== requestId) return;
+    state.clarifierLoading = false;
+    renderClarifier();
+  }, 20000);
+  try {
+    await sendCommand("clarify", {
+      draft,
+      request_id: requestId,
+      previous: state.clarifierQuestions.map(({ id, question, answered }) => ({ id, question, answered }))
+    });
+  } catch {
+    if (state.clarifierRequestId !== requestId) return;
+    state.clarifierLoading = false;
+    renderClarifier();
+  }
+}
+
+function applyClarification(payload) {
+  if (!payload || payload.request_id !== state.clarifierRequestId) return;
+  if ($("#promptInput").value.trim() !== state.clarifierDraft) return;
+  clearTimeout(state.clarifierTimeout);
+  state.clarifierLoading = false;
+  if (payload.ok !== false && Array.isArray(payload.questions)) {
+    state.clarifierQuestions = payload.questions.slice(0, 3)
+      .filter((question) => question?.question)
+      .map((question) => ({
+        id: String(question.id || "question"),
+        question: String(question.question || "").trim(),
+        answered: Boolean(question.answered)
+      }));
+  }
+  renderClarifier();
 }
 
 function openScreen() {
@@ -864,6 +982,7 @@ function startDictation() {
     $("#promptInput").value = interim ? `${recognitionBase} ${interim.trim()}`.trim() : recognitionBase;
     $("#listeningText").textContent = interim || "Listening…";
     autoGrow();
+    scheduleClarification();
   };
   recognition.onerror = (event) => {
     stopDictation();
@@ -1131,7 +1250,10 @@ $("#clearChatBtn").addEventListener("click", async () => {
   }
 });
 
-$("#promptInput").addEventListener("input", autoGrow);
+$("#promptInput").addEventListener("input", () => {
+  autoGrow();
+  scheduleClarification();
+});
 $("#promptInput").addEventListener("keydown", (event) => {
   if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
     event.preventDefault();
@@ -1141,6 +1263,7 @@ $("#promptInput").addEventListener("keydown", (event) => {
 $$(".sugg").forEach((button) => button.addEventListener("click", () => {
   $("#promptInput").value = button.textContent;
   autoGrow();
+  scheduleClarification();
   $("#promptInput").focus();
 }));
 
@@ -1167,6 +1290,7 @@ $("#promptForm").addEventListener("submit", async (event) => {
       reasoning_effort: state.effort
     });
     $("#promptInput").value = "";
+    clearClarifier();
     autoGrow();
     if (!machine?.online) toast("Queued until that computer reconnects");
   } catch (error) {

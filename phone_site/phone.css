@@ -406,6 +406,40 @@ h3 { font-size: 17px; letter-spacing: -.02em; font-weight: 700; margin: 0 0 16px
 }
 .sugg:active { background: var(--surface-2); color: var(--text); }
 
+.clarifier {
+  margin: 0 0 8px; padding: 10px;
+  border: 1px solid var(--line); border-radius: 15px;
+  background: linear-gradient(145deg, rgba(255,255,255,.055), rgba(255,255,255,.025));
+  box-shadow: 0 10px 30px rgba(0,0,0,.18);
+  animation: rise .18s ease;
+}
+.clarifier-head { display: flex; align-items: center; gap: 8px; min-height: 20px; }
+.clarifier-title { display: inline-flex; align-items: center; gap: 6px; color: var(--text); font-size: 11.5px; font-weight: 720; letter-spacing: .01em; }
+.clarifier-spark { color: var(--red); font-size: 13px; }
+.clarifier-status { margin-left: auto; color: var(--text-3); font-size: 10.5px; }
+.clarifier.loading .clarifier-status::before {
+  content: ""; display: inline-block; width: 5px; height: 5px; margin: 0 6px 1px 0;
+  border-radius: 50%; background: var(--red); animation: pulse 1s ease-in-out infinite;
+}
+.clarifier-questions { display: grid; gap: 6px; margin-top: 8px; }
+.clarifier-question {
+  width: 100%; display: grid; grid-template-columns: 22px minmax(0,1fr) auto; align-items: center; gap: 8px;
+  min-height: 38px; padding: 7px 9px; text-align: left;
+  border: 1px solid var(--line); border-radius: 11px;
+  background: rgba(0,0,0,.13); color: var(--text-2);
+}
+.clarifier-question:active { background: var(--surface-2); }
+.clarifier-check {
+  width: 20px; height: 20px; display: grid; place-items: center;
+  border: 1px solid var(--line-2); border-radius: 50%; color: transparent;
+}
+.clarifier-check .ic { width: 12px; height: 12px; }
+.clarifier-question p { margin: 0; font-size: 12.5px; line-height: 1.3; }
+.clarifier-answer { color: var(--text-3); font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; }
+.clarifier-question.answered { opacity: .66; }
+.clarifier-question.answered .clarifier-check { border-color: #46d17f; background: rgba(70,209,127,.14); color: #46d17f; }
+.clarifier-question.answered p { text-decoration: line-through; text-decoration-color: var(--text-3); }
+
 .composer {
   border: 1px solid var(--line-2); border-radius: var(--r-lg);
   background: var(--surface);

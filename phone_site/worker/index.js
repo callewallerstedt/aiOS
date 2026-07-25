@@ -192,9 +192,13 @@ async function handleApi(request, env, url) {
     const machine = await env.DB.prepare("SELECT id FROM machines WHERE id = ? AND account_id = ?").bind(machineId, accountId).first();
     if (!machine) return json({ error: "Computer not found." }, 404);
     const input = await body(request);
-    const allowed = new Set(["prompt", "followup", "stop", "config"]);
+    const allowed = new Set(["prompt", "followup", "stop", "config", "clarify"]);
     if (!allowed.has(input.type)) return json({ error: "Unsupported command." }, 400);
     const payload = input.payload && typeof input.payload === "object" ? input.payload : {};
+    if (input.type === "clarify") {
+      await env.DB.prepare("DELETE FROM commands WHERE machine_id = ? AND account_id = ? AND type = 'clarify' AND claimed_at IS NULL")
+        .bind(machineId, accountId).run();
+    }
     const result = await env.DB.prepare("INSERT INTO commands (account_id, machine_id, type, payload_json, created_at) VALUES (?, ?, ?, ?, ?)")
       .bind(accountId, machineId, input.type, JSON.stringify(payload), now()).run();
     return json({ ok: true, command_id: result.meta?.last_row_id }, 202);

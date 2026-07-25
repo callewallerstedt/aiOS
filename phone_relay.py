@@ -14,6 +14,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from prompt_clarifier import clarify_prompt, normalize_questions
+
 
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "helper_config.json"
@@ -202,6 +204,17 @@ class Bridge:
         if kind == "config":
             incoming = payload.get("operator") if isinstance(payload.get("operator"), dict) else payload
             return self.local_json("/api/phone/operator/config", method="POST", payload={"operator": incoming})
+        if kind == "clarify":
+            draft = str(payload.get("draft") or "").strip()[:8000]
+            request_id = str(payload.get("request_id") or "")[:100]
+            if len(draft) < 8:
+                return {"ok": True, "request_id": request_id, "questions": []}
+            helper_config = load_config()
+            api_key = str(helper_config.get("openai_api_key") or os.environ.get("OPENAI_API_KEY") or "").strip()
+            if not api_key:
+                raise RuntimeError("OpenAI API key is not configured.")
+            result = clarify_prompt(api_key, draft, normalize_questions(payload.get("previous") or []))
+            return {"ok": True, "request_id": request_id, **result}
         raise RuntimeError(f"Unsupported command: {kind}")
 
     def collect_status(self) -> dict:
@@ -290,15 +303,28 @@ class Bridge:
         self.refresh_monitors()
         response = self.remote_json("/api/agent/commands", timeout=15)
         for command in response.get("commands") or []:
+            is_clarify = str(command.get("type") or "") == "clarify"
             try:
                 result = self.execute(command)
                 self.post_events(
-                    events=[{"type": "command", "payload": {"title": "Command received", "message": command.get("type")}, "created_at": int(time.time() * 1000)}],
+                    events=[{
+                        "type": "clarification" if is_clarify else "command",
+                        "payload": result if is_clarify else {"title": "Command received", "message": command.get("type")},
+                        "created_at": int(time.time() * 1000),
+                    }],
                     command_id=command.get("id"), result=result,
                 )
             except Exception as exc:
                 self.post_events(
-                    events=[{"type": "error", "payload": {"title": "Command failed", "message": str(exc)}, "created_at": int(time.time() * 1000)}],
+                    events=[{
+                        "type": "clarification" if is_clarify else "error",
+                        "payload": ({
+                            "ok": False,
+                            "request_id": str((command.get("payload") or {}).get("request_id") or ""),
+                            "error": str(exc),
+                        } if is_clarify else {"title": "Command failed", "message": str(exc)}),
+                        "created_at": int(time.time() * 1000),
+                    }],
                     command_id=command.get("id"), result={"ok": False, "error": str(exc)},
                 )
         events = self.collect_events()

@@ -178,6 +178,13 @@
       <button type="button" class="sugg">Open my email and read the latest</button>
       <button type="button" class="sugg">Find the file I worked on last</button>
     </div>
+    <section id="clarifier" class="clarifier hidden" aria-live="polite" aria-label="Intent check">
+      <div class="clarifier-head">
+        <span class="clarifier-title"><span class="clarifier-spark">✦</span> Intent check</span>
+        <span id="clarifierStatus" class="clarifier-status">Reading your draft…</span>
+      </div>
+      <div id="clarifierQuestions" class="clarifier-questions"></div>
+    </section>
     <div class="composer">
       <textarea id="promptInput" rows="1" maxlength="8000" placeholder="Ask your computer…"></textarea>
       <div class="composer-bar">
