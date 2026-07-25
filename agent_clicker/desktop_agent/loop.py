@@ -55,6 +55,12 @@ from .actions import execute, ExecResult, any_button_held, any_key_held, release
 DEBUG_ROOT = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "debug_runs")
 
+PLANNER_SYSTEM_PROMPT = """You are the pre-run planner for a desktop computer-use agent.
+Study the user's task and current screenshot, then make a concise, robust execution plan.
+Identify the likely app, the safest sequence of UI goals, checkpoints to verify, and any
+important ambiguity. Do not emit clicks or coordinates and do not claim the task is done.
+Return exactly one JSON object: {"plan":"clear numbered plan"}."""
+
 
 def _slug(s: str, maxlen: int = 40) -> str:
     s = re.sub(r"[^A-Za-z0-9]+", "_", s).strip("_")
@@ -255,7 +261,7 @@ class AgentLoop:
               backend: str = "api", reasoning_effort: str | None = None,
               mid_screenshots: str = "key",
               attachments: list[dict] | None = None,
-              user_context: str = ""):
+              user_context: str = "", planner_model: str = ""):
         """mid_screenshots: 'off' | 'key' — capture an extra screenshot after
         each state-changing action so the next round sees the process trail.
 
@@ -273,7 +279,7 @@ class AgentLoop:
             target=self._run,
             args=(task, monitor, model, max_steps, action_delay, settle_after_step,
                   shell_enabled, shell_cwd, backend, reasoning_effort, mid_screenshots,
-                  attachments or [], user_context),
+                  attachments or [], user_context, planner_model),
             daemon=True,
         )
         self._thread.start()
@@ -296,7 +302,7 @@ class AgentLoop:
     def _run(self, task, monitor, model, max_steps, action_delay, settle_after_step,
              shell_enabled=False, shell_cwd=None, backend="api",
              reasoning_effort=None, mid_screenshots="key", attachments=None,
-             user_context=""):
+             user_context="", planner_model=""):
         attachments = attachments or []
         user_context = (user_context or "").strip()
         effective_system = SYSTEM_PROMPT + "\n\n" + _system_info_block()
@@ -328,6 +334,7 @@ class AgentLoop:
                 json.dump({
                     "task": task,
                     "model": model, "backend": backend,
+                    "planner_model": planner_model,
                     "reasoning_effort": reasoning_effort,
                     "mid_screenshots": mid_screenshots,
                     "max_steps": max_steps,
@@ -395,6 +402,47 @@ class AgentLoop:
         self.on_event = _emit  # type: ignore
 
         try:
+            planner_model = (planner_model or "").strip()
+            if planner_model and planner_model.lower() not in {"off", "none", "disabled"}:
+                if self._stop.is_set():
+                    self.on_event({"type": "done", "ok": False, "message": "stopped by user", "steps": 0})
+                    return
+                self.on_event({"type": "planning_begin", "model": planner_model})
+                try:
+                    plan_image = capture(monitor)
+                    plan_url, plan_scale = vlm.encode_image(plan_image)
+                    plan_w = max(1, int(plan_image.width * plan_scale))
+                    plan_h = max(1, int(plan_image.height * plan_scale))
+                    plan_content = [
+                        vlm.text_part(
+                            f"TASK: {task}\nCurrent screenshot: {plan_w}x{plan_h}. "
+                            "Create the execution plan for the clicking model."
+                        ),
+                        vlm.image_part(plan_url),
+                    ]
+                    raw_plan = vlm.chat_raw(
+                        PLANNER_SYSTEM_PROMPT,
+                        [{"role": "user", "content": plan_content}],
+                        model=planner_model,
+                        backend=backend,
+                        reasoning_effort="high",
+                    )
+                    parsed_plan = vlm.parse_json_lenient(raw_plan)
+                    plan = str(parsed_plan.get("plan") or "").strip()[:8000]
+                    if not plan:
+                        raise ValueError("planner returned an empty plan")
+                    history_msgs.append({
+                        "role": "user",
+                        "content": (
+                            "PRE-RUN PLAN from the planning model:\n"
+                            f"{plan}\n\nUse this as guidance, but verify every step against the live screen "
+                            "and adapt when the UI differs."
+                        ),
+                    })
+                    self.on_event({"type": "plan", "model": planner_model, "plan": plan})
+                except Exception as exc:
+                    self.on_event({"type": "log", "msg": f"pre-run planner failed; continuing without it: {exc}"})
+
             for n in range(1, max_steps + 1):
                 if self._stop.is_set():
                     self.on_event({"type": "done", "ok": False, "message": "stopped by user", "steps": n - 1})

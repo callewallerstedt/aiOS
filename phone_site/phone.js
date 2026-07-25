@@ -9,6 +9,13 @@ const MODELS = [
   { id: "sol", name: "Sol", note: "Strongest reasoning, slower" }
 ];
 
+const PLANNER_MODELS = [
+  { id: "off", name: "Off", note: "Start clicking immediately" },
+  { id: "luna", name: "Luna", note: "Fast, inexpensive planning" },
+  { id: "terra", name: "Terra", note: "Stronger planning at moderate speed" },
+  { id: "sol", name: "Sol", note: "Strongest planning before execution" }
+];
+
 const EFFORTS = [
   { id: "low", name: "Low", note: "Acts quickly" },
   { id: "medium", name: "Medium", note: "Balanced" },
@@ -39,6 +46,7 @@ const state = {
   cursor: 0,
   feedVersion: 0,
   model: prefs.get("aios_model", "luna"),
+  plannerModel: prefs.get("aios_planner_model", "sol"),
   effort: prefs.get("aios_effort", "low"),
   steps: Number(prefs.get("aios_steps", 30)),
   detailed: prefs.bool("aios_detailed", true),
@@ -562,6 +570,8 @@ function describe(event) {
   if (type === "screenshot") return { kind: "entry", tone: "muted", glyph: "monitor", title: "Looked at the screen" };
   if (type === "command") return { kind: "entry", tone: "muted", glyph: "bolt", title: "Task received" };
   if (type === "run_start") return { kind: "entry", tone: "muted", glyph: "bolt", title: text(payload.task) || "Task started" };
+  if (type === "planning_begin") return { kind: "entry", tone: "think", glyph: "spark", title: `Planning with ${text(payload.model) || "planner"}` };
+  if (type === "plan") return { kind: "entry", tone: "think", glyph: "spark", title: "Plan ready", body: text(payload.plan) };
   if (type === "debug_dir" || type === "step_end") return null;
 
   if (type === "thought") {
@@ -969,9 +979,20 @@ function openEffortSheet() {
   openSheet("effortSheet");
 }
 
+function openPlannerSheet() {
+  renderOptions($("#plannerOptions"), PLANNER_MODELS, state.plannerModel, (id) => {
+    state.plannerModel = id;
+    prefs.set("aios_planner_model", id);
+    $("#settingsPlannerValue").textContent = labelOf(PLANNER_MODELS, id);
+    closeSheets();
+  });
+  openSheet("plannerSheet");
+}
+
 $("#modelBtn").addEventListener("click", openModelSheet);
 $("#effortBtn").addEventListener("click", openEffortSheet);
 $("#settingsModelRow").addEventListener("click", openModelSheet);
+$("#settingsPlannerRow").addEventListener("click", openPlannerSheet);
 $("#settingsEffortRow").addEventListener("click", openEffortSheet);
 $("#settingsBtn").addEventListener("click", () => openSheet("settingsSheet"));
 $("#addMachineBtn").addEventListener("click", () => openSheet("pairSheet"));
@@ -1105,6 +1126,7 @@ $("#promptForm").addEventListener("submit", async (event) => {
     await sendCommand(type, {
       prompt,
       model: state.model,
+      planner_model: state.plannerModel,
       max_steps: state.steps,
       reasoning_effort: state.effort
     });
@@ -1151,6 +1173,7 @@ if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catc
 $("#modelLabel").textContent = labelOf(MODELS, state.model);
 $("#effortLabel").textContent = labelOf(EFFORTS, state.effort);
 $("#settingsModelValue").textContent = labelOf(MODELS, state.model);
+$("#settingsPlannerValue").textContent = labelOf(PLANNER_MODELS, state.plannerModel);
 $("#settingsEffortValue").textContent = labelOf(EFFORTS, state.effort);
 $("#stepsInput").value = state.steps;
 $("#wakeToggle").checked = state.keepAwake;

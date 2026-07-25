@@ -31,3 +31,7 @@ agent_clicker/_tts_test.wav
 Thumbs.db
 .sites-source/
 aios-phone-v*.tar.gz
+.aios-health.json
+.aios-helper-heartbeat
+.aios-ahk-heartbeat
+.aios-phone-relay-heartbeat

@@ -219,6 +219,13 @@
   <div id="modelOptions" class="options"></div>
 </section>
 
+<section id="plannerSheet" class="sheet hidden" role="dialog" aria-modal="true">
+  <div class="grabber"></div>
+  <h3>Planning model</h3>
+  <p class="sheet-copy">Runs once before clicking. Choose a stronger model to plan, then let a faster model execute.</p>
+  <div id="plannerOptions" class="options"></div>
+</section>
+
 <section id="effortSheet" class="sheet hidden" role="dialog" aria-modal="true">
   <div class="grabber"></div>
   <h3>Reasoning effort</h3>
@@ -243,6 +250,7 @@
   <h3>Settings</h3>
   <div class="rows">
     <button id="settingsModelRow" class="row" type="button"><span>Clicking model</span><em id="settingsModelValue">Luna</em><svg class="ic"><use href="#i-chevron"/></svg></button>
+    <button id="settingsPlannerRow" class="row" type="button"><span>Planning model</span><em id="settingsPlannerValue">Sol</em><svg class="ic"><use href="#i-chevron"/></svg></button>
     <button id="settingsEffortRow" class="row" type="button"><span>Reasoning effort</span><em id="settingsEffortValue">Low</em><svg class="ic"><use href="#i-chevron"/></svg></button>
     <label class="row"><span>Maximum steps</span><input id="stepsInput" class="row-input" type="number" inputmode="numeric" min="1" max="100" value="30"></label>
     <label class="row"><span>Detailed activity</span><input id="detailsToggle" class="switch" type="checkbox" checked></label>

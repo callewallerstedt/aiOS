@@ -18,6 +18,7 @@ import urllib.request
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "helper_config.json"
 STATE_PATH = ROOT / "phone-relay-state.json"
+HEARTBEAT_PATH = ROOT / ".aios-phone-relay-heartbeat"
 LOCAL_EVENTS_PATH = ROOT / "phone_operator_events" / "events.jsonl"
 LOCAL_BASE = "http://127.0.0.1:5000"
 DEFAULT_RELAY = os.environ.get("AIOS_RELAY_URL", "").rstrip("/")
@@ -179,6 +180,10 @@ class Bridge:
             model = MODEL_MAP.get(str(payload.get("model") or "").lower(), payload.get("model") or "gpt-5.6-luna")
             options = {
                 "model": model,
+                "planner_model": MODEL_MAP.get(
+                    str(payload.get("planner_model") or "").lower(),
+                    payload.get("planner_model") or "off",
+                ),
                 "reasoning": str(payload.get("reasoning_effort") or "low"),
                 "steps": str(payload.get("max_steps") or 30),
             }
@@ -310,6 +315,10 @@ class Bridge:
             raise RuntimeError("This PC is not paired. Open aiOS Settings → Mobile remote first.")
         print(f"aiOS Remote bridge connected as {self.machine_id}", flush=True)
         while True:
+            try:
+                HEARTBEAT_PATH.touch()
+            except OSError:
+                pass
             try:
                 self.tick()
                 self.backoff = 1.0

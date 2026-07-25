@@ -18,6 +18,12 @@ global VoiceHotkeyRegistered := ""      ; what we actually registered last
 global VoiceHotkeyDown := ""            ; the "$<key>" string we registered
 global VoiceHotkeyUp := ""              ; the "$<key> up" string we registered
 
+AiosHeartbeat() {
+    path := A_ScriptDir "\.aios-ahk-heartbeat"
+    try FileDelete(path)
+    try FileAppend(A_NowUTC, path, "UTF-8")
+}
+
 VoiceHotkeyDownHandler(*) {
     global InsertDownAt, InsertHoldActive, InsertLongFired
     if (InsertHoldActive) {
@@ -337,6 +343,8 @@ LoadVoiceConfig()
 ; Poll the config so Settings → Voice hotkey changes take effect within 2s
 ; even when the user hasn't pressed the current hotkey.
 SetTimer(LoadVoiceConfig, 1700)
+AiosHeartbeat()
+SetTimer(AiosHeartbeat, 5000)
 
 ::constantyl::constantly
 ::missspell::misspell

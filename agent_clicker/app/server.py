@@ -162,6 +162,7 @@ HELPER_CONFIG_PATH = REPO_ROOT / "helper_config.json"
 DEFAULT_OPERATOR_CONFIG = {
     "monitor": "",
     "model": "gpt-5.6-luna",
+    "planner_model": "gpt-5.6-sol",
     "reasoning": "low",
     "steps": "25",
     "delay": "0.20",

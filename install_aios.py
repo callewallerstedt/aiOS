@@ -126,7 +126,7 @@ class Installer(tk.Tk):
         self._option(body, self.codex_auth, "Sign in with Codex for chat + OPERATOR", "Recommended")
         self._option(body, self.create_agent_env, "Create Agent Clicker .env if missing", "Recommended")
         self._option(body, self.install_autohotkey, "Install AutoHotkey v2 with winget", "Only if missing")
-        self._option(body, self.add_startup, "Add aiOS hotkey launcher to Windows startup", "Asks before changing startup")
+        self._option(body, self.add_startup, "Keep aiOS running after Windows sign-in", "Recommended self-check")
         self._option(body, self.start_now, "Start aiOS after install", "Optional")
 
         # ---- Update source -------------------------------------------------
@@ -281,7 +281,7 @@ class Installer(tk.Tk):
         if self.add_startup.get():
             ok = messagebox.askyesno(
                 "Startup permission",
-                "Allow aiOS to add its AutoHotkey launcher to your Windows Startup folder?",
+                "Allow aiOS to install a per-user startup watchdog that keeps the app, hotkeys, and phone remote running?",
             )
             if not ok:
                 self.add_startup.set(False)
@@ -330,7 +330,7 @@ class Installer(tk.Tk):
             ("Writing voice defaults", self._configure_voice_defaults, self.configure_voice.get()),
             ("Signing in with Codex", self._codex_auth_flow, self.codex_auth.get()),
             ("Installing AutoHotkey", self._install_autohotkey, self.install_autohotkey.get()),
-            ("Adding startup launcher", self._add_startup, self.add_startup.get()),
+            ("Installing aiOS watchdog", self._add_startup, self.add_startup.get()),
         ]
         failures: list[str] = []
         try:
@@ -477,7 +477,7 @@ class Installer(tk.Tk):
 
     def _add_startup(self) -> None:
         if not self._find_autohotkey():
-            raise RuntimeError("AutoHotkey v2 is required before startup can be added.")
+            raise RuntimeError("AutoHotkey v2 is required for the aiOS startup hotkeys.")
         self._run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(BASE_DIR / "install-startup.ps1")])
 
     def _verify_install(self) -> None:
