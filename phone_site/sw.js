@@ -1,5 +1,5 @@
-const CACHE = "aios-remote-v5";
-const SHELL = ["/", "/phone.css", "/phone.js", "/manifest.webmanifest", "/icons/aios-icon-192.png"];
+const CACHE = "aios-remote-v6";
+const SHELL = ["./", "phone.css", "phone.js", "manifest.webmanifest", "icons/aios-icon-192.png"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(SHELL)).then(() => self.skipWaiting()));
@@ -16,5 +16,5 @@ self.addEventListener("fetch", (event) => {
     const copy = response.clone();
     caches.open(CACHE).then((cache) => cache.put(event.request, copy));
     return response;
-  }).catch(() => caches.match(event.request).then((cached) => cached || caches.match("/"))));
+  }).catch(() => caches.match(event.request).then((cached) => cached || caches.match("./"))));
 });

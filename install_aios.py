@@ -462,7 +462,7 @@ class Installer(tk.Tk):
             shutil.copy2(AGENT_ENV_EXAMPLE, AGENT_ENV)
             self.queue.put(("log", "Created agent_clicker\\.env from example.\n"))
         else:
-            AGENT_ENV.write_text("OPENAI_API_KEY=\nAGENT_MODEL=gpt-5.5\nAGENT_MAX_ROUNDS=8\nAGENT_OCR=easyocr\n", encoding="utf-8")
+            AGENT_ENV.write_text("OPENAI_API_KEY=\nAGENT_MODEL=gpt-5.6-luna\nAGENT_MAX_ROUNDS=8\nAGENT_OCR=easyocr\n", encoding="utf-8")
             self.queue.put(("log", "Created agent_clicker\\.env.\n"))
 
     def _install_autohotkey(self) -> None:

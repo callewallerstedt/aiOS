@@ -16,12 +16,14 @@
 
 aiOS is a Windows desktop overlay that gives you:
 
-- **OPERATOR** — a computer-use agent that drives your mouse + keyboard from natural language, with a phone companion ([phonesite-six.vercel.app](https://phonesite-six.vercel.app)) for follow-ups while it runs.
+- **OPERATOR** — a computer-use agent that drives your mouse + keyboard from natural language, with an installable aiOS Remote PWA for controlling multiple paired PCs, sending follow-ups, and watching live activity and screenshots.
 - **Voice dictation** — hold a hotkey, speak, release; Whisper transcribes locally.
 - **Quick chat** — overlay chat hooked to OpenAI / Codex.
 - **Project + todo dashboard** — a personal layer over a folder of markdown files.
 
 The two surfaces talk to each other on `127.0.0.1:48736`, plus a Flask server in `agent_clicker/` for the phone.
+
+Press **Ctrl+Space** to open or hide aiOS after the startup launcher is installed.
 
 ## Quick start
 
@@ -58,9 +60,19 @@ python helper_overlay.py
 OPERATOR can run in two modes:
 
 - **API mode** — set `OPENAI_API_KEY` in `agent_clicker/.env`, the system environment, or aiOS **Settings → Models**.
-- **Codex mode** — sign in once during install (`.\install-aios.ps1` opens the Codex login flow). The toggle is in the OPERATOR panel.
+- **Codex mode** — click **Sign in with Codex** in the OPERATOR panel. aiOS opens the official Codex OAuth flow, detects completion automatically, and enables Codex mode. Use **Switch account** there whenever you want to add or change the active login.
 
-The phone UI uses the same backend, so once one side is configured the phone works.
+OPERATOR defaults to `gpt-5.6-luna`, including when it uses your Codex account.
+
+### aiOS Remote on your phone
+
+1. Open [aiOS Remote](https://aios-remote-control.contact-wallerstedt.chatgpt.site) and choose **Create my private remote**.
+2. Save the private code; it is the recovery and pairing secret for your remote.
+3. On each PC, open aiOS **Settings → Mobile remote**.
+4. Paste the website URL and private code, give the computer a friendly name, and press **Connect**.
+5. Install the PWA from the browser menu or the install button.
+
+Each PC gets its own machine credential. The phone can switch computers, send a new task or follow-up, stop a run, choose a monitor, and watch live OPERATOR activity and screenshots. No inbound port or temporary tunnel is required.
 
 ## Updating
 
@@ -83,19 +95,18 @@ Clone and run as above. Useful surfaces:
 | `agent_clicker/app/server.py` | Flask server for the phone (`/api/phone/...`). |
 | `agent_clicker/desktop_agent/loop.py` | OPERATOR agent loop — screenshot → reason → act. |
 | `agent_clicker/desktop_agent/prompts.py` | OPERATOR system prompt. |
-| `phone_site/` | Static phone UI deployed to Vercel. Run `npm run build` to refresh `public/`. |
+| `phone_site/` | Installable PWA and Sites worker relay. Run `npm run build` to produce its deployable `dist/`. |
 | `aios_updater.py` | In-app updater. CLI: `python aios_updater.py check\|update\|restart`. |
 | `install_aios.py` | Installer wizard. |
 
-### Running the phone backend
+### Running the mobile bridge
 
-The phone hits `/api/phone/...` on the same machine. Run the Flask server:
+After pairing in **Settings → Mobile remote**, aiOS starts both the local Flask bridge and the secure outbound relay automatically. To start it manually:
 
 ```powershell
-python agent_clicker\app\server.py
+.\start-phone-bridge.ps1
 ```
 
-Open the phone UI and point its **Backend URL** at your tunnel (Tailscale, ngrok, etc.) or `http://localhost:5000` if local.
 
 ### Local-only files
 

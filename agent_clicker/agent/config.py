@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-MODEL = os.getenv("AGENT_MODEL", "gpt-5.5")
+MODEL = os.getenv("AGENT_MODEL", "gpt-5.6-luna")
 MAX_ROUNDS = int(os.getenv("AGENT_MAX_ROUNDS", "8"))
 OCR_BACKEND = os.getenv("AGENT_OCR", "easyocr")
 OMNIPARSER_PATH = os.getenv("OMNIPARSER_PATH", "").strip()

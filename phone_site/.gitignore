@@ -1,2 +1,5 @@
 .vercel
 public
+dist
+node_modules
+.wrangler

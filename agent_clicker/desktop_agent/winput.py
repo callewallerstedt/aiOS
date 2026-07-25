@@ -17,6 +17,11 @@ import time
 
 _u = ctypes.windll.user32
 
+# Mark every mouse packet emitted by OPERATOR.  aiOS uses this tag in its
+# native hit-test handler so OPERATOR clicks pass through the aiOS window while
+# a person's physical mouse clicks still work normally.
+OPERATOR_INPUT_TAG = 0xA105C11C
+
 # --- system metrics for virtual-desktop normalization ---------------------
 SM_XVIRTUALSCREEN  = 76
 SM_YVIRTUALSCREEN  = 77
@@ -97,7 +102,7 @@ _BTN_FLAGS = {
 def _send(flags: int, dx: int = 0, dy: int = 0, data: int = 0) -> None:
     inp = _INPUT()
     inp.type = INPUT_MOUSE
-    inp.mi = _MOUSEINPUT(dx, dy, data, flags, 0, None)
+    inp.mi = _MOUSEINPUT(dx, dy, data, flags, 0, ctypes.c_void_p(OPERATOR_INPUT_TAG))
     n = _u.SendInput(1, ctypes.byref(inp), ctypes.sizeof(_INPUT))
     if n != 1:
         # very unusual — UIPI / locked workstation / etc.

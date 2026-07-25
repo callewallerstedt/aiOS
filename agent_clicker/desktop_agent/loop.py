@@ -61,6 +61,58 @@ def _slug(s: str, maxlen: int = 40) -> str:
     return (s[:maxlen] or "task").lower()
 
 
+def _scale_model_actions(actions: list, image_scale: float,
+                         width: int, height: int) -> list:
+    """Translate coordinates from the image sent to the VLM to monitor pixels.
+
+    The screenshot encoder may shrink a 1920px capture to 1600px. Vision
+    models naturally report coordinates in the pixels they actually received,
+    so execution must undo that resize exactly once.
+    """
+    if not isinstance(actions, list):
+        return []
+    try:
+        factor = 1.0 / float(image_scale)
+    except (TypeError, ValueError, ZeroDivisionError):
+        factor = 1.0
+
+    def coord(value, limit):
+        try:
+            return max(0, min(limit - 1, int(round(float(value) * factor))))
+        except (TypeError, ValueError):
+            return value
+
+    translated = []
+    for raw_action in actions:
+        if not isinstance(raw_action, dict):
+            translated.append(raw_action)
+            continue
+        action = dict(raw_action)
+        action_type = str(action.get("type") or "").lower()
+        if action_type not in {"mouse_rel", "mouse_move_rel", "look"}:
+            if "x" in action:
+                action["x"] = coord(action["x"], width)
+            if "y" in action:
+                action["y"] = coord(action["y"], height)
+            for key, limit in (("x1", width), ("x2", width),
+                               ("y1", height), ("y2", height)):
+                if key in action:
+                    action[key] = coord(action[key], limit)
+            for key in ("from", "to"):
+                point = action.get(key)
+                if isinstance(point, (list, tuple)) and len(point) >= 2:
+                    action[key] = [coord(point[0], width), coord(point[1], height), *point[2:]]
+            points = action.get("points")
+            if isinstance(points, list):
+                action["points"] = [
+                    [coord(point[0], width), coord(point[1], height), *point[2:]]
+                    if isinstance(point, (list, tuple)) and len(point) >= 2 else point
+                    for point in points
+                ]
+        translated.append(action)
+    return translated
+
+
 def _sanitize_messages_for_disk(messages: list, step_dir: str) -> list:
     """Strip base64 image payloads from a messages list so the dumped request.json
     is small + readable. Replaces each inline image_url with {'image_ref': '<path>'},
@@ -379,7 +431,9 @@ class AgentLoop:
                         except Exception: pass
 
                 # 2) Build user message for this step
-                data_url, _ = vlm.encode_image(img)
+                data_url, image_scale = vlm.encode_image(img)
+                sent_w = max(1, int(W * image_scale))
+                sent_h = max(1, int(H * image_scale))
                 user_content: list[dict] = []
                 # 2.-1) User follow-ups injected since last step (or as ASK answers).
                 pending_followups = self._drain_follow_ups()
@@ -441,8 +495,9 @@ class AgentLoop:
                 # 2b) Current high-detail screenshot.
                 user_content.append(vlm.text_part(
                     f"STEP {n}/{max_steps}\nTASK: {task}\n"
-                    f"Monitor screenshot is {W}x{H} px (top-left = 0,0). "
-                    f"Output coordinates in this space.\n"
+                    f"The screenshot image shown to you is {sent_w}x{sent_h} px "
+                    f"(top-left = 0,0). Output coordinates in the SHOWN IMAGE'S "
+                    f"{sent_w}x{sent_h} pixel space.\n"
                     + (f"Previous step status: {history_msgs[-1].get('status','?')}\n"
                        if history_msgs else "")
                     + "Now think and reply with JSON."
@@ -496,7 +551,9 @@ class AgentLoop:
                 rec.message = str(parsed.get("message", ""))[:500]
                 rec.say     = str(parsed.get("say", "")).strip()[:300]
                 rec.status  = str(parsed.get("status", "continue")).lower()
-                rec.actions = parsed.get("actions", []) or []
+                rec.actions = _scale_model_actions(
+                    parsed.get("actions", []) or [], image_scale, W, H
+                )
 
                 if self._stop.is_set():
                     self.on_event({"type": "done", "ok": False, "message": "stopped by user", "steps": n - 1})

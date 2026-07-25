@@ -53,6 +53,10 @@ HOST = "127.0.0.1"
 PORT = 48736
 CODEX_HOME = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
+CREATE_NEW_CONSOLE = 0x00000010 if os.name == "nt" else 0
+OPERATOR_DEFAULT_MODEL = "gpt-5.6-luna"
+DEFAULT_PHONE_RELAY_URL = "https://aios-remote-control.contact-wallerstedt.chatgpt.site"
+DEFAULT_PROJECT_ROOT = r"D:\Projects" if Path("D:\\").exists() else str(Path.home() / "Documents" / "aiOS Projects")
 TRANSPARENT = "#010203"
 WM_DROPFILES = 0x0233
 BRAND_FONT_PATH = BASE_DIR / "assets" / "fonts" / "Michroma-Regular.ttf"
@@ -63,6 +67,8 @@ OPERATOR_SOUND_PATH = BASE_DIR / "assets" / "startup" / "aios-operator.wav"
 APP_ICON_PATH = BASE_DIR / "assets" / "aios-logo.ico"
 TRAY_ICON_PATH = BASE_DIR / "assets" / "rectangle-logo.ico"
 APP_USER_MODEL_ID = "aiOS.Desktop.Helper"
+APP_MUTEX_NAME = "Local\\aiOS.Desktop.Helper.Singleton"
+APP_MUTEX_HANDLE = None
 AGENT_CLICKER_DIR = BASE_DIR / "agent_clicker"
 RECORDINGS_FOLDER_NAME = "aiOS recordings"
 FR_PRIVATE = 0x10
@@ -87,6 +93,10 @@ WM_APP = 0x8000
 WM_TRAYICON = WM_APP + 1
 WM_COMMAND = 0x0111
 WM_DESTROY = 0x0002
+WM_NCHITTEST = 0x0084
+HTTRANSPARENT = -1
+OPERATOR_INPUT_TAG = 0xA105C11C
+GA_ROOT = 2
 WM_RBUTTONUP = 0x0205
 WM_LBUTTONDBLCLK = 0x0203
 NIM_ADD = 0x00000000
@@ -185,6 +195,8 @@ class NativeOperatorOverlay:
                 return self._paint(hwnd)
             if message == 0x0021:
                 return 3
+            if message == WM_NCHITTEST:
+                return HTTRANSPARENT
             return self.user32.DefWindowProcW(hwnd, message, wparam, lparam)
 
         self._wndproc = wndproc_type(wndproc)
@@ -236,6 +248,9 @@ class NativeOperatorOverlay:
             self.windows[name] = hwnd
             self.labels[hwnd] = name
             self.user32.SetLayeredWindowAttributes(hwnd, 0, 210 if name == "log" else 190, LWA_ALPHA)
+            # Keep the visible OPERATOR chrome out of every Windows capture path.
+            if not self.user32.SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE):
+                self.user32.SetWindowDisplayAffinity(hwnd, WDA_MONITOR)
 
     def show(self, monitor):
         self.ensure()
@@ -440,8 +455,46 @@ def set_windows_app_id():
         pass
 
 
+def enable_per_monitor_dpi_awareness():
+    """Keep mss physical pixels and SendInput/Tk coordinates in one space."""
+    if not sys.platform.startswith("win"):
+        return
+    try:
+        # PER_MONITOR_AWARE_V2; must run before Tk creates any HWND.
+        ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
+        return
+    except (AttributeError, OSError):
+        pass
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except (AttributeError, OSError):
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except (AttributeError, OSError):
+            pass
+
+
+def claim_single_instance():
+    """Close the startup race between the hotkey and Windows startup launcher."""
+    global APP_MUTEX_HANDLE
+    if not sys.platform.startswith("win"):
+        return True
+    try:
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.CreateMutexW(None, False, APP_MUTEX_NAME)
+        if not handle:
+            return True
+        if kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+            kernel32.CloseHandle(handle)
+            return False
+        APP_MUTEX_HANDLE = handle
+    except (AttributeError, OSError):
+        return True
+    return True
+
+
 DEFAULT_CONFIG = {
-    "project_root": get_setting("COMPUTER_HELPER_PROJECT_ROOT", r"D:\Projects"),
+    "project_root": get_setting("COMPUTER_HELPER_PROJECT_ROOT", DEFAULT_PROJECT_ROOT),
     "assistant_model": get_setting("COMPUTER_HELPER_MODEL", "gpt-4.1-nano"),
     "codex_model": "gpt-4.1-nano",
     "codex_reasoning": "none",
@@ -459,14 +512,21 @@ DEFAULT_CONFIG = {
     "hidden_projects": [],
     "ai_operator": {
         "monitor": "",
-        "model": "gpt-5.5",
-        "reasoning": "medium",
+        "model": OPERATOR_DEFAULT_MODEL,
+        "reasoning": "low",
         "steps": "25",
         "delay": "0.20",
         "tts": False,
         "voice": "nova",
         "shell": False,
         "codex_auth": False,
+    },
+    "phone_relay": {
+        "url": DEFAULT_PHONE_RELAY_URL,
+        "machine_id": "",
+        "machine_token": "",
+        "machine_name": os.environ.get("COMPUTERNAME", "My computer"),
+        "enabled": False,
     },
     "voice_dictation": dict(DEFAULT_VOICE_DICTATION),
     "theme": {
@@ -580,7 +640,10 @@ def load_config():
             pass
 
     if str(config.get("project_root", "")).casefold() == r"c:\codex":
-        config["project_root"] = r"D:\Projects"
+        config["project_root"] = DEFAULT_PROJECT_ROOT
+    project_root = Path(str(config.get("project_root") or DEFAULT_PROJECT_ROOT))
+    if project_root.drive and not Path(f"{project_root.drive}\\").exists():
+        config["project_root"] = DEFAULT_PROJECT_ROOT
     config.setdefault("assistant_model", "gpt-4.1-nano")
     config.setdefault("codex_model", "gpt-4.1-nano")
     config.setdefault("codex_reasoning", "none")
@@ -597,6 +660,9 @@ def load_config():
     config.setdefault("linked_projects", [])
     config.setdefault("hidden_projects", [])
     config["ai_operator"] = merge_dict(DEFAULT_CONFIG["ai_operator"], config.get("ai_operator") or {})
+    config["phone_relay"] = merge_dict(DEFAULT_CONFIG["phone_relay"], config.get("phone_relay") or {})
+    if config["ai_operator"].get("model") == "gpt-5.5":
+        config["ai_operator"]["model"] = OPERATOR_DEFAULT_MODEL
     config["voice_dictation"] = merge_voice_dictation(config.get("voice_dictation"))
     migrate_legacy_todos(config)
     return config
@@ -1114,10 +1180,6 @@ def start_menu_shortcuts():
 
 
 def find_codex():
-    found = shutil.which("codex") or shutil.which("codex.exe")
-    if found:
-        return found
-
     candidates = [
         Path.home() / "AppData/Local/OpenAI/Codex/bin/codex.exe",
         Path(
@@ -1128,7 +1190,17 @@ def find_codex():
     for candidate in candidates:
         if candidate.exists():
             return str(candidate)
-    return ""
+    found = shutil.which("codex.exe")
+    if found:
+        return found
+    windows_apps = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "WindowsApps"
+    try:
+        matches = sorted(windows_apps.glob("OpenAI.Codex_*/*/resources/codex.exe"), reverse=True)
+    except OSError:
+        matches = []
+    if matches:
+        return str(matches[0])
+    return shutil.which("codex") or ""
 
 
 def codex_env():
@@ -1181,8 +1253,10 @@ def launch_codex_login():
         return False
     try:
         subprocess.Popen(
-            ["cmd.exe", "/c", "start", "", "cmd.exe", "/k", f'"{codex}" login'],
+            [codex, "login"],
             env=codex_env(),
+            cwd=str(BASE_DIR),
+            creationflags=CREATE_NEW_CONSOLE,
         )
         return True
     except OSError:
@@ -1409,6 +1483,10 @@ class HelperOverlay:
         self.agent_operator_imported = False
         self.agent_operator_error = None
         self.agent_operator_loop = None
+        self.agent_operator_current_task = ""
+        # A previous process may have been closed mid-run. Never let that
+        # stale state make the phone believe OPERATOR is still active.
+        self._phone_mirror_set_idle("helper_started")
         self.agent_operator_monitors = []
         self.agent_operator_event_q = queue.Queue()
         self.agent_operator_current_image = None
@@ -1417,11 +1495,6 @@ class HelperOverlay:
         self.agent_operator_log_buffer = []
         self.agent_operator_booted = False
         self.agent_operator_booting = False
-        self.agent_operator_boot_progress = 0
-        self.agent_operator_boot_after = None
-        self.agent_operator_boot_label = None
-        self.agent_operator_boot_status = None
-        self.agent_operator_boot_canvas = None
         self.agent_operator_preview_scale = 1.0
         self.agent_operator_preview_origin = (0, 0)
         self.agent_operator_ImageDraw = None
@@ -1433,7 +1506,7 @@ class HelperOverlay:
         self.agent_operator_Image = None
         self.agent_operator_tts = None
         self.agent_operator_tts_error = None
-        self.agent_operator_default_model = "gpt-5.5"
+        self.agent_operator_default_model = OPERATOR_DEFAULT_MODEL
         self.agent_operator_default_voice = "nova"
         self.agent_operator_status_var = None
         self.agent_operator_step_var = None
@@ -1462,6 +1535,14 @@ class HelperOverlay:
         self.agent_operator_stop_requested = False
         self.agent_operator_codex_available = False
         self.agent_operator_codex_message = ""
+        self.agent_operator_codex_login_after = None
+        self.agent_operator_codex_login_started_at = 0.0
+        self.agent_operator_codex_login_btn = None
+        self.agent_operator_codex_status_label = None
+        self.agent_operator_advanced_open = False
+        self.agent_operator_advanced_frame = None
+        self.agent_operator_advanced_btn = None
+        self.agent_operator_task_panel = None
         self.agent_operator_settings = self.config.get("ai_operator") or dict(DEFAULT_CONFIG["ai_operator"])
         self.agent_operator_canvas = None
         self.agent_operator_log = None
@@ -1483,6 +1564,12 @@ class HelperOverlay:
         self.phone_control_deadline = 0.0
         self.phone_control_pulse = 0
         self.phone_control_log = "connected"
+        self._operator_passive_window_styles = {}
+        self._operator_capture_exclusion_ok = False
+        self._operator_input_passthrough = False
+        self._root_native_wndproc = None
+        self._root_original_wndproc = None
+        self._root_native_hwnd = None
 
         self.root = tk.Tk()
         self.root.title("aiOS")
@@ -1512,6 +1599,7 @@ class HelperOverlay:
 
         self._clamp_window_to_screen()
         self._build_ui()
+        self._install_root_hit_test_passthrough()
         self._bind_keys()
         self._enable_file_drop()
         self._start_command_server()
@@ -1520,6 +1608,9 @@ class HelperOverlay:
         self._poll_ui_queue()
         self._poll_agent_operator_events()
         self._ensure_voice_server()
+        self.root.after(100, self._start_agent_operator_load)
+        self.root.after(400, self._protect_aios_windows_from_capture)
+        self.root.after(1200, self._ensure_phone_relay)
         self.show_startup_screen()
 
     def _build_ui(self):
@@ -4341,7 +4432,7 @@ class HelperOverlay:
         self.agent_operator_step_var = tk.StringVar(value="")
         self.agent_operator_monitor_var = tk.StringVar(value=selected)
         self.agent_operator_model_var = tk.StringVar(value=self.agent_operator_model_var.get() if self.agent_operator_model_var else str(self.agent_operator_settings.get("model") or self.agent_operator_default_model))
-        self.agent_operator_reason_var = tk.StringVar(value=self.agent_operator_reason_var.get() if self.agent_operator_reason_var else str(self.agent_operator_settings.get("reasoning") or "medium"))
+        self.agent_operator_reason_var = tk.StringVar(value=self.agent_operator_reason_var.get() if self.agent_operator_reason_var else str(self.agent_operator_settings.get("reasoning") or "low"))
         self.agent_operator_steps_var = tk.StringVar(value=self.agent_operator_steps_var.get() if self.agent_operator_steps_var else str(self.agent_operator_settings.get("steps") or "25"))
         self.agent_operator_delay_var = tk.StringVar(value=self.agent_operator_delay_var.get() if self.agent_operator_delay_var else str(self.agent_operator_settings.get("delay") or "0.20"))
         self.agent_operator_tts_var = tk.BooleanVar(value=self.agent_operator_tts_var.get() if self.agent_operator_tts_var else bool(self.agent_operator_settings.get("tts", False)))
@@ -4352,8 +4443,36 @@ class HelperOverlay:
         controls = self.card(self.page)
         controls.pack(fill="x", pady=(0, 12))
 
-        row1 = tk.Frame(controls, bg=self.c("surface"))
-        row1.pack(fill="x", padx=12, pady=(12, 6))
+        model_row = tk.Frame(controls, bg=self.c("surface"))
+        model_row.pack(fill="x", padx=12, pady=(12, 10))
+        tk.Label(model_row, text="Model", bg=self.c("surface"), fg=self.c("text"), font=self.font(10, "bold")).pack(side="left")
+        model_choices = ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"]
+        if self.agent_operator_model_var.get() not in model_choices:
+            model_choices.insert(0, self.agent_operator_model_var.get())
+        model_menu = tk.OptionMenu(
+            model_row,
+            self.agent_operator_model_var,
+            *model_choices,
+            command=lambda _value: self.save_agent_operator_settings(),
+        )
+        self.style_option(model_menu)
+        model_menu.pack(side="left", fill="x", expand=True, padx=(10, 10))
+        self.agent_operator_model_entry = None
+        self.agent_operator_advanced_btn = self.button(
+            model_row,
+            "Advanced ▾" if self.agent_operator_advanced_open else "Advanced ▸",
+            self.toggle_agent_operator_advanced,
+            compact=True,
+            active=self.agent_operator_advanced_open,
+        )
+        self.agent_operator_advanced_btn.pack(side="right")
+
+        self.agent_operator_advanced_frame = tk.Frame(controls, bg=self.c("surface"))
+        if self.agent_operator_advanced_open:
+            self.agent_operator_advanced_frame.pack(fill="x", padx=12, pady=(0, 8))
+
+        row1 = tk.Frame(self.agent_operator_advanced_frame, bg=self.c("surface"))
+        row1.pack(fill="x", pady=(0, 6))
         tk.Label(row1, text="Monitor", bg=self.c("surface"), fg=self.c("muted"), font=self.font(9, "bold")).pack(side="left")
         monitor_labels = [m.label for m in physical_monitors] or ["No monitors"]
         if self.agent_operator_monitor_var.get() not in monitor_labels:
@@ -4367,12 +4486,8 @@ class HelperOverlay:
         self.button(monitor_actions, "Preview", self.agent_operator_preview_monitor, compact=True).pack(side="left", padx=(6, 0))
         self.button(monitor_actions, "Test Cursor", self.agent_operator_test_cursor, compact=True).pack(side="left", padx=(6, 0))
 
-        row2 = tk.Frame(controls, bg=self.c("surface"))
-        row2.pack(fill="x", padx=12, pady=(0, 6))
-        tk.Label(row2, text="Model", bg=self.c("surface"), fg=self.c("muted"), font=self.font(9, "bold")).pack(side="left")
-        self.agent_operator_model_entry = self.single_line(row2, self.agent_operator_model_var.get())
-        self.agent_operator_model_entry.pack(side="left", fill="x", expand=True, padx=(8, 8))
-        self.agent_operator_model_entry.bind("<FocusOut>", lambda _event: self.save_agent_operator_settings(), add="+")
+        row2 = tk.Frame(self.agent_operator_advanced_frame, bg=self.c("surface"))
+        row2.pack(fill="x", pady=(0, 6))
         tk.Label(row2, text="Reasoning", bg=self.c("surface"), fg=self.c("muted"), font=self.font(9, "bold")).pack(side="left")
         reason_menu = tk.OptionMenu(
             row2,
@@ -4381,6 +4496,8 @@ class HelperOverlay:
             "low",
             "medium",
             "high",
+            "xhigh",
+            "max",
             command=lambda _value: self.save_agent_operator_settings(),
         )
         self.style_option(reason_menu)
@@ -4421,8 +4538,8 @@ class HelperOverlay:
         ).pack(side="left", padx=(8, 0))
         self.agent_operator_delay_var.trace_add("write", lambda *_args: self.save_agent_operator_settings())
 
-        row2b = tk.Frame(controls, bg=self.c("surface"))
-        row2b.pack(fill="x", padx=12, pady=(0, 6))
+        row2b = tk.Frame(self.agent_operator_advanced_frame, bg=self.c("surface"))
+        row2b.pack(fill="x", pady=(0, 6))
         tts_check = tk.Checkbutton(
             row2b,
             text="TTS",
@@ -4494,16 +4611,25 @@ class HelperOverlay:
             if self.agent_operator_codex_var.get():
                 self.agent_operator_codex_var.set(False)
                 self.save_agent_operator_settings()
-        if self.agent_operator_codex_message and not self.agent_operator_codex_available:
-            tk.Label(
-                row2b,
-                text=self.agent_operator_codex_message,
-                bg=self.c("surface"),
-                fg=self.c("muted"),
-                font=self.font(8),
-            ).pack(side="left", padx=(8, 0))
+        login_text = "Switch account" if self.agent_operator_codex_available else "Sign in with Codex"
+        self.agent_operator_codex_login_btn = self.button(
+            row2b,
+            login_text,
+            self.agent_operator_start_codex_login,
+            compact=True,
+        )
+        self.agent_operator_codex_login_btn.pack(side="left", padx=(8, 0))
+        self.agent_operator_codex_status_label = tk.Label(
+            row2b,
+            text=self._agent_operator_codex_status_text(),
+            bg=self.c("surface"),
+            fg=self.c("success") if self.agent_operator_codex_available else self.c("muted"),
+            font=self.font(8),
+        )
+        self.agent_operator_codex_status_label.pack(side="left", padx=(8, 0))
 
         task_panel = tk.Frame(controls, bg=self.c("panel2"), highlightbackground="#2a3a50", highlightthickness=1, bd=0)
+        self.agent_operator_task_panel = task_panel
         task_panel.pack(fill="x", padx=12, pady=(4, 12))
         task_head = tk.Frame(task_panel, bg=self.c("panel2"))
         task_head.pack(fill="x", padx=10, pady=(8, 0))
@@ -4547,8 +4673,8 @@ class HelperOverlay:
         self.agent_operator_attach_strip.pack(fill="x", padx=8, pady=(0, 8))
         self._agent_operator_render_attachments()
 
-        prompt_panel = tk.Frame(controls, bg=self.c("surface"))
-        prompt_panel.pack(fill="x", padx=12, pady=(0, 12))
+        prompt_panel = tk.Frame(self.agent_operator_advanced_frame, bg=self.c("surface"))
+        prompt_panel.pack(fill="x", pady=(6, 4))
         prompt_head = tk.Frame(prompt_panel, bg=self.c("surface"))
         prompt_head.pack(fill="x", pady=(0, 6))
         tk.Label(prompt_head, text="Prompts", bg=self.c("surface"), fg=self.c("text"), font=self.font(10, "bold")).pack(side="left")
@@ -4659,124 +4785,41 @@ class HelperOverlay:
         boot = tk.Frame(self.page, bg=self.c("panel"))
         boot.pack(fill="both", expand=True)
         center = tk.Frame(boot, bg=self.c("panel"))
-        center.place(relx=0.5, rely=0.44, anchor="center", relwidth=0.72)
-
-        self.agent_operator_boot_label = tk.Label(
+        center.place(relx=0.5, rely=0.42, anchor="center")
+        tk.Label(
             center,
             text="OPERATOR",
             bg=self.c("panel"),
-            fg=self.blend_color(self.c("panel"), self.c("text"), 0.18),
-            font=self.brand_font(28),
-        )
-        self.agent_operator_boot_label.pack(anchor="center", pady=(0, 18))
-
-        bar_shell = tk.Frame(
+            fg=self.c("text"),
+            font=self.brand_font(26),
+        ).pack(anchor="center", pady=(0, 10))
+        tk.Label(
             center,
-            bg=self.c("surface"),
-            highlightthickness=1,
-            highlightbackground=self._header_border_color(),
-            height=12,
-        )
-        bar_shell.pack(fill="x", padx=28)
-        bar_shell.pack_propagate(False)
-        self.agent_operator_boot_canvas = tk.Canvas(bar_shell, bg=self.c("surface"), highlightthickness=0, bd=0, height=10)
-        self.agent_operator_boot_canvas.pack(fill="both", expand=True, padx=1, pady=1)
-
-        self.agent_operator_boot_status = tk.Label(
-            center,
-            text="initializing",
+            text="Preparing desktop controls…",
             bg=self.c("panel"),
             fg=self.c("muted"),
             font=self.font(9),
-        )
-        self.agent_operator_boot_status.pack(anchor="center", pady=(12, 0))
+        ).pack(anchor="center")
+        self._start_agent_operator_load()
 
-        if not self.agent_operator_booting:
-            self.agent_operator_booting = True
-            self.agent_operator_boot_progress = 0
-            self._play_startup_sound()
-            self._agent_operator_boot_tick()
-        else:
-            self._agent_operator_draw_boot()
-
-    def _agent_operator_boot_tick(self):
-        if self.active_tab != "AI Operator":
-            self.agent_operator_boot_after = self.root.after(120, self._agent_operator_boot_tick)
+    def _start_agent_operator_load(self):
+        if self.agent_operator_imported or self.agent_operator_booting or self.agent_operator_error:
             return
+        self.agent_operator_booting = True
 
-        if self.agent_operator_boot_progress < 42:
-            self.agent_operator_boot_progress += 5
-        elif self.agent_operator_boot_progress < 68:
-            if not self.agent_operator_imported and not self.agent_operator_error:
-                self._ensure_agent_operator()
-            self.agent_operator_boot_progress += 4
-        elif self.agent_operator_boot_progress < 92:
-            if self.agent_operator_imported and not self.agent_operator_monitors:
-                self.agent_operator_monitors = self._agent_operator_list_monitors()
-            self.agent_operator_boot_progress += 4
-        else:
-            self.agent_operator_boot_progress += 3
+        def worker():
+            ok = self._ensure_agent_operator()
+            self.agent_operator_event_q.put({"type": "operator_boot_ready", "ok": ok})
 
-        self.agent_operator_boot_progress = min(100, self.agent_operator_boot_progress)
-        self._agent_operator_draw_boot()
-
-        if self.agent_operator_boot_progress >= 100:
-            self.agent_operator_booting = False
-            self.agent_operator_booted = True
-            self.agent_operator_boot_after = None
-            if self.active_tab == "AI Operator":
-                self.root.after(160, lambda: self.render_tab("AI Operator"))
-            return
-
-        self.agent_operator_boot_after = self.root.after(90, self._agent_operator_boot_tick)
-
-    def _agent_operator_draw_boot(self):
-        progress = self.agent_operator_boot_progress
-        status = "loading agent core"
-        if progress >= 42:
-            status = "linking desktop controls"
-        if progress >= 68:
-            status = "scanning monitors"
-        if progress >= 92:
-            status = "ready"
-        if self.agent_operator_error:
-            status = "boot failed"
-
-        if self.agent_operator_boot_status:
-            try:
-                self.agent_operator_boot_status.configure(
-                    text=f"{status}  {progress}%",
-                    fg=self.c("danger") if self.agent_operator_error else self.c("muted"),
-                )
-            except tk.TclError:
-                pass
-
-        if self.agent_operator_boot_label:
-            try:
-                fade = min(1.0, 0.18 + (progress / 100) * 0.82)
-                color = self.blend_color(self.c("panel"), self.c("text"), fade)
-                self.agent_operator_boot_label.configure(fg=color)
-            except tk.TclError:
-                pass
-
-        if self.agent_operator_boot_canvas:
-            try:
-                canvas = self.agent_operator_boot_canvas
-                canvas.delete("all")
-                width = max(1, canvas.winfo_width())
-                height = max(1, canvas.winfo_height())
-                fill_w = int(width * (progress / 100))
-                canvas.create_rectangle(0, 0, width, height, fill=self.c("surface"), width=0)
-                canvas.create_rectangle(0, 0, fill_w, height, fill=self.c("accent"), width=0)
-                pulse_x = min(width - 1, max(0, fill_w - 24))
-                canvas.create_rectangle(pulse_x, 0, fill_w, height, fill=self.blend_color(self.c("accent"), self.c("text"), 0.35), width=0)
-            except tk.TclError:
-                pass
+        threading.Thread(target=worker, daemon=True, name="aiOS-operator-loader").start()
 
     def _ensure_agent_operator(self):
         if self.agent_operator_imported:
             return True
         if self.agent_operator_error:
+            return False
+        if threading.current_thread().name != "aiOS-operator-loader":
+            self._start_agent_operator_load()
             return False
         if not self.agent_clicker_dir.exists():
             self.agent_operator_error = "Agent Clicker folder is missing."
@@ -4806,7 +4849,6 @@ class HelperOverlay:
             self.agent_operator_default_model = default_model
             agent_loop_module.capture = self._agent_operator_capture_clean
             self.agent_operator_loop = AgentLoop(self._agent_operator_enqueue)
-            self._refresh_agent_operator_codex_auth()
             try:
                 from desktop_agent.tts import DEFAULT_VOICE, TTSPlayer
                 self.agent_operator_default_voice = DEFAULT_VOICE
@@ -4847,13 +4889,87 @@ class HelperOverlay:
         except Exception as exc:
             ok, message = False, str(exc)
         self.agent_operator_codex_available = bool(ok)
-        self.agent_operator_codex_message = "" if ok else message
+        if ok:
+            _signed_in, account_label = codex_auth_info()
+            self.agent_operator_codex_message = account_label
+        else:
+            self.agent_operator_codex_message = message
         if not ok and self.agent_operator_codex_var:
             try:
                 self.agent_operator_codex_var.set(False)
             except tk.TclError:
                 pass
         return ok, message
+
+    def _agent_operator_codex_status_text(self):
+        if self.agent_operator_codex_available:
+            return f"Codex: {self.agent_operator_codex_message or 'signed in'}"
+        return self.agent_operator_codex_message or "Codex sign-in required"
+
+    def _update_agent_operator_codex_controls(self):
+        if self.agent_operator_codex_login_btn:
+            try:
+                text = "Switch account" if self.agent_operator_codex_available else "Sign in with Codex"
+                self.agent_operator_codex_login_btn.configure(text=text, state="normal")
+            except tk.TclError:
+                pass
+        if self.agent_operator_codex_status_label:
+            try:
+                self.agent_operator_codex_status_label.configure(
+                    text=self._agent_operator_codex_status_text(),
+                    fg=self.c("success") if self.agent_operator_codex_available else self.c("muted"),
+                )
+            except tk.TclError:
+                pass
+
+    def agent_operator_start_codex_login(self):
+        auth_path = CODEX_HOME / "auth.json"
+        try:
+            self.agent_operator_codex_login_started_at = auth_path.stat().st_mtime
+        except OSError:
+            self.agent_operator_codex_login_started_at = 0.0
+        if not launch_codex_login():
+            self.agent_operator_codex_message = "Codex is not installed or could not be started"
+            self._update_agent_operator_codex_controls()
+            if self.agent_operator_status_var:
+                self.agent_operator_status_var.set(self.agent_operator_codex_message)
+            return
+        if self.agent_operator_codex_login_btn:
+            self.agent_operator_codex_login_btn.configure(text="Waiting for browser...", state="disabled")
+        if self.agent_operator_status_var:
+            self.agent_operator_status_var.set("Complete Codex sign-in in your browser")
+        self._poll_agent_operator_codex_login(120)
+
+    def _poll_agent_operator_codex_login(self, attempts_left):
+        auth_path = CODEX_HOME / "auth.json"
+        try:
+            changed = auth_path.stat().st_mtime > self.agent_operator_codex_login_started_at
+        except OSError:
+            changed = False
+        if changed:
+            ok, message = self._refresh_agent_operator_codex_auth()
+            if ok:
+                if self.agent_operator_codex_var:
+                    self.agent_operator_codex_var.set(True)
+                self.save_agent_operator_settings()
+                self._update_agent_operator_codex_controls()
+                if self.agent_operator_status_var:
+                    self.agent_operator_status_var.set("Codex signed in and enabled for OPERATOR")
+                self.refresh_chat_account()
+                self.agent_operator_codex_login_after = None
+                return
+            self.agent_operator_codex_message = message
+        if attempts_left <= 0:
+            self._refresh_agent_operator_codex_auth()
+            self._update_agent_operator_codex_controls()
+            if self.agent_operator_status_var:
+                self.agent_operator_status_var.set("Codex sign-in was not completed")
+            self.agent_operator_codex_login_after = None
+            return
+        self.agent_operator_codex_login_after = self.root.after(
+            1500,
+            lambda: self._poll_agent_operator_codex_login(attempts_left - 1),
+        )
 
     def _agent_operator_list_monitors(self):
         try:
@@ -4896,24 +5012,152 @@ class HelperOverlay:
         self._ui_queue.put(run)
         return done.wait(timeout)
 
+    def _aios_top_level_windows(self):
+        if not sys.platform.startswith("win"):
+            return []
+        user32 = ctypes.windll.user32
+        process_id = ctypes.windll.kernel32.GetCurrentProcessId()
+        windows = []
+        callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+        def callback(hwnd, _lparam):
+            owner_pid = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner_pid))
+            if owner_pid.value == process_id:
+                windows.append(hwnd)
+            return True
+
+        callback_ref = callback_type(callback)
+        user32.EnumWindows(callback_ref, 0)
+        return windows
+
+    def _install_root_hit_test_passthrough(self):
+        if not sys.platform.startswith("win") or self._root_native_wndproc is not None:
+            return
+        try:
+            self.root.update_idletasks()
+            user32 = ctypes.windll.user32
+            child_hwnd = self.root.winfo_id()
+            hwnd = user32.GetAncestor(child_hwnd, GA_ROOT) or child_hwnd
+            wndproc_type = ctypes.WINFUNCTYPE(
+                ctypes.c_ssize_t,
+                wintypes.HWND,
+                wintypes.UINT,
+                ctypes.c_size_t,
+                ctypes.c_ssize_t,
+            )
+            user32.GetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int]
+            user32.GetWindowLongPtrW.restype = ctypes.c_void_p
+            user32.SetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_void_p]
+            user32.SetWindowLongPtrW.restype = ctypes.c_void_p
+            user32.CallWindowProcW.argtypes = [ctypes.c_void_p, wintypes.HWND, wintypes.UINT, ctypes.c_size_t, ctypes.c_ssize_t]
+            user32.CallWindowProcW.restype = ctypes.c_ssize_t
+            user32.GetMessageExtraInfo.restype = ctypes.c_ssize_t
+            original = user32.GetWindowLongPtrW(hwnd, GWLP_WNDPROC)
+
+            def wndproc(window, message, wparam, lparam):
+                if message == WM_NCHITTEST and self._operator_input_passthrough:
+                    # Only OPERATOR's tagged SendInput packets pass through.
+                    # Real mouse/touch input continues to reach aiOS normally.
+                    if int(user32.GetMessageExtraInfo()) == OPERATOR_INPUT_TAG:
+                        return HTTRANSPARENT
+                return user32.CallWindowProcW(original, window, message, wparam, lparam)
+
+            callback = wndproc_type(wndproc)
+            if not user32.SetWindowLongPtrW(hwnd, GWLP_WNDPROC, ctypes.cast(callback, ctypes.c_void_p)):
+                return
+            self._root_native_hwnd = hwnd
+            self._root_original_wndproc = original
+            self._root_native_wndproc = callback
+        except (AttributeError, OSError, tk.TclError, ValueError):
+            self._root_native_wndproc = None
+
+    def _protect_aios_windows_from_capture(self, passive=False):
+        """Exclude every aiOS top-level window and optionally make it input-transparent."""
+        if not sys.platform.startswith("win"):
+            return False
+        user32 = ctypes.windll.user32
+        protected = False
+        for hwnd in self._aios_top_level_windows():
+            try:
+                excluded = bool(user32.SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE))
+                if not excluded:
+                    excluded = bool(user32.SetWindowDisplayAffinity(hwnd, WDA_MONITOR))
+                protected = protected or excluded
+                if passive:
+                    style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+                    self._operator_passive_window_styles.setdefault(int(hwnd), int(style))
+                    user32.SetWindowLongW(
+                        hwnd,
+                        GWL_EXSTYLE,
+                        style | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                    )
+            except (OSError, ValueError):
+                continue
+        self._operator_capture_exclusion_ok = protected
+        return protected
+
+    def _restore_aios_window_input(self):
+        if not sys.platform.startswith("win"):
+            return
+        user32 = ctypes.windll.user32
+        for hwnd, style in list(self._operator_passive_window_styles.items()):
+            try:
+                if user32.IsWindow(hwnd):
+                    user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style)
+            except (OSError, ValueError):
+                pass
+        self._operator_passive_window_styles.clear()
+
     def _agent_operator_capture_clean(self, monitor):
-        self._agent_operator_ui_sync(lambda: self._agent_operator_control_hide(temporary=True), timeout=0.25)
-        time.sleep(0.035)
+        # WDA_EXCLUDEFROMCAPTURE lets the user keep seeing aiOS while the model
+        # receives the real desktop underneath it. The hide/show fallback is
+        # only used on Windows builds where capture exclusion is unavailable.
+        protected = [False]
+
+        def prepare():
+            protected[0] = self._protect_aios_windows_from_capture(passive=False)
+            if not protected[0]:
+                self._agent_operator_control_hide(temporary=True)
+                try:
+                    self.root.withdraw()
+                except tk.TclError:
+                    pass
+
+        self._agent_operator_ui_sync(prepare, timeout=0.35)
+        time.sleep(0.045)
         try:
             return self.agent_operator_raw_capture(monitor)
         finally:
-            if self.agent_operator_loop and self.agent_operator_loop.is_running():
+            if not protected[0] and self.agent_operator_loop and self.agent_operator_loop.is_running():
                 self._agent_operator_ui_sync(
-                    lambda m=monitor: self._agent_operator_control_show(m),
+                    lambda m=monitor: (self.root.deiconify(), self._agent_operator_control_show(m)),
                     timeout=0.05,
                 )
 
     def _agent_operator_model(self):
-        if hasattr(self, "agent_operator_model_entry"):
-            text = self.agent_operator_model_entry.get("1.0", "end").strip()
-            if text:
-                self.agent_operator_model_var.set(text)
         return self.agent_operator_model_var.get().strip() or self.agent_operator_default_model
+
+    def toggle_agent_operator_advanced(self):
+        self.agent_operator_advanced_open = not self.agent_operator_advanced_open
+        frame = self.agent_operator_advanced_frame
+        if frame:
+            if self.agent_operator_advanced_open:
+                pack_options = {"fill": "x", "padx": 12, "pady": (0, 8)}
+                if self.agent_operator_task_panel:
+                    pack_options["before"] = self.agent_operator_task_panel
+                frame.pack(**pack_options)
+            else:
+                frame.pack_forget()
+        if self.agent_operator_advanced_btn:
+            try:
+                self.agent_operator_advanced_btn.configure(
+                    text="Advanced ▾" if self.agent_operator_advanced_open else "Advanced ▸",
+                    bg=self.c("accent") if self.agent_operator_advanced_open else self.c("panel2"),
+                    fg="#061018" if self.agent_operator_advanced_open else self.c("text"),
+                )
+            except tk.TclError:
+                pass
 
     def save_agent_operator_settings(self):
         settings = dict(self.config.get("ai_operator") or DEFAULT_CONFIG["ai_operator"])
@@ -5353,10 +5597,11 @@ class HelperOverlay:
         except (TypeError, ValueError):
             delay = 0.20
             self.agent_operator_delay_var.set(f"{delay:.2f}")
+        self.agent_operator_current_task = task
         self.agent_operator_clear_log()
         self.agent_operator_last_clicks.clear()
         model = self._agent_operator_model()
-        reasoning = (self.agent_operator_reason_var.get() if self.agent_operator_reason_var else "medium").strip().lower() or None
+        reasoning = (self.agent_operator_reason_var.get() if self.agent_operator_reason_var else "low").strip().lower() or None
         attachments = self._agent_operator_attachment_snapshot()
         user_context = self._agent_operator_user_context_text()
         context_count = len([name for name in self._agent_operator_context_files() if self._agent_operator_context_read(name).strip()])
@@ -5428,6 +5673,7 @@ class HelperOverlay:
                 self.agent_operator_status_var.set("Safety stop already requested")
             return "break"
         self.agent_operator_stop_requested = True
+        self._phone_mirror_set_idle("stop_requested")
         self._agent_operator_log_line("ts", f"\n[{self._ts()}] ")
         self._agent_operator_log_line("err", "SAFETY STOP confirmed. Further aiOPERATOR inputs are blocked.\n")
         if self.agent_operator_loop:
@@ -5550,11 +5796,12 @@ class HelperOverlay:
             pass
         self._phone_mirror_seq = 0
         # Marker event so the phone knows a fresh run started
-        self._phone_mirror_write({"type": "run_start", "ts": time.time()})
+        self._phone_mirror_write({"type": "run_start", "ts": time.time(),
+                                  "task": self.agent_operator_current_task})
         try:
             (root / "status.json").write_text(
                 json.dumps({"ts": time.time(), "running": True, "asking": False,
-                            "last_question": ""}),
+                            "last_question": "", "task": self.agent_operator_current_task}),
                 encoding="utf-8")
         except OSError:
             pass
@@ -5672,6 +5919,7 @@ class HelperOverlay:
             "running": bool(loop and loop.is_running()),
             "asking": bool(loop and loop.is_awaiting_answer()),
             "last_question": "",
+            "task": self.agent_operator_current_task,
         }
         if kind == "ask":
             state["last_question"] = event.get("message", "")
@@ -5699,7 +5947,14 @@ class HelperOverlay:
 
     def _handle_agent_operator_event(self, event):
         kind = event.get("type")
-        if kind == "step_begin":
+        if kind == "operator_boot_ready":
+            self.agent_operator_booting = False
+            self.agent_operator_booted = bool(event.get("ok"))
+            if self.agent_operator_booted:
+                self._refresh_agent_operator_codex_auth()
+            if self.active_tab == "AI Operator":
+                self.render_tab("AI Operator")
+        elif kind == "step_begin":
             if self.agent_operator_step_var:
                 self.agent_operator_step_var.set(f"step {event.get('n')}")
             self.agent_operator_last_clicks.clear()
@@ -5854,6 +6109,10 @@ class HelperOverlay:
     def _agent_operator_control_show(self, monitor):
         if not monitor:
             return
+        # aiOS remains visible and clickable for the user. Its capture is
+        # excluded, and only OPERATOR-tagged mouse packets pass through it.
+        self._operator_input_passthrough = True
+        self._protect_aios_windows_from_capture(passive=False)
         self.agent_operator_control_monitor = monitor
         self.agent_operator_control_visible = True
         if self.agent_operator_native_overlay:
@@ -5935,8 +6194,11 @@ class HelperOverlay:
             user32.SetWindowLongW(
                 hwnd,
                 GWL_EXSTYLE,
-                style | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW,
+                style | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
             )
+            top_hwnd = user32.GetAncestor(hwnd, GA_ROOT) or hwnd
+            if not user32.SetWindowDisplayAffinity(top_hwnd, WDA_EXCLUDEFROMCAPTURE):
+                user32.SetWindowDisplayAffinity(top_hwnd, WDA_MONITOR)
         except (tk.TclError, OSError):
             pass
 
@@ -5986,6 +6248,9 @@ class HelperOverlay:
 
     def _agent_operator_control_stop(self):
         self._agent_operator_control_hide(temporary=False)
+        self._operator_input_passthrough = False
+        self._restore_aios_window_input()
+        self._protect_aios_windows_from_capture(passive=False)
 
     def _agent_operator_redraw_preview(self):
         if self.agent_operator_current_image is None or self.agent_operator_canvas is None:
@@ -6019,6 +6284,10 @@ class HelperOverlay:
             pass
 
     def _agent_operator_flash_click(self, x, y, button="left"):
+        # A temporary Tk click-ring would itself become a hit target and a
+        # capture candidate. The native OPERATOR frame/log remains visible.
+        if self.agent_operator_loop and self.agent_operator_loop.is_running():
+            return
         try:
             win = tk.Toplevel(self.root)
             win.overrideredirect(True)
@@ -6034,6 +6303,7 @@ class HelperOverlay:
             color = {"left": "#ff5050", "right": "#5080ff", "middle": "#50ff8c"}.get(button, "#ff5050")
             canvas.create_oval(4, 4, radius * 2 - 4, radius * 2 - 4, outline=color, width=4)
             canvas.create_oval(radius - 4, radius - 4, radius + 4, radius + 4, fill=color, outline=color)
+            self._agent_operator_control_make_passive(win)
 
             def fade(step=0):
                 try:
@@ -6061,6 +6331,28 @@ class HelperOverlay:
         scroll.pack(fill="both", expand=True)
 
         self._render_update_card(scroll.inner)
+
+        relay_cfg = self.config.get("phone_relay") or {}
+        remote = self.card(scroll.inner)
+        remote.pack(fill="x", pady=(0, 12))
+        self.section(remote, "Mobile remote")
+        paired = bool(relay_cfg.get("machine_token"))
+        self.mobile_remote_status_var = tk.StringVar(
+            value=(f"Connected as {relay_cfg.get('machine_name') or 'this PC'}" if paired else "Not connected")
+        )
+        self.muted(remote, "Control OPERATOR securely from the aiOS PWA. Use the same private code on every PC.").pack(
+            anchor="w", padx=12, pady=(0, 8)
+        )
+        self.mobile_remote_url_entry = self.setting_entry(remote, "Remote URL", relay_cfg.get("url", ""))
+        self.mobile_remote_code_entry = self.setting_entry(remote, "Private code", "")
+        self.mobile_remote_name_entry = self.setting_entry(
+            remote, "Computer name", relay_cfg.get("machine_name") or os.environ.get("COMPUTERNAME", "My computer")
+        )
+        remote_actions = tk.Frame(remote, bg=self.c("surface"))
+        remote_actions.pack(fill="x", padx=12, pady=(0, 12))
+        self.button(remote_actions, "Connect", self.pair_mobile_remote, compact=True).pack(side="left")
+        self.button(remote_actions, "Open remote", self.open_mobile_remote, compact=True).pack(side="left", padx=(8, 0))
+        tk.Label(remote_actions, textvariable=self.mobile_remote_status_var, bg=self.c("surface"), fg=self.c("muted"), font=self.font(8)).pack(side="left", padx=(12, 0))
 
         self.settings_color_rows = {}
         colors = self.card(scroll.inner)
@@ -6231,6 +6523,78 @@ class HelperOverlay:
         voice_actions.pack(fill="x", padx=12, pady=(0, 12))
         self.button(voice_actions, "Save Voice", self.save_voice_settings, compact=True).pack(side="left")
         self.muted(voice_actions, "Sliders save instantly. Model/compute need Save Voice.").pack(side="left", padx=(10, 0))
+
+    def _ensure_phone_relay(self):
+        relay = self.config.get("phone_relay") or {}
+        if not relay.get("enabled") or not relay.get("machine_token"):
+            return
+        try:
+            subprocess.Popen(
+                [
+                    "powershell.exe",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(BASE_DIR / "start-phone-bridge.ps1"),
+                ],
+                cwd=str(BASE_DIR),
+                creationflags=CREATE_NO_WINDOW,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError:
+            pass
+
+    def _phone_mirror_set_idle(self, reason=""):
+        root = self._phone_mirror_dir()
+        try:
+            (root / "status.json").write_text(
+                json.dumps({"ts": time.time(), "running": False, "asking": False,
+                            "last_question": "", "reason": reason}),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+
+    def pair_mobile_remote(self):
+        url = self.mobile_remote_url_entry.get("1.0", "end").strip()
+        code = self.mobile_remote_code_entry.get("1.0", "end").strip()
+        name = self.mobile_remote_name_entry.get("1.0", "end").strip() or os.environ.get("COMPUTERNAME", "My computer")
+        if not url or not code:
+            self.mobile_remote_status_var.set("Enter the remote URL and private code")
+            return
+        self.mobile_remote_status_var.set("Connecting securely…")
+
+        def worker():
+            try:
+                from phone_relay import pair
+
+                relay = pair(url, code, name)
+                self.config = load_config()
+                self.root.after(0, lambda: self._mobile_remote_paired(relay))
+            except Exception as exc:
+                self.root.after(0, lambda message=str(exc): self.mobile_remote_status_var.set(f"Could not connect: {message}"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _mobile_remote_paired(self, relay):
+        self.mobile_remote_code_entry.delete("1.0", "end")
+        self.mobile_remote_status_var.set(f"Connected as {relay.get('machine_name') or 'this PC'}")
+        self._ensure_phone_relay()
+
+    def open_mobile_remote(self):
+        relay = self.config.get("phone_relay") or {}
+        url = self.mobile_remote_url_entry.get("1.0", "end").strip() if getattr(self, "mobile_remote_url_entry", None) else relay.get("url")
+        if not url:
+            if getattr(self, "mobile_remote_status_var", None):
+                self.mobile_remote_status_var.set("Enter your remote URL first")
+            return
+        try:
+            os.startfile(url)
+        except OSError as exc:
+            if getattr(self, "mobile_remote_status_var", None):
+                self.mobile_remote_status_var.set(str(exc))
 
     def drop_zone(self, parent):
         zone = tk.Frame(parent, bg=self.c("surface2"), highlightbackground=self.c("accent"), highlightthickness=1, bd=0)
@@ -9227,7 +9591,10 @@ class HelperOverlay:
         action = str(payload.get("action") or "").strip().lower()
         text = str(payload.get("text") or "").strip()
         options = payload.get("options") if isinstance(payload.get("options"), dict) else None
-        if not text and action not in {"phone_start", "phone_stop", "reload_operator_settings"}:
+        if not text and action not in {
+            "phone_start", "phone_stop", "reload_operator_settings",
+            "operator_stop", "operator_clear", "operator_clear_attachments",
+        }:
             return
         if action == "chat":
             self.root.after(0, lambda value=text: self._remote_submit_chat(value))
@@ -9259,10 +9626,28 @@ class HelperOverlay:
             self.send()
 
     def _remote_submit_operator(self, text, options=None):
-        self._phone_control_show("OPERATOR")
-        self.show()
+        # A phone-launched task opens the real workspace, not just the short
+        # connection overlay.
+        self._phone_control_hide()
         self.render_tab("AI Operator")
+        self._show_operator_workspace()
         self._remote_submit_operator_attempt(text, options, attempts_left=80)
+
+    def _show_operator_workspace(self):
+        self.show()
+        try:
+            self.root.state("normal")
+            self.root.update_idletasks()
+            self.root.lift()
+            self.root.focus_force()
+            if sys.platform.startswith("win"):
+                user32 = ctypes.windll.user32
+                hwnd = user32.GetAncestor(self.root.winfo_id(), GA_ROOT) or self.root.winfo_id()
+                user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+                user32.BringWindowToTop(hwnd)
+                user32.SetForegroundWindow(hwnd)
+        except (AttributeError, OSError, tk.TclError):
+            pass
 
     def _remote_submit_operator_attempt(self, text, options, attempts_left):
         ready = False
@@ -9288,6 +9673,8 @@ class HelperOverlay:
         try:
             if self.agent_operator_loop and self.agent_operator_loop.is_running():
                 self.agent_operator_stop()
+            else:
+                self._phone_mirror_set_idle("remote_stop")
         except Exception:
             pass
 
@@ -9906,6 +10293,7 @@ def send_command(command):
 
 
 def main():
+    enable_per_monitor_dpi_awareness()
     set_windows_app_id()
     parser = argparse.ArgumentParser()
     parser.add_argument("--toggle", action="store_true")
@@ -9923,6 +10311,10 @@ def main():
     if args.show and send_command("show"):
         return
     if args.toggle and send_command("toggle"):
+        return
+
+    if not claim_single_instance():
+        send_command("show" if args.show else "toggle")
         return
 
     app = HelperOverlay()

@@ -3,7 +3,10 @@
   "private": true,
   "version": "1.0.0",
   "scripts": {
-    "build": "node ./scripts/build.js"
+    "build": "node ./scripts/build.js",
+    "dev": "wrangler dev"
   },
-  "devDependencies": {}
+  "devDependencies": {
+    "wrangler": "^4.25.0"
+  }
 }

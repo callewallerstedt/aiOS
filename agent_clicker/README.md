@@ -37,7 +37,7 @@ pip install -r requirements.txt
 
 # 4. configure
 copy .env.example .env
-# edit .env -> paste OPENAI_API_KEY, pick AGENT_MODEL (gpt-5 or gpt-4o)
+# edit .env -> paste OPENAI_API_KEY, pick AGENT_MODEL (gpt-5.6-luna by default)
 
 # 5. run
 python run.py
@@ -55,7 +55,7 @@ First run downloads EasyOCR weights (~80 MB). They cache in `%USERPROFILE%\.Easy
    - `click the search input`
    - `click the second video in the list`
    - `click the red close button`
-3. Pick a model (gpt-5 = stronger reasoning, slower; gpt-4o = fastest strong vision).
+3. Pick a model (`gpt-5.6-luna` is the default fast OPERATOR model).
 4. Press **Run**. Each round appears live with the VLM's thought, the tool
    call, an annotated image, and a text summary. The final card shows a green
    crosshair at the click point.
@@ -105,8 +105,8 @@ run.py             launcher
 
 ## Notes on model names
 
-OpenAI's current vision-capable IDs are `gpt-5`, `gpt-4o`, `gpt-4o-mini`.
-There is no `gpt-5.5`. The model selector includes the three real options.
+The default clicking model is `gpt-5.6-luna`. The model selector also exposes
+`gpt-5.6-terra` and `gpt-5.6-sol` for accounts that have access to them.
 
 ## Troubleshooting
 

@@ -1,5 +1,5 @@
 {
-  "project_root": "D:\\Projects",
+  "project_root": "C:\\Users\\YourName\\Documents\\aiOS Projects",
   "assistant_model": "gpt-4.1-nano",
   "codex_model": "gpt-4.1-nano",
   "codex_reasoning": "none",
@@ -17,14 +17,21 @@
   "hidden_projects": [],
   "ai_operator": {
     "monitor": "",
-    "model": "gpt-5.5",
-    "reasoning": "medium",
+    "model": "gpt-5.6-luna",
+    "reasoning": "low",
     "steps": "25",
     "delay": "0.20",
     "tts": false,
     "voice": "nova",
     "shell": false,
     "codex_auth": false
+  },
+  "phone_relay": {
+    "url": "https://aios-remote-control.contact-wallerstedt.chatgpt.site",
+    "machine_id": "",
+    "machine_token": "",
+    "machine_name": "My computer",
+    "enabled": false
   },
   "voice_dictation": {
     "hold_ms": 280,
