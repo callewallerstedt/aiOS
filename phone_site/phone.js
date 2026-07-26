@@ -88,6 +88,7 @@ const state = {
   busy: false,
   loading: false,
   running: false,
+  forceNewPrompt: false,
   frameUrl: "",
   frameStamp: "",
   frameSeq: 0,
@@ -740,7 +741,7 @@ function renderMachine() {
   $("#runMeta").textContent = `${labelOf(MODELS, state.model)} · ${running ? "working" : "idle"}`;
   $("#runDot").classList.toggle("on", running);
   $("#stopBtn").classList.toggle("hidden", !running);
-  $("#promptInput").placeholder = running ? "Add a follow-up…" : "Ask your computer…";
+  $("#promptInput").placeholder = treatAsFollowUp() ? "Add a follow-up…" : "Ask your computer…";
 
   const monitors = monitorsOf(machine);
   if (!monitors.some((monitor) => String(monitor.id) === String(state.monitorId))) {
@@ -1287,6 +1288,10 @@ function closeLightbox() {
 }
 
 /* ── timeline ─────────────────────────────────────────── */
+
+function treatAsFollowUp() {
+  return state.running && !state.forceNewPrompt;
+}
 
 function resetTimeline(message) {
   const feed = $("#timeline");
@@ -1891,6 +1896,7 @@ async function beginSession(force = false) {
   state.feedVersion += 1;
   const archived = await drainEvents(true);
   closeRun("ended");
+  state.forceNewPrompt = true;
   resetTimeline("Ready. Ask your computer to do something.");
   markSeen();
   if (archived >= SERVER_PRUNE_EVENTS && !state.running) await pruneServerEvents();
@@ -2010,7 +2016,7 @@ function autoGrow() {
   const input = $("#promptInput");
   input.style.height = "auto";
   input.style.height = `${Math.min(input.scrollHeight, window.innerHeight * 0.34)}px`;
-  $("#suggestions").classList.toggle("hidden", Boolean(input.value.trim()) || state.running);
+  $("#suggestions").classList.toggle("hidden", Boolean(input.value.trim()) || treatAsFollowUp());
 }
 
 function clearClarifier(clearQuestions = true) {
@@ -2038,7 +2044,7 @@ function renderClarifier() {
   list.replaceChildren();
 
   const openCount = questions.filter((question) => !question.answered).length;
-  $(".clarifier-title").innerHTML = `<span class="clarifier-spark">✦</span> ${state.running ? "Follow-up check" : "Intent check"}`;
+  $(".clarifier-title").innerHTML = `<span class="clarifier-spark">✦</span> ${treatAsFollowUp() ? "Follow-up check" : "Intent check"}`;
   $("#clarifierStatus").textContent = state.clarifierLoading
     ? (questions.length ? "Updating…" : "Reading your draft…")
     : openCount ? `${openCount} ${openCount === 1 ? "detail" : "details"} to decide` : "Covered";
@@ -2613,7 +2619,9 @@ $("#stopBtn").addEventListener("click", async () => {
 $("#clearChatBtn").addEventListener("click", async () => {
   if (!currentMachine()) return;
   buzz();
+  if (state.running) sendCommand("stop").catch(() => {});
   await beginSession(true);
+  renderMachine();
 });
 
 $("#historyBtn").addEventListener("click", () => {
@@ -2673,7 +2681,8 @@ $("#promptForm").addEventListener("submit", async (event) => {
   const prompt = $("#promptInput").value.trim();
   if (!prompt || state.busy) return;
   const machine = currentMachine();
-  const type = state.running ? "followup" : "prompt";
+  const type = treatAsFollowUp() ? "followup" : "prompt";
+  state.forceNewPrompt = false;
   backToLive();
   state.busy = true;
   $("#sendBtn").disabled = true;
