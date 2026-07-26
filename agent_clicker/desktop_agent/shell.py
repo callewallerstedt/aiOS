@@ -12,8 +12,20 @@ from dataclasses import dataclass
 
 
 PS_EXE = r"powershell.exe"          # Windows PowerShell 5.1 (always present)
-DEFAULT_TIMEOUT = 30.0
-MAX_OUTPUT_CHARS = 4000             # per stream, then truncate
+CMD_EXE = r"cmd.exe"
+DEFAULT_TIMEOUT = 120.0             # installs, downloads and builds need room
+MAX_TIMEOUT = 900.0                 # but nothing gets to block the run forever
+MAX_OUTPUT_CHARS = 8000             # per stream, then truncate
+
+
+def clamp_timeout(value: float | None) -> float:
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return DEFAULT_TIMEOUT
+    if seconds <= 0:
+        return DEFAULT_TIMEOUT
+    return min(seconds, MAX_TIMEOUT)
 
 
 @dataclass
@@ -45,11 +57,22 @@ class ShellResult:
         return "\n".join(parts)
 
 
-def run(command: str, cwd: str | None = None, timeout: float = DEFAULT_TIMEOUT, cancel_event=None) -> ShellResult:
+def run(command: str, cwd: str | None = None, timeout: float = DEFAULT_TIMEOUT,
+        cancel_event=None, interpreter: str = "powershell") -> ShellResult:
+    """Run a one-liner. `interpreter` is 'powershell' (default) or 'cmd'.
+
+    cmd is there because plenty of tooling still ships .bat wrappers and
+    documents `cmd` syntax; forcing those through PowerShell quoting is a
+    reliable way to waste steps.
+    """
     import time
     t0 = time.time()
-    args = [PS_EXE, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-            "-Command", command]
+    timeout = clamp_timeout(timeout)
+    if str(interpreter or "").strip().lower() in ("cmd", "cmd.exe", "bat", "batch"):
+        args = [CMD_EXE, "/d", "/c", command]
+    else:
+        args = [PS_EXE, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                "-Command", command]
     try:
         proc = subprocess.Popen(
             args,
@@ -100,6 +123,7 @@ def run_script(script: str, cwd: str | None = None,
     """
     import time
     t0 = time.time()
+    timeout = clamp_timeout(timeout)
     fd, path = tempfile.mkstemp(prefix="agent_ps_", suffix=".ps1")
     try:
         # PowerShell 5.1 needs a UTF-8 BOM to treat the file as UTF-8 — without

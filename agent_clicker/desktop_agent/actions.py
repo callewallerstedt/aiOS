@@ -364,7 +364,8 @@ def execute(
                                   detail="shell disabled — toggle '🖥 Shell' on in the UI",
                                   elapsed_ms=int((time.time() - t0) * 1000))
             cwd = a.get("cwd") or shell_cwd
-            timeout = _f(a.get("timeout"), ps.DEFAULT_TIMEOUT)
+            timeout = ps.clamp_timeout(_f(a.get("timeout"), ps.DEFAULT_TIMEOUT))
+            interpreter = str(a.get("interpreter") or a.get("shell") or "powershell")
             script = a.get("script")
             cmd = str(a.get("command", "")).strip()
             _check_cancel(cancel_event)
@@ -382,7 +383,8 @@ def execute(
                     return ExecResult(action=a, ok=False,
                                       detail="shell: empty command (provide 'command' or 'script')",
                                       elapsed_ms=int((time.time() - t0) * 1000))
-                sr = ps.run(cmd, cwd=cwd, timeout=timeout, cancel_event=cancel_event)
+                sr = ps.run(cmd, cwd=cwd, timeout=timeout, cancel_event=cancel_event,
+                            interpreter=interpreter)
                 d = (f"shell exit={sr.exit_code}"
                      + (" TIMEOUT" if sr.timed_out else "")
                      + f" ({sr.elapsed_ms}ms): {cmd[:80]}")

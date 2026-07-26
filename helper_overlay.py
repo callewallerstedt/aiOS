@@ -545,7 +545,7 @@ DEFAULT_CONFIG = {
         "delay": "0.20",
         "tts": False,
         "voice": "nova",
-        "shell": False,
+        "shell": True,
         "codex_auth": False,
         "provider_mode": "api",
     },

@@ -430,6 +430,8 @@ class Bridge:
                 "reasoning": str(payload.get("reasoning_effort") or "low"),
                 "steps": str(payload.get("max_steps") or 30),
             }
+            if "shell" in payload:
+                options["shell"] = bool(payload.get("shell"))
             return self.local_json(
                 "/api/phone/send",
                 method="POST",

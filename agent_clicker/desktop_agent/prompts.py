@@ -89,12 +89,17 @@ NEW screenshot is taken before your next step):
         // Use `"encoding":"utf-8-sig"` if the target tool requires a BOM
         // (e.g. some Windows apps reading Cyrillic / non-ASCII).
 
-  {"type":"shell",        "command":"<one-line ps>", "cwd":null, "timeout":30}
-  {"type":"shell",        "script":"<multi-line ps>", "cwd":null, "timeout":30}
-        // Run Windows PowerShell 5.1 (powershell.exe -NoProfile -NonInteractive).
-        // stdout + stderr + exit code are fed back to you in the NEXT step's
-        // message so you can read the result. Only available when the user
-        // toggled '🖥 Shell' on in the UI.
+  {"type":"shell",        "command":"<one-line ps>", "cwd":null, "timeout":120}
+  {"type":"shell",        "script":"<multi-line ps>", "cwd":null, "timeout":120}
+  {"type":"shell",        "command":"<one-liner>", "interpreter":"cmd", "timeout":120}
+        // Run Windows PowerShell 5.1 (powershell.exe -NoProfile -NonInteractive),
+        // or cmd.exe with "interpreter":"cmd" for .bat wrappers and tools whose
+        // documented syntax is cmd. stdout + stderr + exit code are fed back to
+        // you in the NEXT step's message so you can read the result.
+        //
+        // `timeout` defaults to 120s and is capped at 900s. Long jobs (installs,
+        // builds, downloads) are fine — give them a generous timeout rather than
+        // splitting them up.
         //
         // ★ ONE-LINERS: use `command`. Examples: `Get-ChildItem`, `git status`.
         // ★ MULTI-LINE (function defs, here-strings, anything with newlines):
