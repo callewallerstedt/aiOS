@@ -42,6 +42,17 @@ const IDLE_RUN_CLOSE_MS = 3 * 60 * 1000;
 const EVENT_PAGE = 200;                // the relay's page size
 const MAX_DRAIN_PAGES = 40;
 const SERVER_PRUNE_EVENTS = 600;       // archived backlog worth deleting server-side
+const MAX_ATTACHMENTS = 6;
+const MAX_FILE_BYTES = 15 * 1024 * 1024;
+const MAX_IMAGE_EDGE = 2000;           // keeps receipt and statement text legible
+const IMAGE_QUALITY = 0.82;
+const KEEP_ORIGINAL_IMAGE_BYTES = 400 * 1024;
+const MAX_TEXT_BYTES = 256 * 1024;
+const TEXT_FILE_PATTERN = /\.(txt|md|markdown|csv|tsv|json|log|ya?ml|xml|html?|py|js|ts|css|ini|cfg|conf|sql)$/i;
+// Relays that predate the upload endpoint still carry small files inline in
+// the command payload. That row lives in D1, so keep the budget tight.
+const INLINE_ATTACHMENT_BUDGET = 700 * 1024;
+const ATTACHMENT_ONLY_PROMPT = "Have a look at the attached file(s) and help me with this.";
 const REMOTE_API_ORIGIN = location.hostname.endsWith("github.io")
   ? "https://aios-remote-control.contact-wallerstedt.chatgpt.site"
   : "";
@@ -111,7 +122,8 @@ const state = {
   clarifierRequestId: "",
   clarifierDraft: "",
   clarifierQuestions: [],
-  clarifierLoading: false
+  clarifierLoading: false,
+  attachments: []
 };
 
 function applyAppearance(background = state.background) {
@@ -293,7 +305,13 @@ async function api(path, options = {}) {
     });
     const data = response.headers.get("content-type")?.includes("application/json") ? await response.json() : null;
     if (response.status === 401 && state.token && !path.includes("/account/")) clearSession();
-    if (!response.ok) throw new Error(data?.error || `Request failed (${response.status})`);
+    if (!response.ok) {
+      // Callers need the status, not just the copy: an older relay answers
+      // "Not found." to endpoints it has never heard of.
+      const failure = new Error(data?.error || `Request failed (${response.status})`);
+      failure.status = response.status;
+      throw failure;
+    }
     return data;
   } catch (error) {
     if (error?.name === "AbortError") throw new Error("Request timed out.");
@@ -1296,16 +1314,22 @@ function openLightbox(info) {
   const dot = $("#lightboxDot");
   image.removeAttribute("src");
   image.classList.remove("ready");
-  image.dataset.shot = info.shot;
+  image.dataset.shot = info.shot || "";
   image.dataset.machine = state.machineId;
   image.style.aspectRatio = info.ratio || "";
-  $("#lightboxLabel").textContent = info.shotLabel || info.title || "Screenshot";
+  $("#lightboxLabel").textContent = info.shotLabel || info.label || info.title || "Screenshot";
   dot.classList.toggle("hidden", !info.point);
   if (info.point) {
     dot.style.left = `${info.point.left}%`;
     dot.style.top = `${info.point.top}%`;
   }
   box.classList.remove("hidden");
+  // A file you attached is already on this phone — no relay round trip.
+  if (info.url) {
+    image.src = info.url;
+    image.classList.add("ready");
+    return;
+  }
   loadShot(image);
 }
 
@@ -1478,7 +1502,11 @@ function describe(event) {
   const text = (value) => String(value || "").trim();
 
   if (type === "prompt" || /follow.?up/.test(type)) {
-    return { kind: "user", body: text(payload.message || payload.text || payload.prompt) };
+    return {
+      kind: "user",
+      body: text(payload.message || payload.text || payload.prompt),
+      files: Array.isArray(payload.files) ? payload.files : []
+    };
   }
   if (type === "step_begin") return { kind: "step", step: payload.n };
   if (type === "screenshot") {
@@ -1593,6 +1621,41 @@ function describe(event) {
   return { kind: "entry", tone: "muted", glyph: "bolt", title: body.slice(0, 120) };
 }
 
+/** Text of a sent bubble, ignoring any attachment chips it carries. */
+function bubbleText(node) {
+  return (node.querySelector(".msg-text") || node.querySelector(".msg-bubble"))?.textContent ?? "";
+}
+
+/** Thumbnails inside a sent bubble. Previews are local object URLs, so a
+ *  replayed run from storage shows a named chip instead of a broken image. */
+function attachmentStrip(files) {
+  const strip = document.createElement("div");
+  strip.className = "msg-shots";
+  for (const file of files) {
+    const name = String(file.name || "attachment");
+    if (file.kind === "image" && file.url) {
+      const image = document.createElement("img");
+      image.src = file.url;
+      image.alt = name;
+      image.loading = "lazy";
+      image.addEventListener("click", (event) => {
+        event.stopPropagation();
+        openLightbox({ url: file.url, label: name });
+      });
+      strip.appendChild(image);
+      continue;
+    }
+    const chip = document.createElement("span");
+    chip.className = "msg-file";
+    chip.appendChild(icon(file.kind === "image" ? "image" : "file"));
+    const label = document.createElement("span");
+    label.textContent = name;
+    chip.appendChild(label);
+    strip.appendChild(chip);
+  }
+  return strip;
+}
+
 function clearThinkingPlaceholder() {
   $("#timeline")?.querySelectorAll(".entry.optimistic-think").forEach((node) => node.remove());
 }
@@ -1690,11 +1753,12 @@ function addEvent(event) {
     rule.textContent = `Step ${info.step ?? ""}`.trim();
     feed.appendChild(rule);
   } else if (info.kind === "user") {
-    if (!info.body) return;
-    // Already painted optimistically when you hit send — keep it full colour
-    // and just refresh the clock when the PC echoes the same text.
+    const files = info.files || [];
+    if (!info.body && !files.length) return;
+    // Already painted optimistically when you hit send — keep it full colour,
+    // keep its thumbnails, and just refresh the clock when the PC echoes back.
     const existing = [...feed.querySelectorAll(".msg")]
-      .find((node) => node.querySelector(".msg-bubble")?.textContent === info.body);
+      .find((node) => bubbleText(node) === info.body);
     if (existing) {
       existing.classList.remove("pending");
       const clock = existing.querySelector("time");
@@ -1705,7 +1769,11 @@ function addEvent(event) {
     row.className = "msg";
     const bubble = document.createElement("div");
     bubble.className = "msg-bubble";
-    bubble.textContent = info.body;
+    if (files.length) bubble.appendChild(attachmentStrip(files));
+    const message = document.createElement("span");
+    message.className = "msg-text";
+    message.textContent = info.body;
+    bubble.appendChild(message);
     const time = document.createElement("time");
     time.textContent = clockTime(stamp);
     row.append(bubble, time);
@@ -1870,7 +1938,7 @@ function openRun(task, stamp) {
 }
 
 /** Remember what you typed, even if the PC never manages to start the run. */
-function notePrompt(text, { asFollowUp = false } = {}) {
+function notePrompt(text, { asFollowUp = false, files = [] } = {}) {
   const stamp = Date.now();
   // Follow-ups stay on the open live run. A new task always opens a fresh
   // run — reusing a stale "open" row after the PC went idle is what made the
@@ -1879,7 +1947,9 @@ function notePrompt(text, { asFollowUp = false } = {}) {
   const reuse = asFollowUp && state.liveRun && state.liveRun.status === "open";
   const run = reuse ? state.liveRun : openRun(text, stamp);
   if (!run.task) run.task = String(text || "").slice(0, 400);
-  run.events.push({ type: "prompt", payload: { message: text }, created_at: stamp });
+  // Object URLs die with the page, so history keeps the names only.
+  const saved = files.map((file) => ({ name: file.name, kind: file.kind }));
+  run.events.push({ type: "prompt", payload: { message: text, files: saved }, created_at: stamp });
   saveHistory();
 }
 
@@ -2196,11 +2266,229 @@ async function loadVersion() {
   }
 }
 
+/* ── attachments ──────────────────────────────────────── */
+
+function humanSize(bytes) {
+  const value = Number(bytes) || 0;
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${Math.round(value / 1024)} KB`;
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function attachmentKind(file) {
+  const type = String(file.type || "").toLowerCase();
+  if (type.startsWith("image/")) return "image";
+  if (type.startsWith("text/") || type === "application/json") return "text";
+  return TEXT_FILE_PATTERN.test(file.name || "") ? "text" : "";
+}
+
+/** Decode a picked image, EXIF rotation included, without leaking object URLs. */
+async function decodeImage(file) {
+  if (window.createImageBitmap) {
+    try { return await createImageBitmap(file, { imageOrientation: "from-image" }); } catch { /* Safari fallback */ }
+  }
+  const url = URL.createObjectURL(file);
+  try {
+    const image = new Image();
+    image.decoding = "async";
+    await new Promise((resolve, reject) => {
+      image.onload = resolve;
+      image.onerror = () => reject(new Error("That image could not be opened."));
+      image.src = url;
+    });
+    return image;
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+/** Shrink a phone photo to something the model reads well and the relay
+ *  carries quickly. Small images are passed through untouched. */
+async function prepareImage(file) {
+  const source = await decodeImage(file);
+  const width = source.width || source.naturalWidth;
+  const height = source.height || source.naturalHeight;
+  if (!width || !height) throw new Error("That image could not be opened.");
+  const scale = Math.min(1, MAX_IMAGE_EDGE / Math.max(width, height));
+  // Only pass a file through untouched when the PC can certainly open it —
+  // an iPhone HEIC or an SVG has to become a JPEG on this side of the wire.
+  const portable = /^image\/(png|jpeg|webp|gif|bmp)$/.test(String(file.type || "").toLowerCase());
+  if (scale === 1 && portable && file.size <= KEEP_ORIGINAL_IMAGE_BYTES) {
+    source.close?.();
+    return { blob: file, type: file.type || "image/png", name: file.name || "image.png" };
+  }
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(width * scale));
+  canvas.height = Math.max(1, Math.round(height * scale));
+  const context = canvas.getContext("2d");
+  context.drawImage(source, 0, 0, canvas.width, canvas.height);
+  source.close?.();
+  const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", IMAGE_QUALITY));
+  if (!blob) throw new Error("That image could not be prepared.");
+  const base = String(file.name || "image").replace(/\.[^.]+$/, "") || "image";
+  return { blob, type: "image/jpeg", name: `${base}.jpg` };
+}
+
+function renderAttachments() {
+  const tray = $("#attachTray");
+  if (!tray) return;
+  tray.textContent = "";
+  tray.classList.toggle("hidden", !state.attachments.length);
+  $("#attachBtn")?.classList.toggle("on", Boolean(state.attachments.length));
+  for (const item of state.attachments) {
+    const chip = document.createElement("div");
+    chip.className = `attach-chip ${item.kind === "image" ? "image" : "file"}${item.busy ? " busy" : ""}`;
+    if (item.kind === "image") {
+      const thumb = document.createElement("img");
+      thumb.src = item.preview;
+      thumb.alt = item.name;
+      chip.appendChild(thumb);
+    } else {
+      chip.appendChild(icon("file"));
+      const meta = document.createElement("div");
+      meta.className = "attach-meta";
+      const name = document.createElement("strong");
+      name.textContent = item.name;
+      const size = document.createElement("small");
+      size.textContent = humanSize(item.size);
+      meta.append(name, size);
+      chip.appendChild(meta);
+    }
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "attach-remove";
+    remove.setAttribute("aria-label", `Remove ${item.name}`);
+    remove.appendChild(icon("close"));
+    remove.addEventListener("click", () => removeAttachment(item.id));
+    chip.appendChild(remove);
+    tray.appendChild(chip);
+  }
+  autoGrow();
+}
+
+function removeAttachment(id) {
+  const item = state.attachments.find((entry) => entry.id === id);
+  if (!item) return;
+  if (item.preview) URL.revokeObjectURL(item.preview);
+  state.attachments = state.attachments.filter((entry) => entry.id !== id);
+  renderAttachments();
+  buzz();
+}
+
+function clearAttachments() {
+  // Previews are left alive on purpose: the bubble you just sent shows them.
+  state.attachments = [];
+  renderAttachments();
+}
+
+function markAttachmentsBusy(busy) {
+  state.attachments.forEach((item) => { item.busy = busy; });
+  renderAttachments();
+}
+
+async function addFiles(fileList) {
+  const files = [...(fileList || [])].filter(Boolean);
+  if (!files.length) return;
+  if (!currentMachine()) { toast("Connect a computer first."); return; }
+  let skipped = "";
+  for (const file of files) {
+    if (state.attachments.length >= MAX_ATTACHMENTS) {
+      toast(`Up to ${MAX_ATTACHMENTS} files per message`);
+      break;
+    }
+    const kind = attachmentKind(file);
+    if (!kind) {
+      skipped = /\.pdf$/i.test(file.name || "")
+        ? "PDFs aren't supported yet — send a screenshot of the page."
+        : `${file.name || "That file"} isn't a photo or a text file.`;
+      continue;
+    }
+    if (file.size > MAX_FILE_BYTES) { skipped = `${file.name || "That file"} is over 15 MB.`; continue; }
+    if (kind === "text" && file.size > MAX_TEXT_BYTES) { skipped = `${file.name || "That file"} is too long to send.`; continue; }
+    try {
+      const prepared = kind === "image"
+        ? await prepareImage(file)
+        : { blob: file, type: file.type || "text/plain", name: file.name || "note.txt" };
+      state.attachments.push({
+        id: `a${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+        kind,
+        name: prepared.name,
+        type: prepared.type,
+        size: prepared.blob.size,
+        blob: prepared.blob,
+        preview: kind === "image" ? URL.createObjectURL(prepared.blob) : "",
+        busy: false
+      });
+    } catch (error) {
+      skipped = error.message || "That file could not be read.";
+    }
+  }
+  renderAttachments();
+  if (skipped) toast(skipped);
+  else buzz();
+}
+
+async function blobToBase64(blob) {
+  const buffer = new Uint8Array(await blob.arrayBuffer());
+  let binary = "";
+  for (let index = 0; index < buffer.length; index += 0x8000) {
+    binary += String.fromCharCode.apply(null, buffer.subarray(index, index + 0x8000));
+  }
+  return btoa(binary);
+}
+
+async function uploadAttachment(item) {
+  const machine = currentMachine();
+  if (!machine) throw new Error("Choose a computer first.");
+  const path = `/api/machines/${encodeURIComponent(machine.id)}/uploads?name=${encodeURIComponent(item.name)}`;
+  const data = await api(path, {
+    method: "POST",
+    body: item.blob,
+    headers: { "Content-Type": item.type || "application/octet-stream" },
+    timeoutMs: 90_000
+  });
+  return { key: data.key, name: item.name, kind: item.kind, type: item.type, size: item.size };
+}
+
+/** Hand the picked files to the relay, newest transport first.
+ *  A relay too old to know about uploads still gets small files inline. */
+async function packAttachments(items) {
+  if (!items.length) return [];
+  const packed = [];
+  let inlineOnly = false;
+  for (const item of items) {
+    if (!inlineOnly) {
+      try {
+        packed.push(await uploadAttachment(item));
+        continue;
+      } catch (error) {
+        // Only a relay that has never heard of uploads earns the fallback.
+        if (![404, 405, 501].includes(error.status)) throw error;
+        inlineOnly = true;
+      }
+    }
+    packed.push({
+      name: item.name, kind: item.kind, type: item.type, size: item.size,
+      data: await blobToBase64(item.blob)
+    });
+  }
+  const inlineBytes = packed.reduce((total, item) => total + (item.data ? item.data.length : 0), 0);
+  if (inlineBytes > INLINE_ATTACHMENT_BUDGET) {
+    throw new Error("Your relay needs updating before it can carry files this big.");
+  }
+  return packed;
+}
+
+function attachmentSummary(items) {
+  return items.map((item) => ({ name: item.name, kind: item.kind, url: item.preview || "" }));
+}
+
 function autoGrow() {
   const input = $("#promptInput");
   input.style.height = "auto";
   input.style.height = `${Math.min(input.scrollHeight, window.innerHeight * 0.34)}px`;
-  $("#suggestions").classList.toggle("hidden", Boolean(input.value.trim()) || treatAsFollowUp());
+  const busy = Boolean(input.value.trim()) || state.attachments.length > 0 || treatAsFollowUp();
+  $("#suggestions").classList.toggle("hidden", busy);
 }
 
 function clearClarifier(clearQuestions = true) {
@@ -2880,10 +3168,68 @@ document.addEventListener("keydown", (event) => {
 $("#micBtn").addEventListener("click", () => (recognition ? stopDictation() : startDictation()));
 $("#micStopBtn").addEventListener("click", stopDictation);
 
+/* ── wiring: attachments ──────────────────────────────── */
+
+$("#attachBtn").addEventListener("click", () => {
+  buzz();
+  $("#fileInput").click();
+});
+$("#fileInput").addEventListener("change", async (event) => {
+  await addFiles(event.target.files);
+  event.target.value = "";   // picking the same photo twice must still work
+});
+
+// Paste a screenshot straight into the chat. Ignore pastes aimed at the
+// private-code and API-key fields, which are plain text by design.
+document.addEventListener("paste", (event) => {
+  if (!state.token || $("#appView").classList.contains("hidden")) return;
+  if (event.target instanceof HTMLElement && event.target.closest("input")) return;
+  const clipboard = event.clipboardData;
+  let files = [...(clipboard?.files || [])];
+  if (!files.length) {
+    // Some browsers only expose a pasted screenshot through the item list.
+    files = [...(clipboard?.items || [])]
+      .filter((item) => item.kind === "file")
+      .map((item) => item.getAsFile())
+      .filter(Boolean);
+  }
+  if (!files.length) return;
+  event.preventDefault();
+  addFiles(files);
+});
+
+let dragDepth = 0;
+const showDropHint = (on) => $("#dropHint").classList.toggle("hidden", !on);
+const draggingFiles = (event) => [...(event.dataTransfer?.types || [])].includes("Files");
+
+window.addEventListener("dragenter", (event) => {
+  if (!state.token || !draggingFiles(event)) return;
+  event.preventDefault();
+  dragDepth += 1;
+  showDropHint(true);
+});
+window.addEventListener("dragover", (event) => {
+  if (!draggingFiles(event)) return;
+  event.preventDefault();
+});
+window.addEventListener("dragleave", () => {
+  dragDepth = Math.max(0, dragDepth - 1);
+  if (!dragDepth) showDropHint(false);
+});
+window.addEventListener("drop", (event) => {
+  if (!state.token || !draggingFiles(event)) return;
+  event.preventDefault();
+  dragDepth = 0;
+  showDropHint(false);
+  addFiles(event.dataTransfer.files);
+});
+
 $("#promptForm").addEventListener("submit", async (event) => {
   event.preventDefault();
   stopDictation();
-  const prompt = $("#promptInput").value.trim();
+  const typed = $("#promptInput").value.trim();
+  const files = state.attachments.slice();
+  const prompt = typed || (files.length ? ATTACHMENT_ONLY_PROMPT : "");
   if (!prompt || state.busy) return;
   const machine = currentMachine();
   // Decide follow-up BEFORE clearing History view — viewing an old thread
@@ -2900,21 +3246,26 @@ $("#promptForm").addEventListener("submit", async (event) => {
   state.busy = true;
   $("#sendBtn").disabled = true;
   buzz(12);
-  notePrompt(prompt, { asFollowUp });
+  const summary = attachmentSummary(files);
+  notePrompt(prompt, { asFollowUp, files: summary });
   // Full colour immediately — never a grey "sending" bubble. Thinking shows
   // right away so the feed feels live before the first PC event arrives.
-  addEvent({ type: "prompt", payload: { message: prompt } });
+  addEvent({ type: "prompt", payload: { message: prompt, files: summary } });
   showThinkingSoon();
   try {
+    if (files.length) markAttachmentsBusy(true);
+    const attachments = await packAttachments(files);
     await sendCommand(type, {
       prompt,
       model: state.model,
       planner_model: state.plannerModel,
       max_steps: state.steps,
       reasoning_effort: state.effort,
-      shell: state.shell
+      shell: state.shell,
+      ...(attachments.length ? { attachments } : {})
     });
     $("#promptInput").value = "";
+    clearAttachments();
     clearClarifier();
     autoGrow();
     if (!machine?.online) toast("Queued until that computer reconnects");
@@ -2922,6 +3273,8 @@ $("#promptForm").addEventListener("submit", async (event) => {
     pollEvents().catch(() => {});
   } catch (error) {
     clearThinkingPlaceholder();
+    // Keep the files in the tray so a failed send is one tap from a retry.
+    markAttachmentsBusy(false);
     toast(error.message);
   } finally {
     state.busy = false;

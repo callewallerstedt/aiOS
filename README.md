@@ -77,6 +77,8 @@ You can choose a separate pre-run planning model (Sol by default) while keeping 
 
 Each PC gets its own machine credential. The phone can switch computers, send a new task or follow-up, stop a run, choose a monitor, and watch live OPERATOR activity and screenshots. No inbound port or temporary tunnel is required.
 
+Tap **+** in the chat bar to send photos or text files with a message — you can also paste a screenshot straight into the box, or drag files onto the window on a desktop browser. Photos are resized on the phone, travel through the relay's object store, and land in front of OPERATOR before your task starts: photograph a bank statement, ask it to find the matching receipts, and it works from the image. Attaching mid-run hands the file to the task already in flight.
+
 ## Updating
 
 Open **Settings → Update aiOS** inside the running helper. It:

@@ -58,6 +58,9 @@ os.environ["AIOS_ACTIVE_CODEX_HOME"] = str(CODEX_HOME)
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 CREATE_NEW_CONSOLE = 0x00000010 if os.name == "nt" else 0
 OPERATOR_DEFAULT_MODEL = "gpt-5.6-luna"
+# Text files the phone attaches are read this far and no further; the agent
+# loop trims them again before they reach the model.
+PHONE_TEXT_ATTACHMENT_LIMIT = 256 * 1024
 DEFAULT_PHONE_RELAY_URL = "https://aios-remote-control.contact-wallerstedt.chatgpt.site"
 DEFAULT_PROJECT_ROOT = r"D:\Projects" if Path("D:\\").exists() else str(Path.home() / "Documents" / "aiOS Projects")
 TRANSPARENT = "#010203"
@@ -10042,24 +10045,39 @@ class HelperOverlay:
             return
         loop = self.agent_operator_loop
         running = bool(loop and loop.is_running())
-        loaded = []
+        image_exts = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"}
+        images = []
+        texts = []
         for path in paths:
+            name = os.path.basename(path)
             try:
-                img = self.agent_operator_Image.open(path).convert("RGBA")
-                loaded.append((os.path.basename(path), img))
+                if os.path.splitext(path)[1].lower() in image_exts:
+                    images.append((name, self.agent_operator_Image.open(path).convert("RGBA")))
+                else:
+                    with open(path, "r", encoding="utf-8", errors="replace") as handle:
+                        texts.append((name, handle.read(PHONE_TEXT_ATTACHMENT_LIMIT)))
             except Exception:
                 continue
-        if not loaded:
+        if not images and not texts:
             return
         if running:
-            # Live run: inject as a follow-up image (no text — adds context only).
-            loop.add_follow_up("", images=[img for _, img in loaded])
-            for name, _ in loaded:
+            # Live run: inject as a follow-up (adds context to the task in flight).
+            note = "\n\n".join(
+                f"[attached file: {name}]\n{body[:8000]}"
+                + ("\n…[truncated]" if len(body) > 8000 else "")
+                for name, body in texts
+            )
+            loop.add_follow_up(note, images=[image for _, image in images])
+            for name, _ in images:
                 self._agent_operator_log_line("status", f"FOLLOW-UP IMAGE: {name}\n")
+            for name, _ in texts:
+                self._agent_operator_log_line("status", f"FOLLOW-UP FILE: {name}\n")
         else:
             # Idle: queue for the next Run() call.
-            for name, img in loaded:
-                self._agent_operator_add_image_attachment(img.convert("RGB"), name)
+            for name, image in images:
+                self._agent_operator_add_image_attachment(image.convert("RGB"), name)
+            for name, body in texts:
+                self._agent_operator_add_text_attachment(body, name)
 
     def _remote_operator_clear_attachments(self):
         try:

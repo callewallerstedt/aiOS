@@ -1,6 +1,9 @@
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" };
 const CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const ALLOWED_WEB_ORIGINS = new Set(["https://callewallerstedt.github.io"]);
+// Phone attachments travel through R2, not the command row: a photo is orders
+// of magnitude larger than anything D1 should hold.
+const MAX_UPLOAD_BYTES = 15 * 1024 * 1024;
 let schemaReady = false;
 
 function withCors(response, request) {
@@ -92,6 +95,21 @@ function safeJson(value, fallback = {}) {
   try { return JSON.parse(value || ""); } catch { return fallback; }
 }
 
+/** Attachment ids never carry a path — the key is rebuilt from the caller's
+ *  own account and machine, so one remote can never read another's upload. */
+function safeUploadId(value) {
+  return String(value || "").replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 48);
+}
+
+function uploadKey(accountId, machineId, id) {
+  return `uploads/${accountId}/${machineId}/${id}`;
+}
+
+function safeFileName(value) {
+  const name = String(value || "").replace(/[\r\n\\"]/g, "").replace(/[/\\]/g, "_").trim().slice(0, 120);
+  return name || "attachment";
+}
+
 async function handleApi(request, env, url) {
   await ensureSchema(env);
   const path = url.pathname;
@@ -178,6 +196,25 @@ async function handleApi(request, env, url) {
       return json({ ok: true });
     }
 
+    const agentUploadMatch = path.match(/^\/api\/agent\/uploads\/([^/]+)$/);
+    if (agentUploadMatch && (request.method === "GET" || request.method === "DELETE")) {
+      const id = safeUploadId(agentUploadMatch[1]);
+      if (!id) return json({ error: "Unknown attachment." }, 404);
+      const key = uploadKey(machine.account_id, machine.id, id);
+      if (request.method === "DELETE") {
+        await env.FILES.delete(key);
+        return json({ ok: true });
+      }
+      const object = await env.FILES.get(key);
+      if (!object) return json({ error: "That attachment is no longer available." }, 404);
+      const headers = new Headers({
+        "content-type": object.httpMetadata?.contentType || "application/octet-stream",
+        "cache-control": "no-store"
+      });
+      headers.set("x-aios-file-name", object.customMetadata?.name || "attachment");
+      return new Response(object.body, { headers });
+    }
+
     if (path.startsWith("/api/agent/frame/") && request.method === "PUT") {
       const monitor = path.split("/").pop().replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 32) || "primary";
       const key = `frames/${machine.account_id}/${machine.id}/${monitor}.jpg`;
@@ -234,6 +271,26 @@ async function handleApi(request, env, url) {
     const result = await env.DB.prepare("INSERT INTO commands (account_id, machine_id, type, payload_json, created_at) VALUES (?, ?, ?, ?, ?)")
       .bind(accountId, machineId, input.type, JSON.stringify(payload), now()).run();
     return json({ ok: true, command_id: result.meta?.last_row_id }, 202);
+  }
+
+  const uploadsMatch = path.match(/^\/api\/machines\/([^/]+)\/uploads$/);
+  if (uploadsMatch && request.method === "POST") {
+    const machineId = uploadsMatch[1];
+    const machine = await env.DB.prepare("SELECT id FROM machines WHERE id = ? AND account_id = ?").bind(machineId, accountId).first();
+    if (!machine) return json({ error: "Computer not found." }, 404);
+    if (Number(request.headers.get("content-length") || 0) > MAX_UPLOAD_BYTES) {
+      return json({ error: "That file is too big — 15 MB max." }, 413);
+    }
+    const bytes = await request.arrayBuffer();
+    if (!bytes.byteLength) return json({ error: "That file was empty." }, 400);
+    if (bytes.byteLength > MAX_UPLOAD_BYTES) return json({ error: "That file is too big — 15 MB max." }, 413);
+    const id = randomString(24);
+    const name = safeFileName(url.searchParams.get("name"));
+    await env.FILES.put(uploadKey(accountId, machineId, id), bytes, {
+      httpMetadata: { contentType: request.headers.get("content-type") || "application/octet-stream" },
+      customMetadata: { name, uploadedAt: String(now()) }
+    });
+    return json({ ok: true, key: id, name, size: bytes.byteLength }, 201);
   }
 
   const eventsMatch = path.match(/^\/api\/machines\/([^/]+)\/events$/);

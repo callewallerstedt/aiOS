@@ -384,7 +384,7 @@ def api_phone_send():
         safe = "".join(c for c in str(aid) if c.isalnum())
         if not safe:
             continue
-        for ext in _UPLOAD_EXTS:
+        for ext in _ALL_UPLOAD_EXTS:
             cand = OPERATOR_UPLOADS_DIR / f"{safe}{ext}"
             if cand.exists():
                 attachment_paths.append(str(cand))
@@ -395,6 +395,10 @@ def api_phone_send():
             intent == "followup"
             or (intent != "new" and state.get("running"))
         )
+        # A brand new task must never inherit the files of the previous one:
+        # the queue only drains when a run actually starts.
+        if not is_followup:
+            forward_helper("operator_clear_attachments", "")
         # Always push attachments to the helper first if we have any.
         if attachment_paths:
             forward_helper("operator_attach",
@@ -446,6 +450,38 @@ def api_phone_operator_clear():
 
 
 _UPLOAD_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"}
+_TEXT_UPLOAD_EXTS = {".txt", ".md", ".markdown", ".csv", ".tsv", ".json", ".log",
+                     ".yml", ".yaml", ".xml", ".html", ".htm", ".py", ".js", ".ts",
+                     ".css", ".ini", ".cfg", ".conf", ".sql"}
+_ALL_UPLOAD_EXTS = _UPLOAD_EXTS | _TEXT_UPLOAD_EXTS
+_MAX_TEXT_UPLOAD_BYTES = 256 * 1024
+
+
+def _prune_uploads(keep=60, max_age_days=3):
+    """Attachments are consumed by a run within seconds — don't hoard them."""
+    try:
+        files = sorted(
+            (path for path in OPERATOR_UPLOADS_DIR.iterdir() if path.is_file()),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError:
+        return
+    cutoff = time.time() - max_age_days * 86400
+    for index, path in enumerate(files):
+        try:
+            if index >= keep or path.stat().st_mtime < cutoff:
+                path.unlink()
+        except OSError:
+            pass
+
+
+def _looks_like_text(name, mimetype):
+    ext = os.path.splitext(name)[1].lower()
+    if ext in _TEXT_UPLOAD_EXTS:
+        return True
+    kind = str(mimetype or "").lower()
+    return kind.startswith("text/") or kind == "application/json"
 
 
 @app.route("/api/phone/operator/upload", methods=["POST", "OPTIONS"])
@@ -458,14 +494,25 @@ def api_phone_operator_upload():
         if not fs or not fs.filename:
             continue
         name = os.path.basename(fs.filename)
-        ext = os.path.splitext(name)[1].lower() or ".png"
+        ext = os.path.splitext(name)[1].lower()
+        uid = uuid.uuid4().hex[:12]
+        raw = fs.read()
+        if _looks_like_text(name, fs.mimetype):
+            # Text files go through untouched so OPERATOR reads them verbatim.
+            if len(raw) > _MAX_TEXT_UPLOAD_BYTES:
+                return jsonify({"ok": False, "error": f"{name} is too long"}), 400
+            target = OPERATOR_UPLOADS_DIR / f"{uid}{ext if ext in _TEXT_UPLOAD_EXTS else '.txt'}"
+            try:
+                target.write_text(raw.decode("utf-8", "replace"), encoding="utf-8")
+            except OSError as exc:
+                return jsonify({"ok": False, "error": f"could not save {name}: {exc}"}), 400
+            saved.append({"id": uid, "name": name, "path": str(target), "kind": "text"})
+            continue
         if ext not in _UPLOAD_EXTS:
             # Allow other formats but try to convert via PIL.
             ext = ".png"
-        uid = uuid.uuid4().hex[:12]
         target = OPERATOR_UPLOADS_DIR / f"{uid}{ext}"
         try:
-            raw = fs.read()
             # Normalize through PIL so the helper always opens it.
             img = Image.open(io.BytesIO(raw))
             if img.mode not in ("RGB", "RGBA"):
@@ -473,9 +520,10 @@ def api_phone_operator_upload():
             img.save(target)
         except Exception as exc:
             return jsonify({"ok": False, "error": f"could not decode {name}: {exc}"}), 400
-        saved.append({"id": uid, "name": name, "path": str(target)})
+        saved.append({"id": uid, "name": name, "path": str(target), "kind": "image"})
     if not saved:
         return jsonify({"ok": False, "error": "no files"}), 400
+    _prune_uploads()
     return jsonify({"ok": True, "attachments": saved})
 
 

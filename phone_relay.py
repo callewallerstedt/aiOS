@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import concurrent.futures
 import ctypes
 import json
+import mimetypes
 import os
 from pathlib import Path
 import platform
@@ -42,6 +45,10 @@ MODEL_MAP = {
 # overwrites the images an older conversation is still displaying.
 SHOT_SLOTS = 6
 MAX_SHOT_UPLOADS_PER_TICK = 4
+# Files the phone attached to a message. The relay only stores them until this
+# PC has them, so anything larger belongs on a real file share.
+MAX_ATTACHMENTS = 6
+MAX_ATTACHMENT_BYTES = 15 * 1024 * 1024
 RELAY_MUTEX_NAME = "Local\\aiOS.PhoneRelay.Singleton"
 _RELAY_MUTEX_HANDLE = None
 
@@ -411,6 +418,73 @@ class Bridge:
     def local_json(self, path: str, **kwargs):
         return request_json(f"{LOCAL_BASE}{path}", **kwargs)
 
+    def _attachment_key(self, item: dict) -> str:
+        raw = str(item.get("key") or "")
+        return "".join(ch for ch in raw if ch.isalnum() or ch in "-_")[:48]
+
+    def _attachment_bytes(self, item: dict) -> tuple[str, bytes, str]:
+        """Fetch one file the phone attached, from the relay or from the command.
+
+        Small files ride inline in the command payload when the hosted relay
+        is older than the upload endpoint; everything else goes through R2.
+        """
+        name = os.path.basename(str(item.get("name") or "").strip().replace("\\", "/")) or "attachment"
+        mime = str(item.get("type") or "").strip() or mimetypes.guess_type(name)[0] or "application/octet-stream"
+        key = self._attachment_key(item)
+        if key:
+            content = request_bytes(
+                f"{self.relay_url}/api/agent/uploads/{urllib.parse.quote(key, safe='')}",
+                headers=self.headers,
+                timeout=60,
+            )
+        else:
+            try:
+                content = base64.b64decode(str(item.get("data") or ""), validate=True)
+            except (binascii.Error, ValueError) as exc:
+                raise RuntimeError(f"could not read {name}") from exc
+        if not content:
+            raise RuntimeError(f"{name} arrived empty")
+        if len(content) > MAX_ATTACHMENT_BYTES:
+            raise RuntimeError(f"{name} is larger than 15 MB")
+        return name, content, mime
+
+    def _release_attachment(self, item: dict) -> None:
+        """Drop the relay copy once this PC has the bytes."""
+        key = self._attachment_key(item)
+        if not key:
+            return
+        try:
+            request_bytes(
+                f"{self.relay_url}/api/agent/uploads/{urllib.parse.quote(key, safe='')}",
+                method="DELETE",
+                headers=self.headers,
+                timeout=10,
+            )
+        except Exception:
+            pass
+
+    def fetch_attachments(self, items: list) -> list[str]:
+        """Hand the phone's files to aiOS and return the local attachment ids."""
+        wanted = [item for item in list(items)[:MAX_ATTACHMENTS] if isinstance(item, dict)]
+        if not wanted:
+            return []
+        response = httpx.post(
+            f"{LOCAL_BASE}/api/phone/operator/upload",
+            files=[("files", self._attachment_bytes(item)) for item in wanted],
+            timeout=httpx.Timeout(90.0, connect=5.0),
+        )
+        if response.status_code >= 400:
+            detail = ""
+            try:
+                detail = str(response.json().get("error") or "")
+            except Exception:
+                detail = response.text[:200]
+            raise RuntimeError(detail or f"attachment upload failed ({response.status_code})")
+        saved = response.json().get("attachments") or []
+        for item in wanted:
+            self._release_attachment(item)
+        return [str(entry.get("id")) for entry in saved if isinstance(entry, dict) and entry.get("id")]
+
     def execute(self, command: dict) -> dict:
         kind = str(command.get("type") or "")
         payload = command.get("payload") if isinstance(command.get("payload"), dict) else {}
@@ -433,16 +507,18 @@ class Bridge:
             }
             if "shell" in payload:
                 options["shell"] = bool(payload.get("shell"))
-            return self.local_json(
-                "/api/phone/send",
-                method="POST",
-                payload={
-                    "text": str(payload.get("prompt") or ""),
-                    "target": "operator",
-                    "intent": "followup" if kind == "followup" else "new",
-                    "options": options,
-                },
-            )
+            body = {
+                "text": str(payload.get("prompt") or ""),
+                "target": "operator",
+                "intent": "followup" if kind == "followup" else "new",
+                "options": options,
+            }
+            incoming = payload.get("attachments")
+            if isinstance(incoming, list) and incoming:
+                # Pull the files down before the task starts: a run that begins
+                # without the image the user sent is worse than a late start.
+                body["attachments"] = self.fetch_attachments(incoming)
+            return self.local_json("/api/phone/send", method="POST", payload=body, timeout=30)
         if kind == "stop":
             return self.local_json("/api/phone/operator/stop", method="POST", payload={})
         if kind == "config":
