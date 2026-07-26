@@ -1,8 +1,4 @@
-<<<<<<< HEAD
-const CACHE = "aios-remote-v27";
-=======
-const CACHE = "aios-remote-v26";
->>>>>>> d03a839 (Improve phone chat UX and make OPERATOR screenshots on-demand)
+const CACHE = "aios-remote-v28";
 const SHELL = [
   "./",
   "phone.css",

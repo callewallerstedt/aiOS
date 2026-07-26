@@ -9987,15 +9987,12 @@ class HelperOverlay:
 
     def _remote_operator_followup(self, text, options=None):
         text = (text or "").strip() or "Continue"
-<<<<<<< HEAD
-=======
         extra_steps = None
         if isinstance(options, dict) and options.get("steps") not in (None, ""):
             try:
                 extra_steps = max(1, min(200, int(float(options.get("steps")))))
             except (TypeError, ValueError):
                 extra_steps = None
->>>>>>> d03a839 (Improve phone chat UX and make OPERATOR screenshots on-demand)
         try:
             if not self._ensure_agent_operator():
                 self._phone_mirror_fail(
@@ -10007,11 +10004,7 @@ class HelperOverlay:
             return
         loop = self.agent_operator_loop
         if not loop or not loop.is_running():
-<<<<<<< HEAD
             # Nothing running → treat as a fresh task (keep options).
-=======
-            # Nothing running → treat as a fresh task.
->>>>>>> d03a839 (Improve phone chat UX and make OPERATOR screenshots on-demand)
             self._remote_submit_operator(text, options)
             return
         try:
