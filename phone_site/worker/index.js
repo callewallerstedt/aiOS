@@ -48,9 +48,185 @@ async function body(request) {
   try { return await request.json(); } catch { return {}; }
 }
 
+/* ── web push (RFC 8291 aes128gcm + RFC 8292 VAPID) ─────────────────────
+ *
+ * A phone that is asleep runs no JavaScript, so the app itself can never
+ * raise the alert — on iOS a home-screen web app is suspended seconds after
+ * you put it down. The relay has to push, which means encrypting the payload
+ * to the subscription's own key here in the worker.
+ */
+
+const VAPID_SUBJECT = "mailto:aios-remote@users.noreply.github.com";
+const PUSH_TTL_SECONDS = 3600;
+
+export function base64UrlEncode(bytes) {
+  let binary = "";
+  const view = new Uint8Array(bytes);
+  for (let index = 0; index < view.length; index += 1) binary += String.fromCharCode(view[index]);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+export function base64UrlDecode(value) {
+  const padded = String(value || "").replace(/-/g, "+").replace(/_/g, "/");
+  const binary = atob(padded + "=".repeat((4 - (padded.length % 4)) % 4));
+  return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+}
+
+function concatBytes(...chunks) {
+  const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) { out.set(chunk, offset); offset += chunk.length; }
+  return out;
+}
+
+async function hkdf(salt, ikm, info, length) {
+  const key = await crypto.subtle.importKey("raw", ikm, "HKDF", false, ["deriveBits"]);
+  const bits = await crypto.subtle.deriveBits({ name: "HKDF", hash: "SHA-256", salt, info }, key, length * 8);
+  return new Uint8Array(bits);
+}
+
+/** The application server keypair every subscription is bound to. Generated
+ *  once and kept in D1 — rotating it silently invalidates every phone. */
+export async function vapidKeys(env) {
+  const stored = await env.DB.prepare("SELECT value FROM settings WHERE key = 'vapid'").first();
+  if (stored?.value) return JSON.parse(String(stored.value));
+  const pair = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
+  const keys = {
+    publicKey: base64UrlEncode(await crypto.subtle.exportKey("raw", pair.publicKey)),
+    privateKey: await crypto.subtle.exportKey("jwk", pair.privateKey)
+  };
+  await env.DB.prepare("INSERT OR IGNORE INTO settings (key, value, created_at) VALUES ('vapid', ?, ?)")
+    .bind(JSON.stringify(keys), now()).run();
+  // Another request may have won the race; the stored pair is the real one.
+  const settled = await env.DB.prepare("SELECT value FROM settings WHERE key = 'vapid'").first();
+  return settled?.value ? JSON.parse(String(settled.value)) : keys;
+}
+
+export async function vapidHeader(env, endpoint) {
+  const keys = await vapidKeys(env);
+  const audience = new URL(endpoint).origin;
+  const header = base64UrlEncode(new TextEncoder().encode(JSON.stringify({ typ: "JWT", alg: "ES256" })));
+  const claims = base64UrlEncode(new TextEncoder().encode(JSON.stringify({
+    aud: audience,
+    exp: Math.floor(now() / 1000) + 12 * 60 * 60,
+    sub: VAPID_SUBJECT
+  })));
+  const signingKey = await crypto.subtle.importKey(
+    "jwk", { ...keys.privateKey, key_ops: ["sign"] }, { name: "ECDSA", namedCurve: "P-256" }, false, ["sign"]);
+  const signature = await crypto.subtle.sign(
+    { name: "ECDSA", hash: "SHA-256" }, signingKey, new TextEncoder().encode(`${header}.${claims}`));
+  return {
+    authorization: `vapid t=${header}.${claims}.${base64UrlEncode(signature)}, k=${keys.publicKey}`,
+    publicKey: keys.publicKey
+  };
+}
+
+/** Encrypt one push payload for one subscription (aes128gcm, single record). */
+export async function encryptPushPayload(plaintext, subscriberPublic, authSecret, options = {}) {
+  const salt = options.salt || crypto.getRandomValues(new Uint8Array(16));
+  const local = options.localKeys || await crypto.subtle.generateKey(
+    { name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+  const localPublic = new Uint8Array(await crypto.subtle.exportKey("raw", local.publicKey));
+  const shared = new Uint8Array(await crypto.subtle.deriveBits(
+    { name: "ECDH", public: await crypto.subtle.importKey("raw", subscriberPublic, { name: "ECDH", namedCurve: "P-256" }, false, []) },
+    local.privateKey,
+    256
+  ));
+
+  const encoder = new TextEncoder();
+  const keyInfo = concatBytes(encoder.encode("WebPush: info"), new Uint8Array([0]), subscriberPublic, localPublic);
+  const ikm = await hkdf(authSecret, shared, keyInfo, 32);
+  const cek = await hkdf(salt, ikm, concatBytes(encoder.encode("Content-Encoding: aes128gcm"), new Uint8Array([0])), 16);
+  const nonce = await hkdf(salt, ikm, concatBytes(encoder.encode("Content-Encoding: nonce"), new Uint8Array([0])), 12);
+
+  const aesKey = await crypto.subtle.importKey("raw", cek, "AES-GCM", false, ["encrypt"]);
+  const padded = concatBytes(plaintext, new Uint8Array([2]));   // last record delimiter
+  const ciphertext = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce }, aesKey, padded));
+
+  const recordSize = new Uint8Array(4);
+  new DataView(recordSize.buffer).setUint32(0, 4096);
+  return concatBytes(salt, recordSize, new Uint8Array([localPublic.length]), localPublic, ciphertext);
+}
+
+async function sendPush(env, subscription, payload) {
+  const bodyBytes = await encryptPushPayload(
+    new TextEncoder().encode(JSON.stringify(payload)),
+    base64UrlDecode(subscription.p256dh),
+    base64UrlDecode(subscription.auth)
+  );
+  const vapid = await vapidHeader(env, subscription.endpoint);
+  return fetch(subscription.endpoint, {
+    method: "POST",
+    headers: {
+      "content-encoding": "aes128gcm",
+      "content-type": "application/octet-stream",
+      "content-length": String(bodyBytes.length),
+      ttl: String(PUSH_TTL_SECONDS),
+      urgency: payload.requireInteraction ? "high" : "normal",
+      authorization: vapid.authorization
+    },
+    body: bodyBytes
+  });
+}
+
+/** Alert every phone on this account. Dead subscriptions clean themselves up. */
+async function pushToAccount(env, accountId, payload) {
+  const result = await env.DB.prepare("SELECT endpoint, p256dh, auth FROM push_subs WHERE account_id = ?")
+    .bind(accountId).all();
+  const subscriptions = result.results || [];
+  for (const subscription of subscriptions) {
+    try {
+      const response = await sendPush(env, subscription, payload);
+      if (response.status === 404 || response.status === 410) {
+        await env.DB.prepare("DELETE FROM push_subs WHERE endpoint = ?").bind(subscription.endpoint).run();
+      }
+    } catch (error) {
+      console.error("push failed", error);
+    }
+  }
+}
+
+/** The moments worth waking a phone for. Anything else is just activity. */
+export function alertFor(event, machineName) {
+  const type = String(event?.type || "").toLowerCase();
+  const payload = event?.payload && typeof event.payload === "object" ? event.payload : {};
+  const on = machineName ? ` · ${machineName}` : "";
+  if (type === "ask") {
+    return {
+      title: "OPERATOR needs your input",
+      body: String(payload.message || "Waiting for your answer").slice(0, 220) + on,
+      tag: "aios-ask",
+      requireInteraction: true
+    };
+  }
+  if (type === "max_steps") {
+    return {
+      title: "OPERATOR needs more steps",
+      body: String(payload.message || "Continue the run?").slice(0, 220) + on,
+      tag: "aios-max-steps",
+      requireInteraction: true
+    };
+  }
+  if (type === "done") {
+    const steps = Number(payload.steps || 0);
+    const detail = String(payload.message || (payload.ok ? "Task complete" : "The run stopped")).slice(0, 200);
+    return {
+      title: payload.ok ? "OPERATOR finished" : "OPERATOR run ended",
+      body: [detail, steps ? `${steps} steps` : ""].filter(Boolean).join(" · ") + on,
+      tag: "aios-done",
+      requireInteraction: false
+    };
+  }
+  return null;
+}
+
 async function ensureSchema(env) {
   if (schemaReady) return;
   await env.DB.batch([
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, created_at INTEGER NOT NULL)"),
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS push_subs (endpoint TEXT PRIMARY KEY, account_id TEXT NOT NULL, p256dh TEXT NOT NULL, auth TEXT NOT NULL, created_at INTEGER NOT NULL)"),
+    env.DB.prepare("CREATE INDEX IF NOT EXISTS push_subs_account ON push_subs(account_id)"),
     env.DB.prepare("CREATE TABLE IF NOT EXISTS accounts (id TEXT PRIMARY KEY, code_hash TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL)"),
     env.DB.prepare("CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, account_id TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL)"),
     env.DB.prepare("CREATE TABLE IF NOT EXISTS machines (id TEXT PRIMARY KEY, account_id TEXT NOT NULL, name TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, platform TEXT, status_json TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, last_seen INTEGER NOT NULL)"),
@@ -110,11 +286,18 @@ function safeFileName(value) {
   return name || "attachment";
 }
 
-async function handleApi(request, env, url) {
+async function handleApi(request, env, url, context) {
   await ensureSchema(env);
   const path = url.pathname;
 
   if (path === "/api/health") return json({ ok: true, service: "aiOS Remote" });
+
+  // The application server key is public by definition — the service worker
+  // needs it before there is any session to authenticate with.
+  if (path === "/api/push/key" && request.method === "GET") {
+    const keys = await vapidKeys(env);
+    return json({ key: keys.publicKey });
+  }
 
   if (path === "/api/account/create" && request.method === "POST") {
     const accountId = crypto.randomUUID();
@@ -170,6 +353,14 @@ async function handleApi(request, env, url) {
       if (events.length) {
         await env.DB.batch(events.map((event) => env.DB.prepare("INSERT INTO events (account_id, machine_id, type, payload_json, created_at) VALUES (?, ?, ?, ?, ?)")
           .bind(machine.account_id, machine.id, String(event.type || "log").slice(0, 40), JSON.stringify(event.payload || {}), Number(event.created_at || timestamp))));
+        // Wake the phone for the moments that need a person. Never block the
+        // PC's heartbeat on someone else's push service.
+        const alerts = events.map((event) => alertFor(event, machine.name)).filter(Boolean);
+        if (alerts.length) {
+          const notice = { ...alerts[alerts.length - 1], url: "./", machine_id: machine.id };
+          const delivery = pushToAccount(env, String(machine.account_id), notice);
+          if (context?.waitUntil) context.waitUntil(delivery); else await delivery;
+        }
       }
       if (input.status) {
         await env.DB.prepare("UPDATE machines SET status_json = ?, last_seen = ?, updated_at = ? WHERE id = ?")
@@ -273,6 +464,39 @@ async function handleApi(request, env, url) {
     return json({ ok: true, command_id: result.meta?.last_row_id }, 202);
   }
 
+  if (path === "/api/push/subscribe" && request.method === "POST") {
+    const input = await body(request);
+    const endpoint = String(input.endpoint || "").trim();
+    const p256dh = String(input.keys?.p256dh || "").trim();
+    const auth = String(input.keys?.auth || "").trim();
+    if (!/^https:\/\//.test(endpoint) || !p256dh || !auth) return json({ error: "That subscription is incomplete." }, 400);
+    await env.DB.prepare("INSERT INTO push_subs (endpoint, account_id, p256dh, auth, created_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(endpoint) DO UPDATE SET account_id = excluded.account_id, p256dh = excluded.p256dh, auth = excluded.auth")
+      .bind(endpoint, accountId, p256dh, auth, now()).run();
+    return json({ ok: true }, 201);
+  }
+
+  if (path === "/api/push/subscribe" && request.method === "DELETE") {
+    const input = await body(request);
+    const endpoint = String(input.endpoint || "").trim();
+    if (endpoint) {
+      await env.DB.prepare("DELETE FROM push_subs WHERE endpoint = ? AND account_id = ?").bind(endpoint, accountId).run();
+    }
+    return json({ ok: true });
+  }
+
+  // Prove the round trip from the phone's own settings screen.
+  if (path === "/api/push/test" && request.method === "POST") {
+    const count = await env.DB.prepare("SELECT COUNT(*) AS total FROM push_subs WHERE account_id = ?").bind(accountId).first();
+    if (!Number(count?.total || 0)) return json({ error: "This phone is not subscribed yet." }, 404);
+    await pushToAccount(env, accountId, {
+      title: "aiOS Remote",
+      body: "Notifications are working. You'll hear from OPERATOR here.",
+      tag: "aios-test",
+      url: "./"
+    });
+    return json({ ok: true, phones: Number(count.total) });
+  }
+
   const uploadsMatch = path.match(/^\/api\/machines\/([^/]+)\/uploads$/);
   if (uploadsMatch && request.method === "POST") {
     const machineId = uploadsMatch[1];
@@ -340,12 +564,12 @@ async function handleApi(request, env, url) {
 }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, context) {
     const url = new URL(request.url);
     try {
       if (url.pathname.startsWith("/api/")) {
         if (request.method === "OPTIONS") return withCors(new Response(null, { status: 204 }), request);
-        return withCors(await handleApi(request, env, url), request);
+        return withCors(await handleApi(request, env, url, context), request);
       }
       return env.ASSETS.fetch(request);
     } catch (error) {

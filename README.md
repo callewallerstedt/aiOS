@@ -79,6 +79,10 @@ Each PC gets its own machine credential. The phone can switch computers, send a 
 
 Tap **+** in the chat bar to send photos or text files with a message — you can also paste a screenshot straight into the box, or drag files onto the window on a desktop browser. Photos are resized on the phone, travel through the relay's object store, and land in front of OPERATOR before your task starts: photograph a bank statement, ask it to find the matching receipts, and it works from the image. Attaching mid-run hands the file to the task already in flight.
 
+The conversation is yours to keep: leave for an hour and the thread comes back with everything OPERATOR did while you were gone, still under the message that started it. Only **New chat** clears the feed.
+
+**Settings → Notifications** wakes the phone when OPERATOR needs an answer, runs out of steps, or finishes — with the app closed. The relay sends real Web Push (VAPID + RFC 8291), so nothing depends on the app being awake to poll. On iPhone, add aiOS Remote to your Home Screen first: iOS only allows notifications for installed web apps. **Send a test notification** proves the round trip.
+
 ## Updating
 
 Open **Settings → Update aiOS** inside the running helper. It:

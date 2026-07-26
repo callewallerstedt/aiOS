@@ -1,4 +1,4 @@
-const CACHE = "aios-remote-v29";
+const CACHE = "aios-remote-v30";
 const SHELL = [
   "./",
   "phone.css",
@@ -26,6 +26,34 @@ self.addEventListener("fetch", (event) => {
     caches.open(CACHE).then((cache) => cache.put(event.request, copy));
     return response;
   }).catch(() => caches.match(event.request).then((cached) => cached || caches.match("./"))));
+});
+
+/* The relay sends these while the app is closed — on iOS that is the only
+ * moment notifications can appear at all, so every push must show one. */
+self.addEventListener("push", (event) => {
+  let data = {};
+  try {
+    data = event.data ? event.data.json() : {};
+  } catch {
+    data = { body: event.data ? event.data.text() : "" };
+  }
+  const title = data.title || "aiOS Remote";
+  event.waitUntil(self.registration.showNotification(title, {
+    body: data.body || "",
+    tag: data.tag || "aios-remote",
+    renotify: true,
+    requireInteraction: Boolean(data.requireInteraction),
+    icon: "icons/aios-icon-192.png",
+    badge: "icons/aios-icon-192.png",
+    data: { url: data.url || "./", tag: data.tag || "", machineId: data.machine_id || "" }
+  }));
+});
+
+/* A rotated subscription is re-registered by the app on next open — it holds
+ * the session token this worker does not. Keep the old one from lingering. */
+self.addEventListener("pushsubscriptionchange", (event) => {
+  event.waitUntil(self.clients.matchAll({ includeUncontrolled: true })
+    .then((list) => list.forEach((client) => client.postMessage({ type: "push-subscription-changed" }))));
 });
 
 self.addEventListener("notificationclick", (event) => {

@@ -37,7 +37,6 @@ const HISTORY_KEY = "aios_history_v1";
 const MAX_HISTORY_RUNS = 25;
 const MAX_RUN_EVENTS = 400;
 const HISTORY_BUDGET = 1_200_000;      // characters of JSON, well inside the quota
-const SESSION_RESET_MS = 30 * 60 * 1000;
 const IDLE_RUN_CLOSE_MS = 3 * 60 * 1000;
 const EVENT_PAGE = 200;                // the relay's page size
 const MAX_DRAIN_PAGES = 40;
@@ -85,6 +84,7 @@ const state = {
   haptics: prefs.bool("aios_haptics", true),
   keepAwake: prefs.bool("aios_awake", false),
   notify: prefs.bool("aios_notify", false),
+  pushReady: false,
   background: prefs.get("aios_background", "black"),
   providerMode: "codex",
   hasOpenAIKey: false,
@@ -280,6 +280,8 @@ function saveSession(token, code = "") {
 }
 
 function clearSession() {
+  // Locking the phone must also stop the relay waking it.
+  unsubscribePush(state.token).catch(() => {});
   state.token = "";
   state.privateCode = "";
   localStorage.removeItem("aios_remote_token");
@@ -334,6 +336,7 @@ function showApp() {
   $("#appView").classList.remove("hidden");
   $("#pairCode").textContent = state.privateCode || "Unlock with your private code first";
   startPolling();
+  refreshPushSubscription();
 }
 
 /* ── overlays (sheets + immersive viewer) ─────────────── */
@@ -1416,6 +1419,94 @@ async function ensureNotifyPermission() {
   }
 }
 
+const isIOS = /iP(hone|ad|od)/.test(navigator.userAgent)
+  || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+
+function installedToHomeScreen() {
+  return window.matchMedia?.("(display-mode: standalone)").matches || navigator.standalone === true;
+}
+
+/** Why this phone cannot be woken, in words the user can act on. */
+function pushBlocker() {
+  if (!("serviceWorker" in navigator)) return "This browser can't run background alerts.";
+  if (!("Notification" in window) || !("PushManager" in window)) {
+    return isIOS
+      ? "Add aiOS Remote to your Home Screen first — iPhone only allows alerts for installed apps. Tap Share, then Add to Home Screen."
+      : "This browser can't show notifications.";
+  }
+  if (isIOS && !installedToHomeScreen()) {
+    return "Open aiOS Remote from your Home Screen icon to turn alerts on.";
+  }
+  return "";
+}
+
+/** Register this phone with the relay so it can be woken while closed.
+ *
+ *  A sleeping phone runs no JavaScript: the in-page alert below only ever
+ *  fires while the app is open, which is exactly when you don't need it.
+ *  The relay pushes instead, and that needs a subscription bound to its
+ *  application server key.
+ */
+async function subscribePush() {
+  const blocker = pushBlocker();
+  if (blocker) throw new Error(blocker);
+  const registration = await navigator.serviceWorker.ready;
+  const { key } = await api("/api/push/key");
+  if (!key) throw new Error("The relay has no push key yet — try again in a moment.");
+  const applicationServerKey = bytesFromBase64Url(key);
+  let subscription = await registration.pushManager.getSubscription();
+  if (subscription) {
+    // A subscription made against a different key can never be decrypted.
+    const current = subscription.options?.applicationServerKey;
+    const same = current && bytesToBase64Url(new Uint8Array(current)) === key;
+    if (!same) {
+      await subscription.unsubscribe().catch(() => {});
+      subscription = null;
+    }
+  }
+  subscription = subscription || await registration.pushManager.subscribe({
+    userVisibleOnly: true,
+    applicationServerKey
+  });
+  const raw = subscription.toJSON();
+  await api("/api/push/subscribe", {
+    method: "POST",
+    body: JSON.stringify({ endpoint: raw.endpoint, keys: raw.keys })
+  });
+  state.pushReady = true;
+  return subscription;
+}
+
+/** `token` is passed explicitly when locking the phone: by the time this
+ *  reaches the relay the session it needs is already gone from state. */
+async function unsubscribePush(token = state.token) {
+  state.pushReady = false;
+  if (!("serviceWorker" in navigator)) return;
+  try {
+    const registration = await navigator.serviceWorker.ready;
+    const subscription = await registration.pushManager?.getSubscription();
+    if (!subscription) return;
+    const endpoint = subscription.endpoint;
+    await subscription.unsubscribe().catch(() => {});
+    await api("/api/push/subscribe", {
+      method: "DELETE",
+      body: JSON.stringify({ endpoint }),
+      headers: token ? { Authorization: `Bearer ${token}` } : {}
+    }).catch(() => {});
+  } catch { /* nothing subscribed */ }
+}
+
+/** Subscriptions expire and rotate; re-register quietly on every open. */
+async function refreshPushSubscription() {
+  if (!state.notify || !state.token) return;
+  try {
+    await subscribePush();
+  } catch (error) {
+    console.debug(error);
+    state.pushReady = false;
+  }
+}
+
 /** Rich PWA alerts when OPERATOR needs you or finishes — only if enabled. */
 async function pushNotify(title, body, {
   tag = "aios-remote",
@@ -1423,6 +1514,9 @@ async function pushNotify(title, body, {
   actions = []
 } = {}) {
   if (!state.notify || state.replaying) return;
+  // The relay already pushed this one to the phone itself — showing it again
+  // from the page would double every alert.
+  if (state.pushReady) return;
   if (document.visibilityState === "visible" && document.hasFocus()) return;
   if (!("Notification" in window) || Notification.permission !== "granted") return;
   const machine = currentMachine();
@@ -1962,8 +2056,12 @@ function recordEvent(event) {
     // The task you typed already opened a run here. Let the PC's run_start
     // adopt it instead of splitting one task across two history rows.
     const pending = state.liveRun;
+    // Same words means same task, however long the PC took to pick it up —
+    // otherwise a queued run files its replies away from your message.
+    const started = String(payload.task || "").trim();
+    const sameTask = Boolean(started) && started === String(pending?.task || "").trim();
     const adoptable = pending && pending.status === "open" && !pending.started
-      && stamp - pending.startedAt < 120_000;
+      && (sameTask || stamp - pending.startedAt < 120_000);
     if (adoptable) pending.started = true;
     else openRun(payload.task, stamp).started = true;
   }
@@ -2114,16 +2212,25 @@ function saveCursor() {
   if (state.machineId) prefs.set(cursorKey(), state.cursor);
 }
 
-function markSeen() {
-  prefs.set("aios_seen_at", Date.now());
+/** Reattach to the thread this phone was last watching.
+ *
+ *  A reload — or an hour in the background, which on iOS means the same
+ *  thing — leaves state.liveRun empty while storage still holds an open run.
+ *  Without this, everything OPERATOR did while you were away is filed under a
+ *  brand new history row and your message sits alone in the old one.
+ */
+function adoptLiveRun() {
+  const recent = machineHistory()[0];
+  state.liveRun = recent && recent.status === "open" ? recent : null;
+  return recent || null;
 }
 
-/** Start clean after a long absence: archive the backlog, show an empty feed. */
-async function beginSession(force = false) {
+/** Put the conversation back on screen, including everything OPERATOR did
+ *  while the phone was away. `reset` (the New chat button) is the only way to
+ *  an empty feed. */
+async function beginSession(reset = false) {
   if (!state.machineId) return;
   state.sessionMachineId = state.machineId;
-  const away = Date.now() - Number(prefs.get("aios_seen_at", 0));
-  const fresh = force || away > SESSION_RESET_MS || !Number(prefs.get(cursorKey(), 0));
   loadCursor();
   state.viewingRunId = "";
   $("#historyBanner").classList.add("hidden");
@@ -2134,26 +2241,34 @@ async function beginSession(force = false) {
   $("#sendBtn").disabled = false;
   clearClarifier();
   clearMarkers();
-  if (!fresh) {
-    // A refresh or a quick trip to another app should feel like nothing
-    // happened: put the run you were watching back on screen.
-    const recent = machineHistory()[0];
-    if (recent && recent.events.length
-        && Date.now() - (recent.endedAt || recent.startedAt) < SESSION_RESET_MS) {
-      if (recent.status === "open") state.liveRun = recent;
-      replayEvents(recent.events);
-    }
+  state.feedVersion += 1;
+
+  if (reset) {
+    const archived = await drainEvents(true);
+    closeRun("ended");
+    state.liveRun = null;
+    state.forceNewPrompt = true;
+    resetTimeline("Ready. Ask your computer to do something.");
+    if (archived >= SERVER_PRUNE_EVENTS && !state.running) await pruneServerEvents();
     await pollEvents();
-    markSeen();
     return;
   }
-  state.feedVersion += 1;
-  const archived = await drainEvents(true);
-  closeRun("ended");
-  state.forceNewPrompt = true;
-  resetTimeline("Ready. Ask your computer to do something.");
-  markSeen();
-  if (archived >= SERVER_PRUNE_EVENTS && !state.running) await pruneServerEvents();
+
+  // Paint what we already have first — reopening the app should never stare
+  // back with an empty feed while the relay is still answering.
+  const restored = adoptLiveRun();
+  if (restored?.events?.length) replayEvents(restored.events);
+  else resetTimeline("Ready. Ask your computer to do something.");
+
+  // Then catch up. Silent, because the backlog belongs to the thread we just
+  // painted and recordEvent is what stitches it back together.
+  const arrived = await drainEvents(true);
+  const current = machineHistory()[0];
+  if (arrived && current?.events?.length) {
+    // OPERATOR may have started something else entirely while we were away.
+    if (current.id !== restored?.id && current.status === "open") state.liveRun = current;
+    replayEvents(current.events);
+  }
   await pollEvents();
 }
 
@@ -2179,7 +2294,6 @@ function startPolling() {
   startFrameLoop();
   state.timers.push(setInterval(loadMachines, 4000));
   state.timers.push(setInterval(pollEvents, 1400));
-  state.timers.push(setInterval(markSeen, 20_000));
   state.streamLeaseTimer = setInterval(requestStream, 8000);
   state.timers.push(setInterval(updateLive, 1000));
 }
@@ -3030,19 +3144,52 @@ $("#wakeToggle").addEventListener("change", (event) => {
   applyWakeLock();
 });
 $("#notifyToggle").addEventListener("change", async (event) => {
-  if (event.target.checked) {
-    const granted = await ensureNotifyPermission();
-    if (!granted) {
-      event.target.checked = false;
-      state.notify = false;
-      prefs.set("aios_notify", "");
-      toast("Notifications were blocked — enable them in the browser settings");
-      return;
-    }
+  const turnOff = () => {
+    event.target.checked = false;
+    state.notify = false;
+    state.pushReady = false;
+    prefs.set("aios_notify", "");
+  };
+  if (!event.target.checked) {
+    state.notify = false;
+    prefs.set("aios_notify", "");
+    $("#notifyTestBtn").classList.add("hidden");
+    await unsubscribePush();
+    return;
   }
-  state.notify = event.target.checked;
-  prefs.set("aios_notify", state.notify ? "1" : "");
-  if (state.notify) toast("Notifications on — you'll hear when OPERATOR needs you or finishes");
+  const blocker = pushBlocker();
+  if (blocker) { turnOff(); toast(blocker); return; }
+  if (!(await ensureNotifyPermission())) {
+    turnOff();
+    toast("Notifications were blocked — turn them back on in your phone's settings for aiOS Remote");
+    return;
+  }
+  state.notify = true;
+  prefs.set("aios_notify", "1");
+  try {
+    await subscribePush();
+    $("#notifyTestBtn").classList.remove("hidden");
+    toast("Notifications on — this phone now gets woken even when the app is closed");
+  } catch (error) {
+    // Permission is granted, so keep the in-app alerts; just be honest that
+    // the closed-app ones are not working.
+    state.pushReady = false;
+    toast(error.message);
+  }
+});
+
+$("#notifyTestBtn").addEventListener("click", async () => {
+  const button = $("#notifyTestBtn");
+  button.disabled = true;
+  try {
+    if (!state.pushReady) await subscribePush();
+    await api("/api/push/test", { method: "POST" });
+    toast("Sent — it should arrive in a second, even if you close the app");
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    button.disabled = false;
+  }
 });
 $("#hapticToggle").addEventListener("change", (event) => {
   state.haptics = event.target.checked;
@@ -3301,19 +3448,24 @@ window.addEventListener("online", () => { toast("Back online"); loadMachines(); 
 window.addEventListener("resize", () => fitViewer());
 document.addEventListener("visibilitychange", () => {
   if (!state.token) return;
-  if (document.hidden) {
-    markSeen();
-    return;
-  }
-  const away = Date.now() - Number(prefs.get("aios_seen_at", 0));
-  loadMachines().then(() => (away > SESSION_RESET_MS ? beginSession(true) : pollEvents()));
+  if (document.hidden) return;
+  // However long you were away, the thread comes back with you: catch up on
+  // this machine's backlog instead of wiping the feed.
+  loadMachines().then(pollEvents);
   requestStream();
   startFrameLoop();
   refreshFrame();
   applyWakeLock();
 });
 
-if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.register("sw.js").catch(() => {});
+  // The browser can rotate a push subscription at any time; only the page
+  // holds the session token needed to register the new one.
+  navigator.serviceWorker.addEventListener("message", (event) => {
+    if (event.data?.type === "push-subscription-changed") refreshPushSubscription();
+  });
+}
 
 /* ── boot ─────────────────────────────────────────────── */
 
@@ -3323,6 +3475,7 @@ $("#shellToggle").checked = state.shell;
 $("#wakeToggle").checked = state.keepAwake;
 $("#hapticToggle").checked = state.haptics;
 $("#notifyToggle").checked = state.notify;
+$("#notifyTestBtn").classList.toggle("hidden", !state.notify);
 applyFilter();
 toggleScreen(state.screenOpen);
 bindViewerGestures();

@@ -946,6 +946,9 @@ h3 { font-size: 17px; letter-spacing: -.02em; font-weight: 700; margin: 0 0 16px
 .row span { flex: 1; }
 .row em { color: var(--text-2); font-style: normal; font-size: 13.5px; }
 .row .ic { width: 16px; height: 16px; color: var(--text-3); }
+.row-action span { color: var(--red); font-weight: 600; }
+.row-action:active { background: var(--surface-2); }
+.row-action:disabled span { color: var(--text-3); }
 .row-input {
   width: 70px; height: 34px; text-align: center;
   border: 1px solid var(--line); border-radius: 9px;
