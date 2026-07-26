@@ -342,10 +342,30 @@ window.addEventListener("popstate", () => {
 });
 
 const SHEET_CLOSE_MS = 300;
-const sheetUi = { closingTimer: null, drag: null };
+const sheetUi = { closingTimer: null, drag: null, scrollY: 0, docListeners: null };
 
 function sheetMobile() {
   return window.matchMedia("(max-width: 859px)").matches;
+}
+
+function sheetOpen() {
+  return Boolean($(".sheet.open"));
+}
+
+/** iOS keeps scrolling the chat behind a fixed sheet unless the page is locked. */
+function setSheetScrollLock(locked) {
+  const root = document.documentElement;
+  if (locked) {
+    if (!sheetUi.scrollY) sheetUi.scrollY = window.scrollY || 0;
+    root.classList.add("sheet-open");
+    document.body.style.top = `-${sheetUi.scrollY}px`;
+    return;
+  }
+  root.classList.remove("sheet-open");
+  document.body.style.top = "";
+  const y = sheetUi.scrollY || 0;
+  sheetUi.scrollY = 0;
+  window.scrollTo(0, y);
 }
 
 function clearSheetInline(sheet) {
@@ -386,18 +406,22 @@ function openSheet(id) {
     }
   });
   setBackdropOpen(true);
+  setSheetScrollLock(true);
+  if (sheetMobile()) attachSheetDocListeners();
   buzz();
   if (!replacingSheet) openOverlay(hideSheets);
 }
 
 function hideSheets() {
   sheetUi.drag = null;
+  detachSheetDocListeners();
   $$(".sheet").forEach((sheet) => {
     clearSheetInline(sheet);
     sheet.classList.remove("open");
     sheet.setAttribute("aria-hidden", "true");
   });
   setBackdropOpen(false);
+  if (!sheetOpen()) setSheetScrollLock(false);
 }
 
 function closeSheets() {
@@ -409,6 +433,131 @@ function sheetDragInteractive(target) {
   return Boolean(target?.closest?.(
     "button, input, textarea, select, label, a, .option, .row, .choice-chip, .theme-option, .history-row, .code-chip, .text-input, .switch"
   ));
+}
+
+function sheetPointY(event) {
+  if (event.touches?.length) return event.touches[0].clientY;
+  if (event.changedTouches?.length) return event.changedTouches[0].clientY;
+  return event.clientY;
+}
+
+function sheetApplyDrag(offset) {
+  const drag = sheetUi.drag;
+  if (!drag) return;
+  const sheet = drag.sheet;
+  const y = Math.max(0, offset);
+  drag.offset = y;
+  sheet.style.transform = `translate3d(0, ${y}px, 0)`;
+  const backdrop = $("#backdrop");
+  if (backdrop) backdrop.style.opacity = String(Math.max(0.12, 1 - y / 420));
+}
+
+function sheetFinishDrag() {
+  detachSheetDocListeners();
+  const drag = sheetUi.drag;
+  if (!drag) return;
+  const sheet = drag.sheet;
+  sheetUi.drag = null;
+  sheet.classList.remove("dragging");
+  document.documentElement.classList.remove("sheet-dragging");
+  const backdrop = $("#backdrop");
+  const threshold = Math.min(140, Math.max(64, sheet.offsetHeight * 0.16));
+  const flicked = drag.offset > threshold || (drag.offset > 36 && drag.velocity > 0.65);
+  if (flicked) {
+    sheet.style.transition = "transform .24s cubic-bezier(.2, .9, .3, 1)";
+    sheet.style.transform = "translate3d(0, 100%, 0)";
+    if (backdrop) {
+      backdrop.style.transition = "opacity .24s ease";
+      backdrop.style.opacity = "0";
+    }
+    setTimeout(() => {
+      clearSheetInline(sheet);
+      if (backdrop) {
+        backdrop.style.opacity = "";
+        backdrop.style.transition = "";
+      }
+      closeSheets();
+    }, 240);
+    return;
+  }
+  sheet.style.transition = "transform .22s cubic-bezier(.2, .9, .3, 1)";
+  sheet.style.transform = "translate3d(0, 0, 0)";
+  if (backdrop) {
+    backdrop.style.transition = "opacity .22s ease";
+    backdrop.style.opacity = "";
+  }
+  setTimeout(() => {
+    if (sheetUi.drag) return;
+    sheet.style.transition = "";
+    sheet.style.transform = "";
+    if (backdrop) backdrop.style.transition = "";
+  }, 230);
+}
+
+function sheetMoveDrag(event) {
+  const drag = sheetUi.drag;
+  if (!drag) return;
+  const sheet = drag.sheet;
+  const y = sheetPointY(event);
+  const delta = y - drag.startY;
+  if (drag.armed && !drag.active) {
+    if (delta < 8) return;
+    drag.active = true;
+    drag.armed = false;
+    drag.startY = y;
+  }
+  if (!drag.active) return;
+  event.preventDefault();
+  const now = performance.now();
+  const dt = Math.max(1, now - drag.lastT);
+  drag.velocity = (y - drag.lastY) / dt;
+  drag.lastY = y;
+  drag.lastT = now;
+  sheetApplyDrag(y - drag.startY);
+}
+
+function sheetTouchGuard(event) {
+  if (!sheetOpen()) return;
+  if (sheetUi.drag) {
+    sheetMoveDrag(event);
+    return;
+  }
+  // Let the menu body scroll; block everything else (chat timeline, backdrop, etc.).
+  if (event.target.closest?.(".sheet-body")) return;
+  event.preventDefault();
+}
+
+function attachSheetDocListeners() {
+  if (sheetUi.docListeners) return;
+  sheetUi.docListeners = { guard: sheetTouchGuard, finish: sheetFinishDrag };
+  document.addEventListener("touchmove", sheetTouchGuard, { passive: false, capture: true });
+  document.addEventListener("touchend", sheetFinishDrag, { capture: true });
+  document.addEventListener("touchcancel", sheetFinishDrag, { capture: true });
+}
+
+function detachSheetDocListeners() {
+  if (!sheetUi.docListeners) return;
+  document.removeEventListener("touchmove", sheetTouchGuard, { capture: true });
+  document.removeEventListener("touchend", sheetFinishDrag, { capture: true });
+  document.removeEventListener("touchcancel", sheetFinishDrag, { capture: true });
+  sheetUi.docListeners = null;
+}
+
+function sheetStartDrag(sheet, body, event, { fromHandle }) {
+  if (!sheetMobile() || !sheet.classList.contains("open")) return false;
+  if (sheetUi.drag) return false;
+  if (!fromHandle) {
+    if (sheetDragInteractive(event.target)) return false;
+    if ((body.scrollTop || 0) > 0) return false;
+  }
+  const y = sheetPointY(event);
+  sheetUi.drag = {
+    sheet, fromHandle, armed: !fromHandle, active: fromHandle,
+    startY: y, offset: 0, lastY: y, lastT: performance.now(), velocity: 0
+  };
+  sheet.classList.add("dragging");
+  document.documentElement.classList.add("sheet-dragging");
+  return true;
 }
 
 /** Split every bottom sheet into a sticky drag handle + scrollable body. */
@@ -441,122 +590,27 @@ function prepareSheets() {
 }
 
 function bindSheetGestures(sheet, handle, body) {
-  const pointY = (event) => {
-    if (event.touches?.length) return event.touches[0].clientY;
-    if (event.changedTouches?.length) return event.changedTouches[0].clientY;
-    return event.clientY;
-  };
-
-  const applyDrag = (offset) => {
-    const y = Math.max(0, offset);
-    sheetUi.drag.offset = y;
-    sheet.style.transform = `translate3d(0, ${y}px, 0)`;
-    const backdrop = $("#backdrop");
-    if (backdrop) backdrop.style.opacity = String(Math.max(0.12, 1 - y / 420));
-  };
-
-  const endDrag = () => {
-    const drag = sheetUi.drag;
-    if (!drag || drag.sheet !== sheet) return;
-    sheetUi.drag = null;
-    sheet.classList.remove("dragging");
-    const backdrop = $("#backdrop");
-    const threshold = Math.min(140, Math.max(64, sheet.offsetHeight * 0.16));
-    const flicked = drag.offset > threshold || (drag.offset > 36 && drag.velocity > 0.65);
-    if (flicked) {
-      // Keep sliding from the finger position down off-screen, then close.
-      sheet.style.transition = "transform .24s cubic-bezier(.2, .9, .3, 1)";
-      sheet.style.transform = "translate3d(0, 100%, 0)";
-      if (backdrop) {
-        backdrop.style.transition = "opacity .24s ease";
-        backdrop.style.opacity = "0";
-      }
-      setTimeout(() => {
-        clearSheetInline(sheet);
-        if (backdrop) {
-          backdrop.style.opacity = "";
-          backdrop.style.transition = "";
-        }
-        closeSheets();
-      }, 240);
-      return;
-    }
-    // Snap back up.
-    sheet.style.transition = "transform .22s cubic-bezier(.2, .9, .3, 1)";
-    sheet.style.transform = "translate3d(0, 0, 0)";
-    if (backdrop) {
-      backdrop.style.transition = "opacity .22s ease";
-      backdrop.style.opacity = "";
-    }
-    setTimeout(() => {
-      if (sheetUi.drag?.sheet === sheet) return;
-      sheet.style.transition = "";
-      sheet.style.transform = "";
-      if (backdrop) backdrop.style.transition = "";
-    }, 230);
-  };
-
-  const startDrag = (event, { fromHandle }) => {
-    if (!sheetMobile() || !sheet.classList.contains("open")) return false;
-    if (sheetUi.drag) return false;
-    if (!fromHandle) {
-      if (sheetDragInteractive(event.target)) return false;
-      if ((body.scrollTop || 0) > 0) return false;
-    }
-    const y = pointY(event);
-    sheetUi.drag = {
-      sheet, fromHandle, armed: !fromHandle, active: fromHandle,
-      startY: y, offset: 0, lastY: y, lastT: performance.now(), velocity: 0
-    };
-    sheet.classList.add("dragging");
-    return true;
-  };
-
-  const moveDrag = (event) => {
-    const drag = sheetUi.drag;
-    if (!drag || drag.sheet !== sheet) return;
-    const y = pointY(event);
-    const delta = y - drag.startY;
-    if (drag.armed && !drag.active) {
-      if (delta < 10) return;
-      drag.active = true;
-      drag.armed = false;
-      drag.startY = y;
-    }
-    if (!drag.active) return;
-    event.preventDefault();
-    const now = performance.now();
-    const dt = Math.max(1, now - drag.lastT);
-    drag.velocity = (y - drag.lastY) / dt;
-    drag.lastY = y;
-    drag.lastT = now;
-    applyDrag(y - drag.startY);
-  };
-
   handle.addEventListener("touchstart", (event) => {
     if (event.touches.length !== 1) return;
-    startDrag(event, { fromHandle: true });
-  }, { passive: true });
+    if (!sheetStartDrag(sheet, body, event, { fromHandle: true })) return;
+    event.preventDefault();
+    event.stopPropagation();
+  }, { passive: false });
 
   body.addEventListener("touchstart", (event) => {
     if (event.touches.length !== 1) return;
-    startDrag(event, { fromHandle: false });
+    sheetStartDrag(sheet, body, event, { fromHandle: false });
   }, { passive: true });
 
-  sheet.addEventListener("touchmove", moveDrag, { passive: false });
-  sheet.addEventListener("touchend", endDrag);
-  sheet.addEventListener("touchcancel", endDrag);
-
-  // Mouse support for desktop narrow windows / emulator.
   handle.addEventListener("mousedown", (event) => {
     if (event.button !== 0) return;
-    if (!startDrag(event, { fromHandle: true })) return;
+    if (!sheetStartDrag(sheet, body, event, { fromHandle: true })) return;
     event.preventDefault();
-    const onMove = (moveEvent) => moveDrag(moveEvent);
+    const onMove = (moveEvent) => sheetMoveDrag(moveEvent);
     const onUp = () => {
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
-      endDrag();
+      sheetFinishDrag();
     };
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
@@ -564,7 +618,10 @@ function bindSheetGestures(sheet, handle, body) {
 }
 
 prepareSheets();
-$("#backdrop").addEventListener("click", closeSheets);
+
+const backdropEl = $("#backdrop");
+backdropEl.addEventListener("click", closeSheets);
+backdropEl.addEventListener("touchmove", (event) => event.preventDefault(), { passive: false });
 
 /** Renders a bottom-sheet picker and returns the choice through `onPick`. */
 function renderOptions(container, items, activeId, onPick) {
