@@ -37,6 +37,14 @@ const HISTORY_KEY = "aios_history_v1";
 const MAX_HISTORY_RUNS = 25;
 const MAX_RUN_EVENTS = 400;
 const HISTORY_BUDGET = 1_200_000;      // characters of JSON, well inside the quota
+const FEED_WINDOW = 300;               // rows drawn at once; the rest folds away
+const FEED_CEILING = 1500;             // even fully expanded, a phone has limits
+const STORED_RUNS = 12;                // runs written to storage
+const STORED_EVENTS_PER_RUN = 220;
+const STORED_TEXT_LIMIT = 700;         // characters per stored field
+const SAVE_DEBOUNCE_MS = 400;
+const RESYNC_STALL_MS = 75_000;        // silence from a busy PC means re-ask
+const THREAD_RUNS = 3;                 // recent tasks drawn as one conversation
 const IDLE_RUN_CLOSE_MS = 3 * 60 * 1000;
 const EVENT_PAGE = 200;                // the relay's page size
 const MAX_DRAIN_PAGES = 40;
@@ -123,7 +131,11 @@ const state = {
   clarifierDraft: "",
   clarifierQuestions: [],
   clarifierLoading: false,
-  attachments: []
+  attachments: [],
+  feedExpanded: false,
+  seenEvents: new Set(),
+  lastEventAt: 0,
+  resyncing: false
 };
 
 function applyAppearance(background = state.background) {
@@ -990,7 +1002,7 @@ function markClick(payload) {
    now", at a glance, without covering the screen it is talking about. */
 
 const MARKER_HOLD_MS = 620;
-const CINEMA_MAX_LINES = 7;
+const CINEMA_MAX_LINES = 80;   // fullscreen shows the thread, not a teaser
 const cinema = { on: false, lines: [], seq: 0 };
 
 /** `describe` keeps its own private copy of this; the overlay needs one too. */
@@ -1009,12 +1021,12 @@ function cinemaSet(on) {
   }
   // Opening mid-run must not show an empty rail — replay the recent tail so
   // the overlay starts already caught up.
-  const run = state.liveRun;
+  const run = currentThread();
   cinema.lines = [];
-  $("#cinemaTask").textContent = run && run.status === "open" ? run.task || "" : "";
+  $("#cinemaTask").textContent = run?.task || "";
   $("#cinemaStep").textContent = run && run.steps ? `step ${run.steps}` : "";
   cinemaStatus(state.running ? "working" : "idle");
-  for (const event of (run?.events || []).slice(-30)) {
+  for (const event of threadEvents().slice(-CINEMA_MAX_LINES)) {
     if (String(event.type) === "run_start") continue;  // would wipe what we just seeded
     cinemaEvent(String(event.type || "").toLowerCase(), event.payload || {});
   }
@@ -1041,24 +1053,29 @@ function cinemaPush(tone, label, body) {
 function cinemaRender() {
   if (!cinema.on) return;
   const feed = $("#cinemaFeed");
+  const atBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 60;
   feed.replaceChildren();
   const total = cinema.lines.length;
   cinema.lines.forEach((line, index) => {
-    // Older lines dim as they rise, so the newest always reads first.
+    // Only the last line ahead of the newest is dimmed; everything above it
+    // stays legible, because it is the conversation, not a ticker.
     const fromEnd = total - 1 - index;
-    const age = fromEnd === 0 ? "" : fromEnd <= 1 ? "age1" : fromEnd <= 3 ? "age2" : "age3";
     const row = document.createElement("div");
-    row.className = `cinema-line ${line.tone} ${age}`.trim();
+    row.className = `cinema-line ${line.tone} ${fromEnd > 0 ? "older" : ""}`.trim();
     const tag = document.createElement("b");
     tag.textContent = line.label;
     row.append(tag, document.createTextNode(line.body));
     feed.appendChild(row);
   });
+  if (atBottom) feed.scrollTop = feed.scrollHeight;
 }
 
 /** Fold one run event into the overlay. Mirrors the timeline, kept terse. */
 function cinemaEvent(type, payload) {
   if (!cinema.on) return;
+  if (type === "prompt" || /follow.?up/.test(type)) {
+    return cinemaPush("me", "You", say(payload.message || payload.text || payload.prompt));
+  }
   if (type === "run_start" || type === "command") {
     cinema.lines = [];
     $("#cinemaTask").textContent = say(payload.task) || $("#cinemaTask").textContent;
@@ -1364,7 +1381,7 @@ function resumeLiveFeed({ keepTranscript = false } = {}) {
   state.viewingRunId = "";
   $("#historyBanner")?.classList.add("hidden");
   if (!wasViewing || keepTranscript) return;
-  const events = state.liveRun?.events || [];
+  const events = threadEvents();
   if (events.length) replayEvents(events);
   else resetTimeline("Ready. Ask your computer to do something.");
 }
@@ -1962,9 +1979,72 @@ function addEvent(event) {
     feed.appendChild(entry);
   }
 
-  while (feed.children.length > 250) feed.firstElementChild.remove();
+  trimFeed();
   state.stickBottom = wasBottom || info.kind === "user";
   scrollFeed();
+}
+
+/** The run this feed is showing right now. */
+function currentThread() {
+  if (state.viewingRunId) return state.history.find((run) => run.id === state.viewingRunId) || null;
+  return state.liveRun || machineHistory()[0] || null;
+}
+
+/** The conversation to draw.
+ *
+ *  A chat does not start over every time a task ends, so this is the last few
+ *  tasks on this computer stitched back together, oldest first — reopening
+ *  the app shows what you said and what came back, not just the final run.
+ */
+function threadEvents() {
+  if (state.viewingRunId) return currentThread()?.events || [];
+  return machineHistory().slice(0, THREAD_RUNS).reverse()
+    .flatMap((run) => run.events || []);
+}
+
+/** Keep the DOM bounded without ever deleting something you said.
+ *
+ *  The old cap removed the oldest row once the feed passed 250 — and the
+ *  oldest row is the message that started the task, so a long run erased
+ *  your own words from the thread. Agent rows now fold behind a button
+ *  instead of disappearing.
+ */
+function trimFeed() {
+  const feed = $("#timeline");
+  // "Show earlier" means show earlier: stop folding until the thread changes.
+  const cap = state.feedExpanded ? FEED_CEILING : FEED_WINDOW;
+  let folded = Number(feed.dataset.folded || 0);
+  while (feed.children.length > cap) {
+    const victim = [...feed.children].find((node) =>
+      !node.classList.contains("msg") && !node.classList.contains("feed-earlier"));
+    if (!victim) break;
+    victim.remove();
+    folded += 1;
+  }
+  if (folded !== Number(feed.dataset.folded || 0)) showEarlierButton(folded);
+}
+
+function showEarlierButton(count) {
+  const feed = $("#timeline");
+  feed.dataset.folded = String(count);
+  if (!count) {
+    feed.querySelector(".feed-earlier")?.remove();
+    return;
+  }
+  let button = feed.querySelector(".feed-earlier");
+  if (!button) {
+    button = document.createElement("button");
+    button.type = "button";
+    button.className = "feed-earlier";
+    button.addEventListener("click", () => {
+      const events = threadEvents();
+      if (!events.length) return;
+      buzz();
+      replayEvents(events, { all: true });
+    });
+  }
+  button.textContent = `Show ${count} earlier step${count === 1 ? "" : "s"}`;
+  if (feed.firstElementChild !== button) feed.prepend(button);
 }
 
 /* ── history ──────────────────────────────────────────── */
@@ -1979,24 +2059,96 @@ function loadHistory() {
   state.liveRun = null;
 }
 
-/** Persist, shedding the oldest runs until the browser is happy to store it. */
-function saveHistory() {
-  let attempt = state.history.slice(0, MAX_HISTORY_RUNS);
-  while (attempt.length) {
-    const payload = JSON.stringify(attempt);
-    if (payload.length <= HISTORY_BUDGET) {
-      try {
-        localStorage.setItem(HISTORY_KEY, payload);
-        state.history = attempt;
-        return;
-      } catch {
-        /* Quota — drop the oldest run and try again. */
-      }
-    }
-    attempt = attempt.slice(0, -1);
+function isUserMessage(event) {
+  const type = String(event?.type || "").toLowerCase();
+  return type === "prompt" || /follow.?up/.test(type);
+}
+
+/** Trim the middle, never the conversation: what you typed survives whatever
+ *  else has to go, because that is the thread you came back to read. */
+function keepConversation(events, limit) {
+  if (events.length <= limit) return events;
+  const keep = new Set();
+  events.forEach((event, index) => { if (isUserMessage(event)) keep.add(index); });
+  for (let index = events.length - 1; index >= 0 && keep.size < limit; index -= 1) keep.add(index);
+  return events.filter((_, index) => keep.has(index));
+}
+
+/** A compact copy for storage. A phone's quota is small and a run's shell
+ *  output is not; the stored thread only has to be enough to redraw. */
+function shrinkEvent(event) {
+  const payload = event.payload || {};
+  const small = {};
+  for (const [key, value] of Object.entries(payload)) {
+    small[key] = typeof value === "string" && value.length > STORED_TEXT_LIMIT
+      ? `${value.slice(0, STORED_TEXT_LIMIT)}…`
+      : value;
+  }
+  return { ...event, payload: small };
+}
+
+function persistableRuns(runs) {
+  return runs.slice(0, STORED_RUNS).map((run) => ({
+    ...run,
+    events: keepConversation(run.events || [], STORED_EVENTS_PER_RUN).map(shrinkEvent)
+  }));
+}
+
+let historySaveTimer = null;
+let lastHistoryWrite = 0;
+let historyStorageWarned = false;
+
+function writeHistory() {
+  const runs = persistableRuns(state.history);
+  for (let count = runs.length; count > 0; count -= 1) {
+    const payload = JSON.stringify(runs.slice(0, count));
+    if (payload.length > HISTORY_BUDGET) continue;
+    try {
+      localStorage.setItem(HISTORY_KEY, payload);
+      return true;
+    } catch { /* quota — try again with fewer runs */ }
+  }
+  // Last resort: the thread on screen, shortened, rather than nothing at all.
+  const newest = runs[0];
+  if (newest) {
+    try {
+      localStorage.setItem(HISTORY_KEY, JSON.stringify([{
+        ...newest,
+        events: keepConversation(newest.events || [], 60)
+      }]));
+      return true;
+    } catch { /* out of room entirely */ }
   }
   try { localStorage.removeItem(HISTORY_KEY); } catch { /* private mode */ }
-  state.history = attempt;
+  return false;
+}
+
+function flushHistory() {
+  historySaveTimer = null;
+  lastHistoryWrite = Date.now();
+  if (writeHistory() || historyStorageWarned) return;
+  historyStorageWarned = true;
+  toast("This phone is out of storage — the chat stays on screen but may not survive a restart.");
+}
+
+/** Persist without ever touching what is in memory.
+ *
+ *  Storage is a copy, not the conversation. The old version assigned the
+ *  shed-down list back onto state.history, so one refused write emptied the
+ *  chat you were reading — permanently, and without a word.
+ *
+ *  Throttled, not debounced: a busy run fires this on every event, and a
+ *  debounce that keeps resetting never writes at all until the run ends.
+ */
+function saveHistory({ immediate = false } = {}) {
+  if (immediate) {
+    if (historySaveTimer) clearTimeout(historySaveTimer);
+    flushHistory();
+    return;
+  }
+  if (historySaveTimer) return;
+  const wait = Math.max(0, SAVE_DEBOUNCE_MS - (Date.now() - lastHistoryWrite));
+  historySaveTimer = setTimeout(flushHistory, wait);
 }
 
 function machineHistory() {
@@ -2027,6 +2179,9 @@ function openRun(task, stamp) {
   };
   state.liveRun = run;
   state.history.unshift(run);
+  // Memory is the source of truth now, so it needs its own ceiling — but a
+  // generous one, and only ever at the far end of History.
+  if (state.history.length > MAX_HISTORY_RUNS) state.history.length = MAX_HISTORY_RUNS;
   saveHistory();
   return run;
 }
@@ -2047,9 +2202,29 @@ function notePrompt(text, { asFollowUp = false, files = [] } = {}) {
   saveHistory();
 }
 
+function eventKey(event) {
+  return event?.id ? `#${event.id}` : "";
+}
+
+/** Ids we have already filed, so re-reading the relay from the start can
+ *  never double up the thread. Rebuilt from storage on every open. */
+function rememberSeen(runs) {
+  state.seenEvents = new Set();
+  for (const run of runs.slice(0, 5)) {
+    for (const event of run.events || []) {
+      const key = eventKey(event);
+      if (key) state.seenEvents.add(key);
+    }
+  }
+}
+
+/** File one event into its run. Returns false when it was already there. */
 function recordEvent(event) {
   const type = String(event.type || "").toLowerCase();
-  if (type === "clarification") return;
+  if (type === "clarification") return false;
+  const key = eventKey(event);
+  if (key && state.seenEvents.has(key)) return false;
+  if (key) state.seenEvents.add(key);
   const payload = event.payload || {};
   const stamp = Number(event.created_at || Date.now());
   if (type === "run_start") {
@@ -2068,16 +2243,19 @@ function recordEvent(event) {
   let run = state.liveRun;
   if (!run || run.status !== "open") run = openRun(payload.task || "", stamp);
   if (type === "run_start" && payload.task) run.task = String(payload.task).slice(0, 400);
-  run.events.push({ type, payload, created_at: stamp });
-  if (run.events.length > MAX_RUN_EVENTS) run.events.splice(0, run.events.length - MAX_RUN_EVENTS);
+  run.events.push({ type, payload, created_at: stamp, id: event.id });
+  // Long runs shed their middle, not their beginning: dropping the oldest
+  // events first is what quietly deleted the message that started the task.
+  if (run.events.length > MAX_RUN_EVENTS) run.events = keepConversation(run.events, MAX_RUN_EVENTS);
   if (type === "step_begin") run.steps = Math.max(run.steps, Number(payload.n) || 0);
   if (type === "done") {
     run.steps = Number(payload.steps) || run.steps;
     run.cost = costLine(payload.cost);
     closeRun(payload.ok ? "done" : /stop/i.test(String(payload.message || "")) ? "stopped" : "failed", stamp);
-    return;
+    return true;
   }
   saveHistory();
+  return true;
 }
 
 /** A run whose PC went idle without a done event is over, whatever it thinks. */
@@ -2129,13 +2307,29 @@ function renderHistory() {
   }
 }
 
-function replayEvents(events) {
-  state.replaying = true;
+/** Redraw a thread. One malformed event must never cost you the rest of it,
+ *  so each row is painted on its own. */
+function replayEvents(events, { all = false } = {}) {
+  const list = Array.isArray(events) ? events : [];
   const feed = $("#timeline");
+  state.replaying = true;
   feed.replaceChildren();
+  feed.dataset.folded = "0";
   state.lastStep = null;
-  for (const event of events) addEvent(event);
-  state.replaying = false;
+  state.feedExpanded = all;
+  const shown = all ? list : keepConversation(list, FEED_WINDOW);
+  try {
+    for (const event of shown) {
+      try {
+        addEvent(event);
+      } catch (error) {
+        console.debug("skipped a row", error);
+      }
+    }
+  } finally {
+    state.replaying = false;
+  }
+  if (shown.length < list.length) showEarlierButton(list.length - shown.length);
   scrollFeed(true);
 }
 
@@ -2179,9 +2373,11 @@ async function drainEvents(silent = false) {
           if (!silent) applyClarification(event.payload || {});
           continue;
         }
-        recordEvent(event);
-        if (!silent && !state.viewingRunId) addEvent(event);
+        // A resync re-reads rows we already have; only paint the new ones.
+        const fresh = recordEvent(event);
+        if (fresh && !silent && !state.viewingRunId) addEvent(event);
       }
+      if (events.length) state.lastEventAt = Date.now();
       seen += events.length;
       state.cursor = Number(data.cursor || state.cursor);
       saveCursor();
@@ -2195,9 +2391,35 @@ async function drainEvents(silent = false) {
   return seen;
 }
 
+/** A cursor can outlive the log it points into — a relay that was pruned or
+ *  rebuilt hands out lower ids than the one we saved, and the phone would
+ *  wait forever on events it has already asked past. If the PC says it is
+ *  working and nothing has arrived for over a minute, read the log from the
+ *  top again; ids we have already filed are ignored on the way in.
+ */
+async function resyncIfStalled() {
+  if (state.resyncing || !state.cursor || !state.running || state.viewingRunId) return;
+  if (!state.lastEventAt) { state.lastEventAt = Date.now(); return; }
+  if (Date.now() - state.lastEventAt < RESYNC_STALL_MS) return;
+  state.resyncing = true;
+  state.lastEventAt = Date.now();
+  const from = state.cursor;
+  state.cursor = 0;
+  try {
+    await drainEvents(false);
+  } finally {
+    if (!state.cursor) {
+      state.cursor = from;   // nothing came back; keep the old place
+      saveCursor();
+    }
+    state.resyncing = false;
+  }
+}
+
 async function pollEvents() {
   await drainEvents(false);
   closeStaleRun();
+  await resyncIfStalled();
 }
 
 function cursorKey() {
@@ -2220,8 +2442,10 @@ function saveCursor() {
  *  brand new history row and your message sits alone in the old one.
  */
 function adoptLiveRun() {
-  const recent = machineHistory()[0];
+  const runs = machineHistory();
+  const recent = runs[0];
   state.liveRun = recent && recent.status === "open" ? recent : null;
+  rememberSeen(runs);
   return recent || null;
 }
 
@@ -2257,7 +2481,8 @@ async function beginSession(reset = false) {
   // Paint what we already have first — reopening the app should never stare
   // back with an empty feed while the relay is still answering.
   const restored = adoptLiveRun();
-  if (restored?.events?.length) replayEvents(restored.events);
+  const thread = threadEvents();
+  if (thread.length) replayEvents(thread);
   else resetTimeline("Ready. Ask your computer to do something.");
 
   // Then catch up. Silent, because the backlog belongs to the thread we just
@@ -2267,7 +2492,7 @@ async function beginSession(reset = false) {
   if (arrived && current?.events?.length) {
     // OPERATOR may have started something else entirely while we were away.
     if (current.id !== restored?.id && current.status === "open") state.liveRun = current;
-    replayEvents(current.events);
+    replayEvents(threadEvents());
   }
   await pollEvents();
 }
@@ -3446,9 +3671,13 @@ $("#installBtn").addEventListener("click", async () => {
 window.addEventListener("appinstalled", () => toast("aiOS Remote installed"));
 window.addEventListener("online", () => { toast("Back online"); loadMachines(); });
 window.addEventListener("resize", () => fitViewer());
+window.addEventListener("pagehide", () => saveHistory({ immediate: true }));
 document.addEventListener("visibilitychange", () => {
   if (!state.token) return;
-  if (document.hidden) return;
+  if (document.hidden) {
+    saveHistory({ immediate: true });
+    return;
+  }
   // However long you were away, the thread comes back with you: catch up on
   // this machine's backlog instead of wiping the feed.
   loadMachines().then(pollEvents);

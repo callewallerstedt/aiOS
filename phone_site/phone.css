@@ -240,7 +240,9 @@ h3 { font-size: 17px; letter-spacing: -.02em; font-weight: 700; margin: 0 0 16px
 /* viewer */
 .viewer {
   position: relative; flex: 0 0 auto;
-  height: 30dvh; min-height: 150px;
+  /* The chat is the thing you read; the live screen is the thing you glance
+     at. Fullscreen is one tap away when you want the picture instead. */
+  height: 26dvh; min-height: 132px;
   background: #000;
   border-bottom: 1px solid var(--line);
   overflow: hidden;
@@ -316,9 +318,10 @@ h3 { font-size: 17px; letter-spacing: -.02em; font-weight: 700; margin: 0 0 16px
   /* Clears the HUD chips, which share this corner. */
   padding: calc(52px + env(safe-area-inset-top)) 16px
            calc(40px + env(safe-area-inset-bottom)) calc(14px + env(safe-area-inset-left));
-  background: linear-gradient(to right, rgba(6, 7, 10, .82) 0%, rgba(6, 7, 10, .66) 62%, transparent 100%);
-  -webkit-mask-image: linear-gradient(to right, #000 72%, transparent 100%);
-          mask-image: linear-gradient(to right, #000 72%, transparent 100%);
+  pointer-events: auto;
+  background: linear-gradient(to right, rgba(6, 7, 10, .95) 0%, rgba(6, 7, 10, .9) 74%, rgba(6, 7, 10, .55) 100%);
+  -webkit-mask-image: linear-gradient(to right, #000 88%, transparent 100%);
+          mask-image: linear-gradient(to right, #000 88%, transparent 100%);
 }
 
 .cinema-head { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
@@ -341,12 +344,15 @@ h3 { font-size: 17px; letter-spacing: -.02em; font-weight: 700; margin: 0 0 16px
   text-shadow: 0 1px 6px rgba(0, 0, 0, .9);
 }
 
-/* Newest at the bottom, older entries dimming as they rise. */
+/* Newest at the bottom, and scrollable: this is the conversation, so it has
+   to be readable and reachable, not a three-line ticker. */
 .cinema-feed {
   flex: 1 1 auto; min-height: 0;
-  display: flex; flex-direction: column; justify-content: flex-end; gap: 7px;
-  overflow: hidden;
+  display: flex; flex-direction: column; justify-content: flex-end; gap: 9px;
+  overflow-y: auto; overscroll-behavior: contain;
+  scrollbar-width: none; -webkit-overflow-scrolling: touch;
 }
+.cinema-feed::-webkit-scrollbar { display: none; }
 .cinema-line {
   font-size: 12.5px; line-height: 1.4; color: #f2f5fa;
   text-shadow: 0 1px 8px rgba(0, 0, 0, .95);
@@ -361,9 +367,13 @@ h3 { font-size: 17px; letter-spacing: -.02em; font-weight: 700; margin: 0 0 16px
 .cinema-line.think { color: rgba(238, 243, 250, .84); font-style: italic; }
 .cinema-line.ok b { color: var(--green, #38d996); }
 .cinema-line.err b { color: #ff6b63; }
-.cinema-line.age1 { opacity: .62; }
-.cinema-line.age2 { opacity: .38; }
-.cinema-line.age3 { opacity: .2; }
+.cinema-line.older { opacity: .82; }
+.cinema-line.me {
+  align-self: flex-end; max-width: 92%;
+  padding: 7px 11px; border-radius: 13px 13px 4px 13px;
+  background: var(--red); color: #fff;
+}
+.cinema-line.me b { color: rgba(255, 255, 255, .8); }
 
 .cinema-rotate {
   position: absolute; left: 50%; bottom: calc(18px + env(safe-area-inset-bottom));
@@ -381,12 +391,12 @@ h3 { font-size: 17px; letter-spacing: -.02em; font-weight: 700; margin: 0 0 16px
 @media (orientation: portrait) {
   .viewer.immersive .cinema-rail {
     top: auto; right: 0; bottom: 0; width: auto;
-    max-height: 42%;
+    max-height: 56%;
     padding-left: calc(14px + env(safe-area-inset-left));
     padding-right: calc(14px + env(safe-area-inset-right));
-    background: linear-gradient(to top, rgba(6, 7, 10, .86) 0%, rgba(6, 7, 10, .6) 66%, transparent 100%);
-    -webkit-mask-image: linear-gradient(to top, #000 74%, transparent 100%);
-            mask-image: linear-gradient(to top, #000 74%, transparent 100%);
+    background: linear-gradient(to top, rgba(6, 7, 10, .96) 0%, rgba(6, 7, 10, .9) 72%, rgba(6, 7, 10, .5) 100%);
+    -webkit-mask-image: linear-gradient(to top, #000 90%, transparent 100%);
+            mask-image: linear-gradient(to top, #000 90%, transparent 100%);
   }
   .viewer.immersive .cinema-rotate { display: block; bottom: auto; top: calc(58px + env(safe-area-inset-top)); }
 }
@@ -468,6 +478,14 @@ h3 { font-size: 17px; letter-spacing: -.02em; font-weight: 700; margin: 0 0 16px
 .timeline-empty { display: grid; justify-items: center; gap: 12px; padding: 46px 20px; color: var(--text-3); text-align: center; }
 .timeline-empty .ic { width: 22px; height: 22px; color: var(--surface-3); }
 .timeline-empty p { margin: 0; font-size: 13.5px; }
+
+.feed-earlier {
+  display: block; width: 100%; margin: 2px 0 10px;
+  padding: 9px 12px; border-radius: 11px;
+  border: 1px solid var(--line); background: var(--surface);
+  color: var(--text-2); font-size: 12.5px; font-weight: 600;
+}
+.feed-earlier:active { background: var(--surface-2); color: var(--text); }
 
 /* user bubble — timestamp under the bubble, right-aligned */
 .msg {
