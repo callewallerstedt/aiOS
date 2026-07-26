@@ -55,6 +55,29 @@ def test_codex_calls_are_reported_as_plan_usage_not_dollars():
     assert "ChatGPT plan" in model_pricing.describe_cost(usage)
 
 
+def test_measured_plan_window_delta_is_reported_as_a_percentage():
+    usage = {
+        "backend": "codex",
+        "models": {"gpt-5.6-luna": {
+            "requests": 2, "total_tokens": 12_000,
+            "backends": {"codex": {"requests": 2, "total_tokens": 12_000}},
+        }},
+        "plan_usage": {
+            "measured": True,
+            "used_percent_delta": 1,
+            "end_used_percent": 8,
+            "window_minutes": 10080,
+            "plan_type": "plus",
+        },
+    }
+
+    cost = model_pricing.estimate_cost(usage)
+
+    assert cost["plan_usage_percent"] == 1
+    assert cost["plan_window_used_percent"] == 8
+    assert "1% of your ChatGPT plan this run" in model_pricing.describe_cost(usage)
+
+
 def test_a_fallback_run_charges_only_the_api_half():
     usage = {
         "backend": "codex_fallback",

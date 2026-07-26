@@ -2,6 +2,7 @@
 
 import json
 import sys
+import time
 import types
 from pathlib import Path
 
@@ -85,10 +86,12 @@ class FakeModel:
         return json.dumps(reply)
 
 
-def run_loop(model, desktop, monkeypatch, tmp_path, *, max_steps=12, planner="planner-model"):
+def run_loop(model, desktop, monkeypatch, tmp_path, *, max_steps=12, planner="planner-model",
+             backend="api", usage=None):
     monkeypatch.setattr(agent_loop, "DEBUG_ROOT", str(tmp_path / "runs"))
     monkeypatch.setattr(agent_loop.vlm, "chat_raw", model.chat_raw)
-    monkeypatch.setattr(agent_loop.vlm, "take_last_usage", lambda: {"requests": 1, "model": "m"})
+    usage = usage or {"requests": 1, "model": "m"}
+    monkeypatch.setattr(agent_loop.vlm, "take_last_usage", lambda: dict(usage))
     monkeypatch.setattr(agent_loop, "capture", desktop.capture)
 
     def fake_execute(action, monitor, **kwargs):
@@ -102,7 +105,8 @@ def run_loop(model, desktop, monkeypatch, tmp_path, *, max_steps=12, planner="pl
     events = []
     agent = AgentLoop(events.append)
     agent.start("Do the thing", MONITOR, model="clicker", max_steps=max_steps,
-                action_delay=0.0, settle_after_step=0.0, planner_model=planner)
+                action_delay=0.0, settle_after_step=0.0, planner_model=planner,
+                backend=backend)
     agent._thread.join(timeout=30)
     assert not agent.is_running(), "the loop did not finish"
     return events
@@ -143,6 +147,24 @@ def test_a_run_that_keeps_changing_the_screen_is_left_alone(monkeypatch, tmp_pat
     assert "no progress" not in final(events)["message"].lower()
 
 
+def test_running_out_of_steps_does_not_invoke_the_completion_checker(monkeypatch, tmp_path):
+    desktop = FakeDesktop()
+
+    class Progressing(FakeModel):
+        def chat_raw(self, system, messages, **kwargs):
+            if "planner" not in system and "actually did" not in system:
+                desktop.marks += 1
+            return super().chat_raw(system, messages, **kwargs)
+
+    model = Progressing([{"thought": "still working", "status": "continue",
+                          "actions": [{"type": "key", "key": "pagedown"}]}])
+    events = run_loop(model, desktop, monkeypatch, tmp_path, max_steps=2, planner="")
+
+    assert not [event for event in events if event["type"] in {"verify_begin", "verified"}]
+    assert final(events)["ok"] is False
+    assert final(events)["message"] == "Ran out of steps before finishing."
+
+
 def test_saying_done_is_checked_and_can_be_rejected(monkeypatch, tmp_path):
     model = FakeModel(
         replies=[{"thought": "sent it", "status": "done", "message": "Sent."},
@@ -159,6 +181,42 @@ def test_saying_done_is_checked_and_can_be_rejected(monkeypatch, tmp_path):
     assert verdicts == ["fail", "pass"]
     assert ended["ok"] is True and ended["verified"] is True
     assert ended["steps"] > 1, "the rejected done must not end the run"
+
+
+def test_finished_codex_run_carries_measured_plan_percentage(monkeypatch, tmp_path):
+    from agent import codex_backend
+
+    reset_at = int(time.time()) + 3600
+    monkeypatch.setattr(codex_backend, "latest_plan_usage", lambda: {
+        "used_percent": 10,
+        "reset_at": reset_at,
+        "window_minutes": 10080,
+        "plan_type": "plus",
+        "updated_at": int(time.time()),
+    })
+    usage = {
+        "requests": 1,
+        "model": "gpt-5.6-luna",
+        "backend": "codex",
+        "total_tokens": 1000,
+        "plan_usage": {
+            "used_percent": 11,
+            "reset_at": reset_at,
+            "window_minutes": 10080,
+            "plan_type": "plus",
+        },
+    }
+    model = FakeModel([{"thought": "done", "status": "done", "message": "Finished."}])
+
+    events = run_loop(
+        model, FakeDesktop(), monkeypatch, tmp_path,
+        max_steps=2, planner="", backend="codex", usage=usage,
+    )
+
+    plan = final(events)["usage"]["plan_usage"]
+    assert plan["measured"] is True
+    assert plan["used_percent_delta"] == 1
+    assert plan["end_used_percent"] == 11
 
 
 def test_a_stubborn_claim_of_done_is_not_looped_forever(monkeypatch, tmp_path):

@@ -37,6 +37,7 @@ aios-phone-v*.tar.gz
 .aios-phone-relay-heartbeat
 .aios-phone-secret.pem
 .aios-stream-health.json
+.aios-codex-plan-usage.json
 .aios-update-health.json
 .aios-update-request
 .aios_update_staging/

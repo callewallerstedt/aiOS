@@ -59,3 +59,18 @@ def test_the_model_timeout_env_var_reaches_this_backend(monkeypatch):
     assert codex_backend._env_float("AIOS_MODEL_TIMEOUT", 150.0) == 150.0
     monkeypatch.setenv("AIOS_MODEL_TIMEOUT", "0")
     assert codex_backend._env_float("AIOS_MODEL_TIMEOUT", 150.0) == 150.0
+
+
+def test_chatgpt_plan_window_is_read_from_codex_headers():
+    usage = codex_backend._plan_usage_from_headers({
+        "x-codex-primary-used-percent": "7",
+        "x-codex-primary-reset-at": "1785666847",
+        "x-codex-primary-window-minutes": "10080",
+        "x-codex-plan-type": "plus",
+        "x-codex-active-limit": "premium",
+    })
+
+    assert usage["used_percent"] == 7
+    assert usage["remaining_percent"] == 93
+    assert usage["window_minutes"] == 10080
+    assert usage["plan_type"] == "plus"

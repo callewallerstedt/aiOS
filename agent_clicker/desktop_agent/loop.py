@@ -551,6 +551,23 @@ class AgentLoop:
             "cached_input_tokens": 0, "total_tokens": 0,
             "backend": backend, "models": {},
         }
+        initial_plan_usage = {}
+        if "codex" in str(backend).lower():
+            try:
+                from agent import codex_backend
+                initial_plan_usage = codex_backend.latest_plan_usage()
+            except Exception:
+                initial_plan_usage = {}
+        if time.time() - float(initial_plan_usage.get("updated_at") or 0) > 600:
+            initial_plan_usage = {}
+        if initial_plan_usage:
+            usage_total["plan_usage"] = {
+                "start_used_percent": initial_plan_usage.get("used_percent"),
+                "start_reset_at": initial_plan_usage.get("reset_at"),
+                "window_minutes": initial_plan_usage.get("window_minutes"),
+                "plan_type": initial_plan_usage.get("plan_type"),
+                "measured": False,
+            }
 
         _COUNTERS = ("requests", "input_tokens", "output_tokens", "cached_input_tokens", "total_tokens")
 
@@ -562,6 +579,30 @@ class AgentLoop:
             if not isinstance(item, dict):
                 return
             _accumulate(usage_total, item)
+            plan_sample = item.get("plan_usage")
+            if isinstance(plan_sample, dict) and plan_sample.get("used_percent") is not None:
+                plan_total = usage_total.setdefault("plan_usage", {})
+                if plan_total.get("start_used_percent") is None:
+                    # The first response establishes the current window, but
+                    # cannot measure the model call that produced it.
+                    plan_total["start_used_percent"] = plan_sample.get("used_percent")
+                    plan_total["start_reset_at"] = plan_sample.get("reset_at")
+                    plan_total["measured"] = False
+                plan_total.update({
+                    "end_used_percent": plan_sample.get("used_percent"),
+                    "end_reset_at": plan_sample.get("reset_at"),
+                    "window_minutes": plan_sample.get("window_minutes"),
+                    "plan_type": plan_sample.get("plan_type"),
+                })
+                same_window = (
+                    plan_total.get("start_reset_at")
+                    and plan_total.get("start_reset_at") == plan_total.get("end_reset_at")
+                )
+                if same_window and initial_plan_usage:
+                    start = float(plan_total.get("start_used_percent") or 0)
+                    end = float(plan_total.get("end_used_percent") or 0)
+                    plan_total["used_percent_delta"] = round(max(0.0, end - start), 2)
+                    plan_total["measured"] = True
             used_model = str(item.get("model") or model)
             model_usage = usage_total["models"].setdefault(used_model, {})
             _accumulate(model_usage, item)
@@ -1042,24 +1083,13 @@ class AgentLoop:
 
                 self.on_event({"type": "step_end", "n": n, "record": _rec_dict(rec)})
 
-            # Out of steps. Check anyway: agents often finish the work and then
-            # forget to say so, and if it isn't finished the user deserves to
-            # know exactly what is left rather than "max_steps reached".
-            check = self._verify_completion(
-                task=task, plan=plan_data, closing="(ran out of steps)",
-                monitor=monitor, model=(planner_model or model), backend=backend,
-                add_usage=_add_usage,
-            )
-            if check:
-                self.on_event({"type": "verified", "n": max_steps, **check})
-            passed = bool(check and check.get("verdict") == "pass")
-            missing = "; ".join(check.get("missing") or []) if check else ""
+            # Reaching the safety budget is not a claim that the task is done.
+            # The completion checker is reserved for an explicit `status:done`
+            # finish attempt, so it never burns another model call mid-work or
+            # turns a forced stop into a successful completion.
             self.on_event({
-                "type": "done", "ok": passed, "steps": max_steps, "verified": passed,
-                "message": ("Ran out of steps, but the check says the task is done: "
-                            + str(check.get("reason") or "") if passed else
-                            "Ran out of steps before finishing."
-                            + (f" Still missing: {missing}" if missing else "")),
+                "type": "done", "ok": False, "steps": max_steps, "verified": False,
+                "message": "Ran out of steps before finishing.",
             })
         except Exception as e:
             self.on_event({"type": "log", "msg": f"FATAL: {e}\n{traceback.format_exc()}"})

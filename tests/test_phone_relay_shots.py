@@ -84,3 +84,31 @@ def test_events_without_a_frame_are_untouched(bridge, monkeypatch):
 
     assert "shot" not in events[0]["payload"]
     assert bridge.uploaded == []
+
+
+def test_legacy_config_envelope_delivers_intent_questions(bridge, monkeypatch):
+    monkeypatch.setattr(phone_relay, "load_config", lambda: {
+        "openai_api_key": "",
+        "ai_operator": {"provider_mode": "codex"},
+    })
+    monkeypatch.setattr(
+        phone_relay,
+        "clarify_prompt_for_provider",
+        lambda draft, previous, **kwargs: {
+            "questions": [{"id": "destination", "question": "Where should it be saved?", "answered": False}],
+            "provider": "codex",
+        },
+    )
+
+    result = bridge.execute({
+        "type": "config",
+        "payload": {
+            "_aios_command": "clarify",
+            "draft": "Draw a logo and save it somewhere.",
+            "request_id": "request-1",
+            "previous": [],
+        },
+    })
+
+    assert result["request_id"] == "request-1"
+    assert result["questions"][0]["question"] == "Where should it be saved?"

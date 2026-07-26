@@ -1,8 +1,9 @@
-const CACHE = "aios-remote-v18";
+const CACHE = "aios-remote-v19";
 const SHELL = [
   "./",
   "phone.css",
   "phone.js",
+  "version.json",
   "manifest.webmanifest",
   "icons/aios-icon-180.png",
   "icons/aios-icon-192.png",

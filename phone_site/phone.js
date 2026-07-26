@@ -1053,7 +1053,15 @@ function costLine(cost) {
   const parts = [];
   if (cost.priced) parts.push(`≈ ${usd < 1 ? `$${usd.toFixed(4)}` : `$${usd.toFixed(2)}`}`);
   if (Number(cost.plan_requests || 0)) {
-    parts.push(`${Number(cost.plan_tokens || 0).toLocaleString()} tokens on your ChatGPT plan`);
+    if (cost.plan_usage_measured) {
+      const percent = Number(cost.plan_usage_percent || 0);
+      parts.push(`${percent > 0 ? `≈ ${percent.toLocaleString()}%` : "<1%"} of your ChatGPT plan this run`);
+    } else {
+      parts.push(`${Number(cost.plan_tokens || 0).toLocaleString()} tokens on your ChatGPT plan`);
+    }
+    if (cost.plan_window_used_percent !== undefined && cost.plan_window_used_percent !== null) {
+      parts.push(`${Number(cost.plan_window_used_percent).toLocaleString()}% of the current window used`);
+    }
   }
   const unpriced = Array.isArray(cost.unpriced) ? cost.unpriced : [];
   if (unpriced.length) parts.push(`no price set for ${unpriced.join(", ")}`);
@@ -1647,7 +1655,10 @@ async function applyWakeLock() {
 async function sendCommand(type, payload = {}) {
   const machine = currentMachine();
   if (!machine) throw new Error("Choose a computer first.");
-  const tunneled = ["stream", "update", "codex_switch", "ai_settings"].includes(type);
+  // The production relay can lag behind the PWA. Tunnel newer command types
+  // through its long-supported config envelope so intent questions keep
+  // working while the PC and static client update independently.
+  const tunneled = ["clarify", "stream", "update", "codex_switch", "ai_settings"].includes(type);
   return api(`/api/machines/${encodeURIComponent(machine.id)}/commands`, {
     method: "POST",
     body: JSON.stringify({
@@ -1655,6 +1666,28 @@ async function sendCommand(type, payload = {}) {
       payload: tunneled ? { ...payload, _aios_command: type } : payload
     })
   });
+}
+
+async function loadVersion() {
+  const value = $("#versionValue");
+  if (!value) return;
+  try {
+    const response = await fetch(`version.json?v=${Date.now()}`, { cache: "no-store" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const version = await response.json();
+    const stamp = new Date(version.built_at || version.committed_at || "");
+    const when = Number.isNaN(stamp.getTime())
+      ? "Unknown build time"
+      : new Intl.DateTimeFormat(undefined, {
+          dateStyle: "medium",
+          timeStyle: "short"
+        }).format(stamp);
+    const commit = String(version.commit || "").slice(0, 8);
+    value.textContent = commit ? `${when} · ${commit}` : when;
+    value.title = String(version.commit || "");
+  } catch {
+    value.textContent = "Local development build";
+  }
 }
 
 function autoGrow() {
@@ -2402,6 +2435,7 @@ applyFilter();
 toggleScreen(state.screenOpen);
 bindViewerGestures();
 autoGrow();
+loadVersion();
 
 if (new URLSearchParams(location.search).has("compose")) {
   setTimeout(() => $("#promptInput").focus(), 400);

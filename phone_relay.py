@@ -416,7 +416,7 @@ class Bridge:
         # New control messages can be tunneled through the legacy relay's
         # existing `config` command until every hosted backend is upgraded.
         tunneled = str(payload.get("_aios_command") or "") if kind == "config" else ""
-        if tunneled in {"stream", "update", "codex_switch", "ai_settings"}:
+        if tunneled in {"clarify", "stream", "update", "codex_switch", "ai_settings"}:
             kind = tunneled
             payload = {key: value for key, value in payload.items() if key != "_aios_command"}
         if kind in {"prompt", "followup"}:

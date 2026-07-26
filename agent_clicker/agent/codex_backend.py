@@ -15,6 +15,7 @@ import base64
 import json
 import os
 import pathlib
+import threading
 import time
 import uuid
 from typing import Any
@@ -66,6 +67,54 @@ def _env_float(name: str, default: float) -> float:
 READ_TIMEOUT = _env_float("AIOS_MODEL_TIMEOUT", 150.0)
 STREAM_DEADLINE = _env_float("AIOS_MODEL_DEADLINE", max(READ_TIMEOUT * 2, 300.0))
 CONNECT_TIMEOUT = _env_float("AIOS_MODEL_CONNECT_TIMEOUT", 20.0)
+PLAN_USAGE_PATH = pathlib.Path(__file__).resolve().parents[2] / ".aios-codex-plan-usage.json"
+_PLAN_USAGE_LOCK = threading.Lock()
+
+
+def _header_number(headers, name: str) -> float | None:
+    try:
+        value = str(headers.get(name) or "").strip()
+        return float(value) if value else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _plan_usage_from_headers(headers) -> dict:
+    """Extract ChatGPT-plan window data returned by the Codex backend."""
+    used = _header_number(headers, "x-codex-primary-used-percent")
+    if used is None:
+        return {}
+    reset_at = _header_number(headers, "x-codex-primary-reset-at")
+    window_minutes = _header_number(headers, "x-codex-primary-window-minutes")
+    return {
+        "used_percent": max(0.0, min(100.0, used)),
+        "remaining_percent": max(0.0, min(100.0, 100.0 - used)),
+        "reset_at": int(reset_at) if reset_at else None,
+        "window_minutes": int(window_minutes) if window_minutes else None,
+        "plan_type": str(headers.get("x-codex-plan-type") or ""),
+        "active_limit": str(headers.get("x-codex-active-limit") or ""),
+        "updated_at": int(time.time()),
+    }
+
+
+def latest_plan_usage() -> dict:
+    try:
+        payload = json.loads(PLAN_USAGE_PATH.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _save_plan_usage(payload: dict) -> None:
+    if not payload:
+        return
+    with _PLAN_USAGE_LOCK:
+        temp = PLAN_USAGE_PATH.with_suffix(".json.tmp")
+        try:
+            temp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            temp.replace(PLAN_USAGE_PATH)
+        except OSError:
+            pass
 
 
 # ---------------- auth ----------------
@@ -268,10 +317,14 @@ def chat_with_usage(system: str, messages: list[dict], model: str = "gpt-5.6-lun
             if r.status_code != 200:
                 txt = r.read().decode("utf-8", "replace")
                 raise RuntimeError(f"Codex backend HTTP {r.status_code}: {txt[:600]}")
+            plan_usage = _plan_usage_from_headers(r.headers)
+            _save_plan_usage(plan_usage)
             text, usage = _parse_sse(r.iter_bytes(), deadline=deadline)
     if not text:
         raise RuntimeError("Codex backend returned no text (empty stream).")
     usage.update({"backend": "codex", "model": model, "requests": int(usage.get("requests") or 1)})
+    if plan_usage:
+        usage["plan_usage"] = plan_usage
     return text, usage
 
 

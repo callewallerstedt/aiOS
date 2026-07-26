@@ -137,6 +137,15 @@ def estimate_cost(usage: dict, default_model: str = "") -> dict:
                 entry[key] = int(entry.get(key) or 0) + int(tokens.get(key) or 0)
     result["usd"] = round(result["usd"], 6)
     result["priced"] = bool(result["models"])
+    plan_usage = usage.get("plan_usage") if isinstance(usage.get("plan_usage"), dict) else {}
+    if result["plan_requests"] and plan_usage:
+        result["plan_usage_measured"] = bool(plan_usage.get("measured"))
+        if plan_usage.get("used_percent_delta") is not None:
+            result["plan_usage_percent"] = float(plan_usage["used_percent_delta"])
+        if plan_usage.get("end_used_percent") is not None:
+            result["plan_window_used_percent"] = float(plan_usage["end_used_percent"])
+        result["plan_window_minutes"] = plan_usage.get("window_minutes")
+        result["plan_type"] = plan_usage.get("plan_type") or ""
     return result
 
 
@@ -158,7 +167,14 @@ def describe_cost(usage: dict, default_model: str = "") -> str:
     if cost["priced"]:
         parts.append(f"≈ {format_usd(cost['usd'])}")
     if cost["plan_requests"]:
-        parts.append(f"{cost['plan_tokens']:,} tokens on your ChatGPT plan")
+        if cost.get("plan_usage_measured"):
+            percent = float(cost.get("plan_usage_percent") or 0)
+            amount = f"approximately {percent:g}%" if percent > 0 else "less than 1%"
+            parts.append(f"{amount} of your ChatGPT plan this run")
+        else:
+            parts.append(f"{cost['plan_tokens']:,} tokens on your ChatGPT plan")
+        if cost.get("plan_window_used_percent") is not None:
+            parts.append(f"{float(cost['plan_window_used_percent']):g}% of the current window used")
     if cost["unpriced"]:
         parts.append(f"no price set for {', '.join(cost['unpriced'])}")
     return " · ".join(parts)
