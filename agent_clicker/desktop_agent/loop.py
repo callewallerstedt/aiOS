@@ -74,6 +74,23 @@ from .actions import execute, ExecResult, any_button_held, any_key_held, release
 DEBUG_ROOT = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "debug_runs")
 
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        value = float(str(os.environ.get(name, "")).strip())
+        return value if value > 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
+# A model call that never returns used to freeze the whole run: the loop has no
+# cancellation point inside it, so even Stop did nothing. Every call now runs on
+# a worker thread the loop will walk away from.
+MODEL_CALL_TIMEOUT = _env_float("AIOS_MODEL_CALL_TIMEOUT", 420.0)
+# Backstop for anything else that can block forever (a wedged capture, a driver
+# call). Time spent waiting on the user's answer to an ASK does not count.
+STALL_ABORT_SEC = _env_float("AIOS_STALL_ABORT_SEC", 900.0)
+
 PLANNER_SYSTEM_PROMPT = """You are the pre-run planner for a desktop computer-use agent.
 Study the user's task and current screenshot, then produce a short execution plan AND a
 todo list the agent will tick off as it works.
@@ -262,8 +279,23 @@ class AgentLoop:
         self._follow_ups: list[str] = []
         self._follow_ups_lock = threading.Lock()
         self._awaiting_answer = False
+        # Stall detection: bumped on every emitted event. Waiting on the user's
+        # ASK answer is not a stall, so it is excluded explicitly.
+        self._last_event_at = time.monotonic()
+        self._done_emitted = False
+        # Bumped per run. A run abandoned by the stall watchdog may still be
+        # blocked in a call that returns much later; the generation lets that
+        # zombie recognise it has been superseded instead of emitting events
+        # into — or acting on behalf of — whatever run is current now.
+        self._generation = 0
 
     def is_running(self) -> bool:
+        # A run the stall watchdog gave up on may leave its thread wedged in a
+        # call that never returns. Once `done` is out the run is over as far as
+        # everything else is concerned — otherwise the user could never start
+        # another one.
+        if self._done_emitted:
+            return False
         return self._thread is not None and self._thread.is_alive()
 
     def stop(self):
@@ -291,15 +323,19 @@ class AgentLoop:
             return False
         if not text and not images:
             return False
+        # Queue and un-pause under one lock. Doing the check afterwards left a
+        # window where an answer arriving just before the loop armed the wait
+        # was queued but never woke it, and the run hung with the reply already
+        # in hand.
         with self._follow_ups_lock:
             self._follow_ups.append({"text": text, "images": list(images)})
+            answering_ask = self._awaiting_answer
+            if answering_ask:
+                self._awaiting_answer = False
+                self._pause.set()
         self.on_event({"type": "follow_up_received", "text": text,
-                       "answering_ask": self._awaiting_answer,
+                       "answering_ask": answering_ask,
                        "images": len(images)})
-        # If we were paused waiting for an ASK answer, resume the loop.
-        if self._awaiting_answer:
-            self._awaiting_answer = False
-            self._pause.set()
         return True
 
     def _drain_follow_ups(self) -> list[dict]:
@@ -329,6 +365,14 @@ class AgentLoop:
             raise RuntimeError("loop already running")
         self._stop.clear()
         self._pause.set()
+        # Per-run state — without this a second run would be born "already
+        # finished" and every one of its events would be swallowed.
+        self._done_emitted = False
+        self._awaiting_answer = False
+        self._last_event_at = time.monotonic()
+        self._generation += 1
+        with self._follow_ups_lock:
+            self._follow_ups.clear()
         self._thread = threading.Thread(
             target=self._run,
             args=(task, monitor, model, max_steps, action_delay, settle_after_step,
@@ -339,6 +383,44 @@ class AgentLoop:
         self._thread.start()
 
     # -----------------------------------------------------------
+
+    def _call_model(self, system, msgs, *, model, backend, reasoning_effort,
+                    timeout: float | None = None) -> tuple[str, dict]:
+        """`vlm.chat_raw` that cannot hang the run.
+
+        The call happens on a throwaway worker thread. If it overruns we raise
+        TimeoutError and abandon the thread — it is a daemon and will die with
+        the process. The caller's `except` turns that into a normal step error,
+        so the run retries instead of freezing forever.
+
+        Usage is collected on the worker thread and returned, because
+        `vlm.take_last_usage()` is thread-local: reading it from here, after the
+        call ran elsewhere, would silently report zero tokens for every step.
+        """
+        timeout = timeout or MODEL_CALL_TIMEOUT
+        box: dict = {}
+
+        def worker():
+            try:
+                raw = vlm.chat_raw(system, msgs, model=model, backend=backend,
+                                   reasoning_effort=reasoning_effort)
+                box["result"] = (raw, vlm.take_last_usage())
+            except BaseException as exc:  # noqa: BLE001 — re-raised on the loop thread
+                box["error"] = exc
+
+        thread = threading.Thread(target=worker, daemon=True,
+                                  name="aiOS-model-call")
+        thread.start()
+        thread.join(timeout)
+        if thread.is_alive():
+            raise TimeoutError(
+                f"model call exceeded {timeout:.0f}s with no reply "
+                f"(backend={backend}, model={model}); abandoning this step"
+            )
+        if "error" in box:
+            raise box["error"]
+        raw, usage = box.get("result") or ("", {})
+        return raw or "", usage if isinstance(usage, dict) else {}
 
     def _wait_unpaused(self):
         while not self._pause.is_set():
@@ -358,6 +440,11 @@ class AgentLoop:
              reasoning_effort=None, mid_screenshots="key", attachments=None,
              user_context="", planner_model=""):
         attachments = attachments or []
+        my_gen = self._generation
+
+        def _superseded() -> bool:
+            return my_gen != self._generation
+
         user_context = (user_context or "").strip()
         effective_system = SYSTEM_PROMPT + "\n\n" + _system_info_block(monitor, shell_enabled)
         if user_context:
@@ -484,13 +571,51 @@ class AgentLoop:
             backend_usage = model_usage.setdefault("backends", {}).setdefault(used_backend, {})
             _accumulate(backend_usage, item)
 
+        emit_lock = threading.Lock()
+
         def _emit(ev: dict):
+            if _superseded():
+                # This run was abandoned and another has started. Stay silent.
+                return
             if ev.get("type") == "done":
+                # The stall watchdog and the loop itself can both decide a run
+                # is over. The UI must see exactly one `done`.
+                with emit_lock:
+                    if self._done_emitted:
+                        return
+                    self._done_emitted = True
                 ev = dict(ev)
                 ev["usage"] = json.loads(json.dumps(usage_total))
+            self._last_event_at = time.monotonic()
             _write_event(ev)
             orig_on_event(ev)
         self.on_event = _emit  # type: ignore
+
+        def _stall_watch():
+            """Last line of defence: a run that emits nothing for long enough
+            is declared stuck, so the UI gets an answer instead of a spinner
+            that never resolves."""
+            while not self._stop.is_set() and not self._done_emitted and not _superseded():
+                time.sleep(2.0)
+                if self._awaiting_answer or self.is_paused():
+                    # Waiting on a human is not a stall.
+                    self._last_event_at = time.monotonic()
+                    continue
+                idle = time.monotonic() - self._last_event_at
+                if idle < STALL_ABORT_SEC:
+                    continue
+                self.on_event({"type": "log", "msg": (
+                    f"stall watchdog: no activity for {idle:.0f}s — ending the run")})
+                self.on_event({"type": "done", "ok": False, "steps": 0, "message": (
+                    f"Stopped: the run stopped responding for {idle:.0f}s and was "
+                    "ended so it would not hang. Nothing was reported by the last "
+                    "step — try again, and if it keeps happening check the network.")})
+                self._stop.set()
+                self._pause.set()
+                return
+
+        threading.Thread(target=_stall_watch, daemon=True,
+                         name="aiOS-stall-watch").start()
 
         try:
             planner_model = (planner_model or "").strip()
@@ -513,14 +638,14 @@ class AgentLoop:
                         ),
                         vlm.image_part(plan_url),
                     ]
-                    raw_plan = vlm.chat_raw(
+                    raw_plan, plan_usage = self._call_model(
                         PLANNER_SYSTEM_PROMPT,
                         [{"role": "user", "content": plan_content}],
                         model=planner_model,
                         backend=backend,
                         reasoning_effort="high",
                     )
-                    _add_usage(vlm.take_last_usage())
+                    _add_usage(plan_usage)
                     plan_data = parse_plan(vlm.parse_json_lenient(raw_plan))
                     if not plan_data["plan"] and not plan_data["todo"]:
                         raise ValueError("planner returned an empty plan")
@@ -535,6 +660,8 @@ class AgentLoop:
             pinned_msgs.append({"role": "user", "content": checklist_block(task, plan_data)})
 
             for n in range(1, max_steps + 1):
+                if _superseded():
+                    return  # abandoned run waking up — never touch the desktop again
                 if self._stop.is_set():
                     self.on_event({"type": "done", "ok": False, "message": "stopped by user", "steps": n - 1})
                     return
@@ -680,11 +807,11 @@ class AgentLoop:
                         pass
                 t0 = time.time()
                 try:
-                    raw = vlm.chat_raw(
+                    raw, step_usage = self._call_model(
                         effective_system, msgs, model=model, backend=backend,
                         reasoning_effort=reasoning_effort,
                     )
-                    _add_usage(vlm.take_last_usage())
+                    _add_usage(step_usage)
                     rec.raw = raw
                     if sd:
                         try:
@@ -768,11 +895,17 @@ class AgentLoop:
                 if rec.status == "ask":
                     history_msgs.append({"role": "assistant", "content": rec.raw or ""})
                     self.on_event({"type": "step_end", "n": n, "record": _rec_dict(rec)})
-                    self.on_event({"type": "ask", "message": rec.message})
-                    # Wait for the user to either inject a follow-up (which
-                    # auto-resumes via add_follow_up) or stop the run.
-                    self._awaiting_answer = True
+                    # Arm the wait BEFORE announcing the ask. The phone can
+                    # answer in milliseconds, and an answer that landed while we
+                    # were still emitting used to be queued without waking us.
                     self._pause.clear()
+                    with self._follow_ups_lock:
+                        if self._follow_ups:
+                            # Already answered — don't wait at all.
+                            self._pause.set()
+                        else:
+                            self._awaiting_answer = True
+                    self.on_event({"type": "ask", "message": rec.message})
                     last_was_ask = True
                     self._wait_unpaused()
                     self._awaiting_answer = False
@@ -809,6 +942,8 @@ class AgentLoop:
                 rec_actions_last = len(rec.actions)
                 t0 = time.time()
                 for i, action in enumerate(rec.actions):
+                    if _superseded():
+                        return
                     if self._stop.is_set():
                         self.on_event({"type": "done", "ok": False, "message": "stopped", "steps": n})
                         return
@@ -981,9 +1116,10 @@ class AgentLoop:
                 ),
                 vlm.image_part(url, detail="high"),
             ]
-            raw = vlm.chat_raw(VERIFIER_SYSTEM_PROMPT, [{"role": "user", "content": content}],
-                               model=model, backend=backend, reasoning_effort="low")
-            add_usage(vlm.take_last_usage())
+            raw, verify_usage = self._call_model(
+                VERIFIER_SYSTEM_PROMPT, [{"role": "user", "content": content}],
+                model=model, backend=backend, reasoning_effort="low")
+            add_usage(verify_usage)
             parsed = vlm.parse_json_lenient(raw)
             verdict = str(parsed.get("verdict") or "").strip().lower()
             if verdict not in {"pass", "fail"}:

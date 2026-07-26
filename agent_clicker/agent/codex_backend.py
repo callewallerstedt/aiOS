@@ -53,6 +53,21 @@ CODEX_USER_AGENT = "codex_cli_rs/0.40.0 (Windows; x64)"
 CODEX_ORIGINATOR = "codex_cli_rs"
 
 
+def _env_float(name: str, default: float) -> float:
+    try:
+        value = float(str(os.environ.get(name, "")).strip())
+        return value if value > 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
+# Per-read timeout (httpx) and the total wall-clock cap for one call. The API
+# path in vlm.py already honoured AIOS_MODEL_TIMEOUT; this path ignored it.
+READ_TIMEOUT = _env_float("AIOS_MODEL_TIMEOUT", 150.0)
+STREAM_DEADLINE = _env_float("AIOS_MODEL_DEADLINE", max(READ_TIMEOUT * 2, 300.0))
+CONNECT_TIMEOUT = _env_float("AIOS_MODEL_CONNECT_TIMEOUT", 20.0)
+
+
 # ---------------- auth ----------------
 
 def auth_available() -> tuple[bool, str]:
@@ -153,12 +168,23 @@ def _extract_system(messages: list[dict]) -> str:
 
 # ---------------- SSE -> final text ----------------
 
-def _parse_sse(stream_bytes_iter) -> tuple[str, dict]:
-    """Accumulate response text and normalized token usage."""
+def _parse_sse(stream_bytes_iter, deadline: float | None = None) -> tuple[str, dict]:
+    """Accumulate response text and normalized token usage.
+
+    `deadline` is a monotonic wall-clock cut-off for the WHOLE stream. httpx's
+    own timeout is per read, so it resets on every chunk: a stream that dribbles
+    keepalives but never completes would block here forever, which is exactly
+    how runs used to freeze mid-step with no error and no way out.
+    """
     chunks: list[str] = []
     usage: dict = {}
     buf = ""
     for raw in stream_bytes_iter:
+        if deadline is not None and time.monotonic() > deadline:
+            raise TimeoutError(
+                f"Codex stream exceeded {STREAM_DEADLINE:.0f}s without completing "
+                f"({len(''.join(chunks))} chars received)."
+            )
         if not raw:
             continue
         buf += raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw
@@ -200,7 +226,7 @@ def _parse_sse(stream_bytes_iter) -> tuple[str, dict]:
 # ---------------- public ----------------
 
 def chat_with_usage(system: str, messages: list[dict], model: str = "gpt-5.6-luna",
-                    timeout: float = 180.0, reasoning_effort: str | None = None) -> tuple[str, dict]:
+                    timeout: float | None = None, reasoning_effort: str | None = None) -> tuple[str, dict]:
     """Send a chat (with optional images) to the Codex backend; return the
     final assistant text. Drop-in replacement for agent.vlm.chat_raw."""
     auth = _load_auth()
@@ -232,12 +258,17 @@ def chat_with_usage(system: str, messages: list[dict], model: str = "gpt-5.6-lun
         "prompt_cache_key": str(uuid.uuid4()),
     }
 
-    with httpx.Client(timeout=timeout) as cl:
+    read_timeout = float(timeout) if timeout else READ_TIMEOUT
+    # Two independent guards: httpx trips when a single read stalls, the
+    # deadline trips when the stream stays alive but never finishes.
+    limits = httpx.Timeout(read_timeout, connect=CONNECT_TIMEOUT)
+    deadline = time.monotonic() + STREAM_DEADLINE
+    with httpx.Client(timeout=limits) as cl:
         with cl.stream("POST", CODEX_ENDPOINT, json=body, headers=headers) as r:
             if r.status_code != 200:
                 txt = r.read().decode("utf-8", "replace")
                 raise RuntimeError(f"Codex backend HTTP {r.status_code}: {txt[:600]}")
-            text, usage = _parse_sse(r.iter_bytes())
+            text, usage = _parse_sse(r.iter_bytes(), deadline=deadline)
     if not text:
         raise RuntimeError("Codex backend returned no text (empty stream).")
     usage.update({"backend": "codex", "model": model, "requests": int(usage.get("requests") or 1)})
@@ -245,7 +276,7 @@ def chat_with_usage(system: str, messages: list[dict], model: str = "gpt-5.6-lun
 
 
 def chat_raw(system: str, messages: list[dict], model: str = "gpt-5.6-luna",
-             timeout: float = 180.0, reasoning_effort: str | None = None) -> str:
+             timeout: float | None = None, reasoning_effort: str | None = None) -> str:
     return chat_with_usage(
         system, messages, model=model, timeout=timeout,
         reasoning_effort=reasoning_effort,

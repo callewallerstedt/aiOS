@@ -40,10 +40,13 @@ class PlannerModelTests(unittest.TestCase):
                 planner_model="gpt-5.6-sol",
             )
 
-        self.assertEqual([call["model"] for call in calls], ["gpt-5.6-sol", "gpt-5.6-luna"])
+        # plan, then execute, then the completion check — which reuses the
+        # planner model for its second opinion.
+        self.assertEqual([call["model"] for call in calls],
+                         ["gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.6-sol"])
         self.assertEqual(calls[0]["reasoning_effort"], "high")
         execution_text = str(calls[1]["messages"])
-        self.assertIn("PRE-RUN PLAN", execution_text)
+        self.assertIn("PLAN from the planning model", execution_text)
         self.assertTrue(any(event.get("type") == "plan" for event in events))
 
 
