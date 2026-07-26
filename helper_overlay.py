@@ -9855,7 +9855,7 @@ class HelperOverlay:
         elif action == "operator_stop":
             self.root.after(0, self._remote_operator_stop)
         elif action == "operator_followup":
-            self.root.after(0, lambda value=text: self._remote_operator_followup(value))
+            self.root.after(0, lambda value=text, opts=options: self._remote_operator_followup(value, opts))
         elif action == "operator_clear":
             self.root.after(0, self._remote_operator_clear)
         elif action == "operator_attach":
@@ -9921,6 +9921,32 @@ class HelperOverlay:
                 self.agent_operator_error or "OPERATOR did not finish loading on this PC.",
                 "operator_unavailable")
             return
+        # Phone asked for a NEW task. If a previous run is still winding down
+        # (or stuck "running"), stop it and retry — do not reject with
+        # "Already running" and leave the phone on a forever Thinking row.
+        loop = getattr(self, "agent_operator_loop", None)
+        if loop is not None and loop.is_running():
+            try:
+                if not getattr(self, "agent_operator_stop_requested", False):
+                    self.agent_operator_stop()
+                else:
+                    loop.stop()
+            except Exception:
+                try:
+                    loop.stop()
+                except Exception:
+                    pass
+            if attempts_left > 0:
+                self.root.after(
+                    150,
+                    lambda: self._remote_submit_operator_attempt(text, options, attempts_left - 1),
+                )
+                return
+            self._phone_mirror_fail(
+                "Could not stop the previous run to start your new task. Tap Stop, then try again.",
+                "still_running",
+            )
+            return
         try:
             if options:
                 self._remote_apply_operator_options(options, run=False)
@@ -9939,18 +9965,21 @@ class HelperOverlay:
         except Exception:
             pass
 
-    def _remote_operator_followup(self, text):
-        text = (text or "").strip()
-        if not text:
-            return
+    def _remote_operator_followup(self, text, options=None):
+        text = (text or "").strip() or "Continue"
         try:
-            self._ensure_agent_operator()
-        except Exception:
+            if not self._ensure_agent_operator():
+                self._phone_mirror_fail(
+                    "OPERATOR is not available on this PC.", "operator_unavailable")
+                return
+        except Exception as exc:
+            self._phone_mirror_fail(
+                f"OPERATOR is not available: {exc}", "operator_unavailable")
             return
         loop = self.agent_operator_loop
         if not loop or not loop.is_running():
-            # Nothing running → treat as a fresh task.
-            self._remote_submit_operator(text, None)
+            # Nothing running → treat as a fresh task (keep options).
+            self._remote_submit_operator(text, options)
             return
         try:
             loop.add_follow_up(text)
@@ -9963,6 +9992,10 @@ class HelperOverlay:
                 self.agent_operator_status_var.set("Follow-up received")
         except Exception as exc:
             self._agent_operator_log_line("err", f"follow-up failed: {exc}\n")
+            try:
+                self._phone_mirror_fail(f"Follow-up failed: {exc}", "followup_failed")
+            except Exception:
+                pass
 
     def _remote_operator_attach(self, payload_text):
         try:

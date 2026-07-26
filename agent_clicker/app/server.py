@@ -402,9 +402,9 @@ def api_phone_send():
                                        ensure_ascii=False),
                            options=None)
         if is_followup:
-            if not text and not attachment_paths:
+            if not text and not attachment_paths and not options:
                 return jsonify({"ok": False, "error": "empty"}), 400
-            result = forward_helper("operator_followup", text or "")
+            result = forward_helper("operator_followup", text or "Continue", options)
             if result.get("ok"):
                 result["mode"] = "followup"
                 result["answering_ask"] = bool(state.get("asking"))

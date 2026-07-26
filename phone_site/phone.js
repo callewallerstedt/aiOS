@@ -1290,7 +1290,29 @@ function closeLightbox() {
 /* ── timeline ─────────────────────────────────────────── */
 
 function treatAsFollowUp() {
-  return state.running && !state.forceNewPrompt;
+  // A follow-up only makes sense while OPERATOR is actively working on the
+  // open live run. An old/finished thread on screen (or History) must start
+  // a fresh prompt — otherwise the phone sends followup into a dead run and
+  // the chat never shows AI activity again.
+  return Boolean(
+    state.running
+    && !state.forceNewPrompt
+    && !state.viewingRunId
+    && state.liveRun
+    && state.liveRun.status === "open"
+  );
+}
+
+/** Leave History so live events paint again. Keep the transcript when the
+ *  user is sending a new task in the thread they are already looking at. */
+function resumeLiveFeed({ keepTranscript = false } = {}) {
+  const wasViewing = Boolean(state.viewingRunId);
+  state.viewingRunId = "";
+  $("#historyBanner")?.classList.add("hidden");
+  if (!wasViewing || keepTranscript) return;
+  const events = state.liveRun?.events || [];
+  if (events.length) replayEvents(events);
+  else resetTimeline("Ready. Ask your computer to do something.");
 }
 
 function resetTimeline(message) {
@@ -1682,13 +1704,14 @@ function openRun(task, stamp) {
 }
 
 /** Remember what you typed, even if the PC never manages to start the run. */
-function notePrompt(text) {
+function notePrompt(text, { asFollowUp = false } = {}) {
   const stamp = Date.now();
-  // Stay on the open live run for follow-ups — the old 60s window closed the
-  // real run mid-task and the phone stopped showing what OPERATOR was doing.
-  const run = state.liveRun && state.liveRun.status === "open"
-    ? state.liveRun
-    : openRun(text, stamp);
+  // Follow-ups stay on the open live run. A new task always opens a fresh
+  // run — reusing a stale "open" row after the PC went idle is what made the
+  // next message in an old thread go quiet (events attached nowhere useful,
+  // or run_start split the bookkeeping while the feed stayed frozen).
+  const reuse = asFollowUp && state.liveRun && state.liveRun.status === "open";
+  const run = reuse ? state.liveRun : openRun(text, stamp);
   if (!run.task) run.task = String(text || "").slice(0, 400);
   run.events.push({ type: "prompt", payload: { message: text }, created_at: stamp });
   saveHistory();
@@ -1798,12 +1821,7 @@ function openHistoryRun(id) {
 }
 
 function backToLive() {
-  if (!state.viewingRunId) return;
-  state.viewingRunId = "";
-  $("#historyBanner").classList.add("hidden");
-  const events = state.liveRun?.events || [];
-  if (events.length) replayEvents(events);
-  else resetTimeline("Ready. Ask your computer to do something.");
+  resumeLiveFeed({ keepTranscript: false });
 }
 
 /* ── polling ──────────────────────────────────────────── */
@@ -2681,13 +2699,21 @@ $("#promptForm").addEventListener("submit", async (event) => {
   const prompt = $("#promptInput").value.trim();
   if (!prompt || state.busy) return;
   const machine = currentMachine();
-  const type = treatAsFollowUp() ? "followup" : "prompt";
+  // Decide follow-up BEFORE clearing History view — viewing an old thread
+  // must never be treated as a follow-up to a live run.
+  const asFollowUp = treatAsFollowUp();
+  const type = asFollowUp ? "followup" : "prompt";
   state.forceNewPrompt = false;
-  backToLive();
+  // Keep the thread the user is reading; just unlock the live event gate.
+  resumeLiveFeed({ keepTranscript: true });
+  if (!asFollowUp && state.liveRun?.status === "open") closeRun("ended");
+  // New task while a previous run still looks busy: stop it so intent:new
+  // can take over instead of bouncing off "Already running".
+  if (type === "prompt" && state.running) sendCommand("stop").catch(() => {});
   state.busy = true;
   $("#sendBtn").disabled = true;
   buzz(12);
-  notePrompt(prompt);
+  notePrompt(prompt, { asFollowUp });
   // Full colour immediately — never a grey "sending" bubble. Thinking shows
   // right away so the feed feels live before the first PC event arrives.
   addEvent({ type: "prompt", payload: { message: prompt } });
@@ -2705,6 +2731,8 @@ $("#promptForm").addEventListener("submit", async (event) => {
     clearClarifier();
     autoGrow();
     if (!machine?.online) toast("Queued until that computer reconnects");
+    // Pull the first AI events immediately — don't wait for the poll timer.
+    pollEvents().catch(() => {});
   } catch (error) {
     clearThinkingPlaceholder();
     toast(error.message);
