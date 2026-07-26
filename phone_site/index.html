@@ -127,6 +127,20 @@
         <span>Waiting for the first screenshot</span>
       </div>
 
+      <!-- Cinema overlay: only drawn in fullscreen. Sits on top of the live
+           picture at low opacity so the screen stays readable underneath. -->
+      <div id="cinema" class="cinema" hidden>
+        <div class="cinema-rail">
+          <div class="cinema-head">
+            <span id="cinemaState" class="cinema-state">Idle</span>
+            <span id="cinemaStep" class="cinema-step"></span>
+          </div>
+          <p id="cinemaTask" class="cinema-task"></p>
+          <div id="cinemaFeed" class="cinema-feed"></div>
+        </div>
+        <div id="cinemaRotate" class="cinema-rotate">Turn your phone sideways</div>
+      </div>
+
       <div class="hud hud-top">
         <button id="monitorBtn" class="chip" type="button"><svg class="ic"><use href="#i-monitor"/></svg><span id="monitorLabel">Display</span></button>
         <div class="hud-right">
@@ -262,6 +276,9 @@
       <div class="model-section-head"><strong>Planning model</strong><span id="runPlannerValue">Sol</span></div>
       <div id="runPlannerOptions" class="choice-chips"></div>
     </div>
+  </div>
+  <div class="model-section">
+    <label class="planner-toggle"><span><strong>PowerShell &amp; cmd</strong><small>Let it run commands instead of only clicking — much faster</small></span><input id="shellToggle" class="switch" type="checkbox" checked></label>
   </div>
 </section>
 

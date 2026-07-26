@@ -69,6 +69,7 @@ const state = {
   lastPlannerModel: prefs.get("aios_planner_last_model", "sol"),
   effort: prefs.get("aios_effort", "low"),
   steps: Number(prefs.get("aios_steps", 30)),
+  shell: prefs.bool("aios_shell", true),
   detailed: prefs.bool("aios_detailed", true),
   haptics: prefs.bool("aios_haptics", true),
   keepAwake: prefs.bool("aios_awake", false),
@@ -514,6 +515,7 @@ const viewer = {
   fitWidth: 0,
   pinch: null,
   lastTap: 0,
+  tapTimer: null,
   markers: []
 };
 
@@ -589,11 +591,18 @@ function bindViewerGestures() {
     const touch = event.changedTouches[0];
     if (now - viewer.lastTap < 300) {
       viewer.lastTap = 0;
+      clearTimeout(viewer.tapTimer);
       buzz();
       if (viewer.zoom > 1.01) resetZoom();
       else setZoom(2.6, touch.clientX, touch.clientY);
     } else {
       viewer.lastTap = now;
+      // A single tap in fullscreen hides the commentary so you can watch the
+      // bare screen. Delayed, so it never steals the double-tap zoom.
+      clearTimeout(viewer.tapTimer);
+      viewer.tapTimer = setTimeout(() => {
+        if (cinema.on) cinemaMute(!$("#viewer").classList.contains("cinema-muted"));
+      }, 310);
     }
   });
 
@@ -639,15 +648,146 @@ function markClick(payload) {
   marker.appendChild(document.createElement("i"));
   $("#markerLayer").appendChild(marker);
   viewer.markers.push(marker);
-  while (viewer.markers.length > 4) viewer.markers.shift().remove();
-  setTimeout(() => marker.classList.add("faded"), 2000);
-  setTimeout(() => { marker.remove(); viewer.markers = viewer.markers.filter((item) => item !== marker); }, 9000);
+  // Only ever one or two on screen: a marker is "where it just pressed", not a
+  // history. It shows the ripple, then clears itself out of the way.
+  while (viewer.markers.length > 2) viewer.markers.shift().remove();
+  setTimeout(() => marker.classList.add("faded"), MARKER_HOLD_MS);
+  setTimeout(() => {
+    marker.remove();
+    viewer.markers = viewer.markers.filter((item) => item !== marker);
+  }, MARKER_HOLD_MS + 360);
 
   const pill = $("#lastClickPill");
   pill.textContent = `${payload.button || "left"} click · ${Math.round(x)}, ${Math.round(y)}`;
   pill.classList.remove("hidden");
   clearTimeout(markClick.timer);
-  markClick.timer = setTimeout(() => pill.classList.add("hidden"), 6000);
+  markClick.timer = setTimeout(() => pill.classList.add("hidden"), 2600);
+}
+
+/* ── cinema: fullscreen live view with commentary ─────────
+   The timeline answers "what happened". This answers "what is it doing right
+   now", at a glance, without covering the screen it is talking about. */
+
+const MARKER_HOLD_MS = 620;
+const CINEMA_MAX_LINES = 7;
+const cinema = { on: false, lines: [], seq: 0 };
+
+/** `describe` keeps its own private copy of this; the overlay needs one too. */
+const say = (value) => String(value || "").trim();
+
+function cinemaMute(muted) {
+  $("#viewer").classList.toggle("cinema-muted", muted);
+}
+
+function cinemaSet(on) {
+  cinema.on = on;
+  $("#cinema").hidden = !on;
+  if (!on) {
+    cinemaMute(false);
+    return;
+  }
+  // Opening mid-run must not show an empty rail — replay the recent tail so
+  // the overlay starts already caught up.
+  const run = state.liveRun;
+  cinema.lines = [];
+  $("#cinemaTask").textContent = run && run.status === "open" ? run.task || "" : "";
+  $("#cinemaStep").textContent = run && run.steps ? `step ${run.steps}` : "";
+  cinemaStatus(state.running ? "working" : "idle");
+  for (const event of (run?.events || []).slice(-30)) {
+    if (String(event.type) === "run_start") continue;  // would wipe what we just seeded
+    cinemaEvent(String(event.type || "").toLowerCase(), event.payload || {});
+  }
+  cinemaRender();
+}
+
+function cinemaStatus(kind, label) {
+  if (!cinema.on) return;
+  const node = $("#cinemaState");
+  const words = { idle: "Idle", thinking: "Thinking", working: "Working",
+                  waiting: "Needs you", done: "Finished", failed: "Stopped" };
+  node.textContent = label || words[kind] || kind;
+  node.className = `cinema-state ${kind === "thinking" ? "thinking" : ""} ${kind === "idle" ? "idle" : ""}`.trim();
+}
+
+function cinemaPush(tone, label, body) {
+  const text_ = String(body || "").trim();
+  if (!text_) return;
+  cinema.lines.push({ id: ++cinema.seq, tone, label, body: text_.slice(0, 260) });
+  if (cinema.lines.length > CINEMA_MAX_LINES) cinema.lines.shift();
+  cinemaRender();
+}
+
+function cinemaRender() {
+  if (!cinema.on) return;
+  const feed = $("#cinemaFeed");
+  feed.replaceChildren();
+  const total = cinema.lines.length;
+  cinema.lines.forEach((line, index) => {
+    // Older lines dim as they rise, so the newest always reads first.
+    const fromEnd = total - 1 - index;
+    const age = fromEnd === 0 ? "" : fromEnd <= 1 ? "age1" : fromEnd <= 3 ? "age2" : "age3";
+    const row = document.createElement("div");
+    row.className = `cinema-line ${line.tone} ${age}`.trim();
+    const tag = document.createElement("b");
+    tag.textContent = line.label;
+    row.append(tag, document.createTextNode(line.body));
+    feed.appendChild(row);
+  });
+}
+
+/** Fold one run event into the overlay. Mirrors the timeline, kept terse. */
+function cinemaEvent(type, payload) {
+  if (!cinema.on) return;
+  if (type === "run_start" || type === "command") {
+    cinema.lines = [];
+    $("#cinemaTask").textContent = say(payload.task) || $("#cinemaTask").textContent;
+    cinemaStatus("thinking");
+    cinemaRender();
+    return;
+  }
+  if (type === "step_begin") {
+    $("#cinemaStep").textContent = payload.n ? `step ${payload.n}` : "";
+    cinemaStatus("thinking");
+    return;
+  }
+  if (type === "planning_begin") return cinemaStatus("thinking", "Planning");
+  if (type === "plan") return cinemaPush("think", "Plan", say(payload.plan));
+  if (type === "thought") {
+    const spoken = say(payload.say);
+    const thought = say(payload.thought) || say(payload.message);
+    cinemaStatus("working");
+    return cinemaPush(spoken ? "" : "think", spoken ? "OPERATOR" : "Thinking", spoken || thought);
+  }
+  if (type === "click_fx") {
+    const button = say(payload.button) || "left";
+    return cinemaPush("", `${button} click`,
+      `${Math.round(Number(payload.x))}, ${Math.round(Number(payload.y))}`);
+  }
+  if (type === "action_done") {
+    const result = payload.result || payload;
+    const action = result.action || {};
+    const name = say(action.type || payload.action) || "action";
+    if (result.ok !== false && /^click|^double_click|^right_click/.test(name)) return;
+    return cinemaPush(result.ok === false ? "err" : "", name.replace(/_/g, " "),
+      say(result.detail) || say(result.output).slice(0, 200));
+  }
+  if (type === "verify_begin") return cinemaStatus("thinking", "Checking");
+  if (type === "verified") {
+    return cinemaPush(String(payload.verdict) === "pass" ? "ok" : "err",
+      String(payload.verdict) === "pass" ? "Checked" : "Not done yet",
+      say(payload.reason));
+  }
+  if (type === "ask") {
+    cinemaStatus("waiting");
+    return cinemaPush("err", "Needs you", say(payload.message));
+  }
+  if (type === "done") {
+    cinemaStatus(payload.ok ? "done" : "failed");
+    $("#cinemaStep").textContent = payload.steps ? `${payload.steps} steps` : "";
+    return cinemaPush(payload.ok ? "ok" : "err", payload.ok ? "Finished" : "Ended",
+      say(payload.message));
+  }
+  if (type === "error") return cinemaPush("err", "Error", say(payload.message || payload.detail));
 }
 
 async function refreshFrame() {
@@ -1037,6 +1177,7 @@ function addEvent(event, pending = false) {
   // Replaying history must not move the live screen or buzz the phone.
   if (!state.replaying) {
     if (event.type === "click_fx") markClick(event.payload || {});
+    cinemaEvent(String(event.type || "").toLowerCase(), event.payload || {});
     if (event.type === "step_begin") $("#runMeta").textContent = `${labelOf(MODELS, state.model)} · step ${(event.payload || {}).n || ""}`;
     if (event.type === "ask") buzz([16, 60, 16]);
     if (event.type === "done") buzz([12, 40, 12]);
@@ -1648,6 +1789,22 @@ function toggleImmersive(on) {
   const view = $("#viewer");
   view.classList.toggle("immersive", on);
   $("#expandBtn").replaceChildren(icon(on ? "shrink" : "expand"));
+  cinemaSet(on);
+  // Real fullscreen where the browser allows it — iOS Safari does not, so the
+  // fixed-inset layout above is what actually carries the view there.
+  try {
+    if (on && !document.fullscreenElement && view.requestFullscreen) {
+      view.requestFullscreen({ navigationUI: "hide" }).catch(() => {});
+    } else if (!on && document.fullscreenElement && document.exitFullscreen) {
+      document.exitFullscreen().catch(() => {});
+    }
+  } catch { /* fullscreen is a nicety, never a requirement */ }
+  // Orientation lock only resolves on Android/desktop; iOS rejects it and the
+  // rotate hint in the overlay covers that case.
+  try {
+    if (on) screen.orientation?.lock?.("landscape").catch(() => {});
+    else screen.orientation?.unlock?.();
+  } catch { /* not supported */ }
   setTimeout(fitViewer, 60);
   if (on) openOverlay(() => toggleImmersive(false));
   else if (overlayCloser) dismissOverlay();
@@ -1894,6 +2051,11 @@ $("#plannerToggle").addEventListener("change", (event) => {
   prefs.set("aios_planner_model", state.plannerModel);
   prefs.set("aios_planner_last_model", state.lastPlannerModel);
   renderRunSettings();
+});
+
+$("#shellToggle").addEventListener("change", (event) => {
+  state.shell = event.target.checked;
+  prefs.set("aios_shell", state.shell ? "1" : "");
 });
 
 $("#runSettingsBtn").addEventListener("click", openRunSettings);
@@ -2181,7 +2343,8 @@ $("#promptForm").addEventListener("submit", async (event) => {
       model: state.model,
       planner_model: state.plannerModel,
       max_steps: state.steps,
-      reasoning_effort: state.effort
+      reasoning_effort: state.effort,
+      shell: state.shell
     });
     $("#promptInput").value = "";
     clearClarifier();
@@ -2232,6 +2395,7 @@ if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catc
 
 updateRunSettingsLabels();
 $("#stepsInput").value = state.steps;
+$("#shellToggle").checked = state.shell;
 $("#wakeToggle").checked = state.keepAwake;
 $("#hapticToggle").checked = state.haptics;
 applyFilter();
