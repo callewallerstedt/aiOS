@@ -280,11 +280,25 @@ async function api(path, options = {}) {
   const headers = new Headers(options.headers || {});
   if (state.token) headers.set("Authorization", `Bearer ${state.token}`);
   if (options.body && !(options.body instanceof Blob)) headers.set("Content-Type", "application/json");
-  const response = await fetch(apiUrl(path), { ...options, headers });
-  const data = response.headers.get("content-type")?.includes("application/json") ? await response.json() : null;
-  if (response.status === 401 && state.token && !path.includes("/account/")) clearSession();
-  if (!response.ok) throw new Error(data?.error || `Request failed (${response.status})`);
-  return data;
+  const { timeoutMs = 15_000, ...fetchOptions } = options;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(apiUrl(path), {
+      ...fetchOptions,
+      headers,
+      signal: fetchOptions.signal || controller.signal
+    });
+    const data = response.headers.get("content-type")?.includes("application/json") ? await response.json() : null;
+    if (response.status === 401 && state.token && !path.includes("/account/")) clearSession();
+    if (!response.ok) throw new Error(data?.error || `Request failed (${response.status})`);
+    return data;
+  } catch (error) {
+    if (error?.name === "AbortError") throw new Error("Request timed out.");
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function showAuth() {
@@ -1181,7 +1195,42 @@ function describe(event) {
   return { kind: "entry", tone: "muted", glyph: "bolt", title: body.slice(0, 120) };
 }
 
-function addEvent(event, pending = false) {
+function clearThinkingPlaceholder() {
+  $("#timeline")?.querySelectorAll(".entry.optimistic-think").forEach((node) => node.remove());
+}
+
+/** Instant feedback after you hit send — full-colour bubble + Thinking, no "sending". */
+function showThinkingSoon() {
+  clearThinkingPlaceholder();
+  const feed = $("#timeline");
+  if (!feed) return;
+  feed.querySelector(".timeline-empty")?.remove();
+  const entry = document.createElement("article");
+  entry.className = "entry think muted optimistic-think";
+  const badge = document.createElement("div");
+  badge.className = "entry-icon";
+  badge.appendChild(icon("spark"));
+  const body = document.createElement("div");
+  body.className = "entry-body";
+  const head = document.createElement("div");
+  head.className = "entry-title";
+  const title = document.createElement("strong");
+  title.textContent = "Thinking";
+  const time = document.createElement("time");
+  time.textContent = clockTime(Date.now());
+  head.append(title, time);
+  body.appendChild(head);
+  entry.append(badge, body);
+  feed.appendChild(entry);
+  state.stickBottom = true;
+  scrollFeed();
+  $("#runTitle").textContent = "OPERATOR is thinking";
+  $("#runMeta").textContent = `${labelOf(MODELS, state.model)} · thinking`;
+  $("#runDot").classList.add("on");
+  if (cinema.on) cinemaStatus("thinking");
+}
+
+function addEvent(event) {
   // Replaying history must not move the live screen or buzz the phone.
   if (!state.replaying) {
     if (event.type === "click_fx") markClick(event.payload || {});
@@ -1198,6 +1247,9 @@ function addEvent(event, pending = false) {
   const wasBottom = nearBottom();
   const stamp = Number(event.created_at || Date.now());
 
+  // Real agent activity replaces the optimistic Thinking row.
+  if (!state.replaying && info.kind !== "user") clearThinkingPlaceholder();
+
   if (info.kind === "step") {
     if (state.lastStep === info.step) return;
     state.lastStep = info.step;
@@ -1207,23 +1259,23 @@ function addEvent(event, pending = false) {
     feed.appendChild(rule);
   } else if (info.kind === "user") {
     if (!info.body) return;
-    // The optimistic bubble becomes the real one once the agent echoes it back.
-    if (!pending) {
-      const waiting = [...feed.querySelectorAll(".msg.pending")]
-        .find((node) => node.querySelector(".msg-bubble").textContent === info.body);
-      if (waiting) {
-        waiting.classList.remove("pending");
-        waiting.querySelector("time").textContent = clockTime(stamp);
-        return;
-      }
+    // Already painted optimistically when you hit send — keep it full colour
+    // and just refresh the clock when the PC echoes the same text.
+    const existing = [...feed.querySelectorAll(".msg")]
+      .find((node) => node.querySelector(".msg-bubble")?.textContent === info.body);
+    if (existing) {
+      existing.classList.remove("pending");
+      const clock = existing.querySelector("time");
+      if (clock) clock.textContent = clockTime(stamp);
+      return;
     }
     const row = document.createElement("div");
-    row.className = `msg${pending ? " pending" : ""}`;
+    row.className = "msg";
     const bubble = document.createElement("div");
     bubble.className = "msg-bubble";
     bubble.textContent = info.body;
     const time = document.createElement("time");
-    time.textContent = pending ? "sending" : clockTime(stamp);
+    time.textContent = clockTime(stamp);
     row.append(bubble, time);
     row.addEventListener("click", () => {
       $("#promptInput").value = info.body;
@@ -1294,7 +1346,7 @@ function addEvent(event, pending = false) {
   }
 
   while (feed.children.length > 250) feed.firstElementChild.remove();
-  state.stickBottom = wasBottom || pending;
+  state.stickBottom = wasBottom || info.kind === "user";
   scrollFeed();
 }
 
@@ -1365,7 +1417,9 @@ function openRun(task, stamp) {
 /** Remember what you typed, even if the PC never manages to start the run. */
 function notePrompt(text) {
   const stamp = Date.now();
-  const run = state.liveRun && state.liveRun.status === "open" && stamp - state.liveRun.startedAt < 60_000
+  // Stay on the open live run for follow-ups — the old 60s window closed the
+  // real run mid-task and the phone stopped showing what OPERATOR was doing.
+  const run = state.liveRun && state.liveRun.status === "open"
     ? state.liveRun
     : openRun(text, stamp);
   if (!run.task) run.task = String(text || "").slice(0, 400);
@@ -2369,7 +2423,10 @@ $("#promptForm").addEventListener("submit", async (event) => {
   $("#sendBtn").disabled = true;
   buzz(12);
   notePrompt(prompt);
-  addEvent({ type: "prompt", payload: { message: prompt } }, true);
+  // Full colour immediately — never a grey "sending" bubble. Thinking shows
+  // right away so the feed feels live before the first PC event arrives.
+  addEvent({ type: "prompt", payload: { message: prompt } });
+  showThinkingSoon();
   try {
     await sendCommand(type, {
       prompt,
@@ -2384,6 +2441,7 @@ $("#promptForm").addEventListener("submit", async (event) => {
     autoGrow();
     if (!machine?.online) toast("Queued until that computer reconnects");
   } catch (error) {
+    clearThinkingPlaceholder();
     toast(error.message);
   } finally {
     state.busy = false;

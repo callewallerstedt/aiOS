@@ -277,6 +277,7 @@ class Bridge:
         self.token = str(relay.get("machine_token") or "")
         self.headers = {"X-aiOS-Machine-Token": self.token}
         self.log_cursor = self.load_cursor()
+        self._events_next_cursor = None
         self.last_status_at = 0.0
         self.last_monitors_at = 0.0
         self.monitors = []
@@ -533,11 +534,15 @@ class Bridge:
         self.last_monitors_at = time.monotonic()
 
     def collect_events(self) -> list[dict]:
+        """Read new local operator events without advancing the durable cursor.
+
+        The cursor only moves after a successful post to the relay. Advancing
+        first is how the phone went quiet while OPERATOR kept working: a blip
+        uploading events permanently skipped that slice of the log.
+        """
         data = self.local_json(f"/api/phone/operator/log?since={self.log_cursor}", timeout=4)
-        if data.get("reset"):
-            self.log_cursor = 0
-        self.log_cursor = int(data.get("size") or self.log_cursor)
-        self.save_cursor()
+        cursor = 0 if data.get("reset") else int(self.log_cursor)
+        next_cursor = int(data.get("size") or cursor)
         output = []
         uploads = 0
         for item in data.get("events") or []:
@@ -563,7 +568,16 @@ class Bridge:
                 "payload": item,
                 "created_at": int(created * 1000) if created < 10_000_000_000 else int(created),
             })
+        self._events_next_cursor = next_cursor
         return output
+
+    def commit_event_cursor(self) -> None:
+        next_cursor = getattr(self, "_events_next_cursor", None)
+        if next_cursor is None:
+            return
+        self.log_cursor = int(next_cursor)
+        self._events_next_cursor = None
+        self.save_cursor()
 
     def post_events(self, *, events=None, status=None, command_id=None, result=None) -> None:
         payload = {"events": events or []}
@@ -574,45 +588,73 @@ class Bridge:
             payload["result"] = result or {}
         self.remote_json("/api/agent/events", method="POST", payload=payload, timeout=10)
 
+    def flush_events(self, *, force_status: bool = False) -> None:
+        """Push OPERATOR activity to the phone, only advancing after success."""
+        events = self.collect_events()
+        status = None
+        if force_status or time.monotonic() - self.last_status_at >= 2.5:
+            status = self.collect_status()
+            self.last_status_at = time.monotonic()
+        if not events and status is None:
+            return
+        self.post_events(events=events, status=status)
+        if events:
+            self.commit_event_cursor()
+
+    def _complete_command(self, command: dict, *, is_clarify: bool, is_silent: bool = False) -> None:
+        try:
+            result = self.execute(command)
+            self.post_events(
+                events=[] if is_silent else [{
+                    "type": "clarification" if is_clarify else "command",
+                    "payload": result if is_clarify else {"title": "Command received", "message": command.get("type")},
+                    "created_at": int(time.time() * 1000),
+                }],
+                command_id=command.get("id"), result=result,
+            )
+        except Exception as exc:
+            self.post_events(
+                events=[{
+                    "type": "clarification" if is_clarify else "error",
+                    "payload": ({
+                        "ok": False,
+                        "request_id": str((command.get("payload") or {}).get("request_id") or ""),
+                        "error": str(exc),
+                    } if is_clarify else {"title": "Command failed", "message": str(exc)}),
+                    "created_at": int(time.time() * 1000),
+                }],
+                command_id=command.get("id"), result={"ok": False, "error": str(exc)},
+            )
+
+    def _run_command_async(self, command: dict, *, is_clarify: bool) -> None:
+        """Clarify calls a model and must never stall the event pump."""
+        threading.Thread(
+            target=self._complete_command,
+            kwargs={"command": command, "is_clarify": is_clarify},
+            daemon=True,
+            name="aios-relay-cmd",
+        ).start()
+
     def tick(self) -> None:
         self.reload_pairing()
         self.refresh_monitors()
+        # Activity first: a slow command used to run before collect_events, so
+        # typing a follow-up (clarify) could freeze the phone feed while the
+        # agent kept clicking.
+        self.flush_events()
         response = self.remote_json("/api/agent/commands", timeout=15)
         for command in response.get("commands") or []:
             raw_payload = command.get("payload") if isinstance(command.get("payload"), dict) else {}
             command_type = str(raw_payload.get("_aios_command") or command.get("type") or "")
             is_clarify = command_type == "clarify"
             is_silent = command_type == "stream"
-            try:
-                result = self.execute(command)
-                self.post_events(
-                    events=[] if is_silent else [{
-                        "type": "clarification" if is_clarify else "command",
-                        "payload": result if is_clarify else {"title": "Command received", "message": command.get("type")},
-                        "created_at": int(time.time() * 1000),
-                    }],
-                    command_id=command.get("id"), result=result,
-                )
-            except Exception as exc:
-                self.post_events(
-                    events=[{
-                        "type": "clarification" if is_clarify else "error",
-                        "payload": ({
-                            "ok": False,
-                            "request_id": str((command.get("payload") or {}).get("request_id") or ""),
-                            "error": str(exc),
-                        } if is_clarify else {"title": "Command failed", "message": str(exc)}),
-                        "created_at": int(time.time() * 1000),
-                    }],
-                    command_id=command.get("id"), result={"ok": False, "error": str(exc)},
-                )
-        events = self.collect_events()
-        status = None
-        if time.monotonic() - self.last_status_at >= 2.5:
-            status = self.collect_status()
-            self.last_status_at = time.monotonic()
-        if events or status is not None:
-            self.post_events(events=events, status=status)
+            if is_clarify:
+                self._run_command_async(command, is_clarify=True)
+                continue
+            self._complete_command(command, is_clarify=False, is_silent=is_silent)
+            self.flush_events()
+        self.flush_events(force_status=False)
+
     def run(self) -> None:
         if not self.ready():
             raise RuntimeError("This PC is not paired. Open aiOS Settings → Mobile remote first.")

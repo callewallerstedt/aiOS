@@ -451,7 +451,21 @@ h3 { font-size: 17px; letter-spacing: -.02em; font-weight: 700; margin: 0 0 16px
 }
 .msg { justify-content: flex-end; }
 .msg time { align-self: flex-end; margin: 0 0 2px 8px; order: -1; color: var(--text-3); font-size: 10px; }
-.msg.pending .msg-bubble { opacity: .55; }
+/* Kept for old cached clients that still paint .pending — never dim new sends. */
+.msg.pending .msg-bubble { opacity: 1; }
+
+.entry.optimistic-think .entry-title strong {
+  background: linear-gradient(90deg, var(--text-3), var(--text), var(--text-3));
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: thinkShimmer 1.4s ease-in-out infinite;
+}
+@keyframes thinkShimmer {
+  0% { background-position: 100% 0; }
+  100% { background-position: -100% 0; }
+}
 
 /* operator entry */
 .entry { display: grid; grid-template-columns: 26px minmax(0, 1fr); gap: 10px; padding: 7px 0; animation: fade .2s ease; }
