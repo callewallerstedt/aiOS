@@ -231,13 +231,22 @@ def _sanitize_messages_for_disk(messages: list, step_dir: str) -> list:
 # Skipped: "move", "scroll", "wait", "mouse_down"/"mouse_up" (covered by drag/path).
 KEY_ACTION_TYPES = {
     "click", "right_click", "double_click", "drag", "path",
-    "type", "hotkey", "key_combo", "key", "shell",
+    "type", "hotkey", "key_combo", "key",
     "key_hold", "tap_hold",  # press+release pairs are worth a screenshot
     # Note: key_down / key_up / mouse_rel are intentionally omitted — they're
     # typically part of a held-input chain where snapshotting between them
     # would freeze the action and the screen barely changes per call.
 }
 MID_TRAIL_MAX = 3  # how many mid-step screenshots to carry into the next round
+# Actions that change what is on screen — next step should see a fresh capture.
+UI_ACTION_TYPES = frozenset({
+    "move", "click", "right_click", "double_click", "drag", "path",
+    "mouse_down", "mouse_up", "type", "hotkey", "key_combo", "key",
+    "scroll", "key_down", "key_up", "key_hold", "tap_hold", "mouse_rel",
+})
+# Text-only steps (shell stdout, write_file) do not need a fresh screenshot
+# unless the model explicitly asks for one.
+TEXT_ACTION_TYPES = frozenset({"shell", "write_file", "wait"})
 
 
 @dataclass
@@ -279,6 +288,8 @@ class AgentLoop:
         self._follow_ups: list[str] = []
         self._follow_ups_lock = threading.Lock()
         self._awaiting_answer = False
+        self._awaiting_more_steps = False
+        self._step_grant = 0
         # Stall detection: bumped on every emitted event. Waiting on the user's
         # ASK answer is not a stall, so it is excluded explicitly.
         self._last_event_at = time.monotonic()
@@ -314,24 +325,39 @@ class AgentLoop:
         return not self._pause.is_set()
 
     def is_awaiting_answer(self) -> bool:
-        return self._awaiting_answer
+        return self._awaiting_answer or self._awaiting_more_steps
 
-    def add_follow_up(self, text: str, images: list | None = None) -> bool:
+    def grant_steps(self, extra: int) -> None:
+        """Queue another step budget when the run is waiting at the step cap."""
+        try:
+            amount = int(extra)
+        except (TypeError, ValueError):
+            return
+        if amount < 1:
+            return
+        self._step_grant = max(self._step_grant, min(200, amount))
+
+    def add_follow_up(self, text: str, images: list | None = None,
+                      extra_steps: int | None = None) -> bool:
         text = (text or "").strip()
         images = images or []
         if not self.is_running():
             return False
-        if not text and not images:
+        if not text and not images and extra_steps is None and not self._awaiting_more_steps:
             return False
         # Queue and un-pause under one lock. Doing the check afterwards left a
         # window where an answer arriving just before the loop armed the wait
         # was queued but never woke it, and the run hung with the reply already
         # in hand.
         with self._follow_ups_lock:
-            self._follow_ups.append({"text": text, "images": list(images)})
-            answering_ask = self._awaiting_answer
+            if text or images:
+                self._follow_ups.append({"text": text, "images": list(images)})
+            answering_ask = self._awaiting_answer or self._awaiting_more_steps
+            if extra_steps is not None:
+                self.grant_steps(extra_steps)
             if answering_ask:
                 self._awaiting_answer = False
+                self._awaiting_more_steps = False
                 self._pause.set()
         self.on_event({"type": "follow_up_received", "text": text,
                        "answering_ask": answering_ask,
@@ -369,6 +395,8 @@ class AgentLoop:
         # finished" and every one of its events would be swallowed.
         self._done_emitted = False
         self._awaiting_answer = False
+        self._awaiting_more_steps = False
+        self._step_grant = max(1, int(max_steps or 25))
         self._last_event_at = time.monotonic()
         self._generation += 1
         with self._follow_ups_lock:
@@ -700,49 +728,98 @@ class AgentLoop:
             # with or without a planner.
             pinned_msgs.append({"role": "user", "content": checklist_block(task, plan_data)})
 
-            for n in range(1, max_steps + 1):
+            step_budget = max(1, int(max_steps))
+            need_screen = True  # first step always sees the desktop
+            n = 0
+            while True:
                 if _superseded():
                     return  # abandoned run waking up — never touch the desktop again
                 if self._stop.is_set():
-                    self.on_event({"type": "done", "ok": False, "message": "stopped by user", "steps": n - 1})
+                    self.on_event({"type": "done", "ok": False, "message": "stopped by user", "steps": n})
                     return
+                if n >= step_budget:
+                    # Cap hit — pause like ASK so the phone can Continue with more
+                    # steps instead of killing a run that was still making progress.
+                    if not self._awaiting_more_steps:
+                        self._step_grant = 0
+                        self._pause.clear()
+                        with self._follow_ups_lock:
+                            if self._follow_ups:
+                                self._pause.set()
+                            else:
+                                self._awaiting_more_steps = True
+                        self.on_event({
+                            "type": "max_steps",
+                            "steps": step_budget,
+                            "message": (
+                                f"Used all {step_budget} steps without finishing. "
+                                "Continue with another batch?"
+                            ),
+                        })
+                    self._wait_unpaused()
+                    self._awaiting_more_steps = False
+                    if self._stop.is_set():
+                        self.on_event({"type": "done", "ok": False, "message": "stopped by user",
+                                       "steps": n})
+                        return
+                    extra = self._step_grant or max(1, int(max_steps))
+                    self._step_grant = 0
+                    step_budget = n + extra
+                    self.on_event({"type": "log", "msg": (
+                        f"continuing — step budget raised to {step_budget}")})
+                    need_screen = True
+                    continue
+
+                n += 1
                 self._wait_unpaused()
 
                 rec = StepRecord(n=n)
                 self.on_event({"type": "step_begin", "n": n})
 
-                # 1) Screenshot
-                t0 = time.time()
-                img = capture(monitor)
-                rec.screenshot_ms = int((time.time() - t0) * 1000)
-                if self._stop.is_set():
-                    self.on_event({"type": "done", "ok": False, "message": "stopped by user", "steps": n - 1})
-                    return
-                W, H = img.size
-                self.on_event({"type": "screenshot", "n": n, "image": img, "size": [W, H]})
-                # Did the last step's actions actually move anything?
-                screen = watch.note_screen(frame_fingerprint(img), acted=bool(rec_actions_last))
-                # Debug: save primary screenshot for this step.
+                # 1) Screenshot — only when this step needs eyes on the desktop.
+                # Shell / write_file rounds usually do not; the model asks with
+                # need_screen:true when it must look again.
+                img = None
+                W = max(1, int(getattr(monitor, "width", 0) or 0))
+                H = max(1, int(getattr(monitor, "height", 0) or 0))
+                image_scale = 1.0
+                sent_w, sent_h = W, H
+                screen = {"moved": True, "same_streak": 0}
                 sd = _step_dir(n)
-                if sd:
-                    try: img.save(os.path.join(sd, "primary.png"))
-                    except Exception: pass
-                    # And persist whatever's in the mid-trail before it gets consumed.
-                    for mi, (mimg, label) in enumerate(mid_trail):
-                        try:
-                            mimg.save(os.path.join(sd, f"trail_in_{mi:02d}.png"))
+                if need_screen:
+                    t0 = time.time()
+                    img = capture(monitor)
+                    rec.screenshot_ms = int((time.time() - t0) * 1000)
+                    if self._stop.is_set():
+                        self.on_event({"type": "done", "ok": False, "message": "stopped by user", "steps": n - 1})
+                        return
+                    W, H = img.size
+                    self.on_event({"type": "screenshot", "n": n, "image": img, "size": [W, H]})
+                    screen = watch.note_screen(frame_fingerprint(img), acted=bool(rec_actions_last))
+                    if sd:
+                        try: img.save(os.path.join(sd, "primary.png"))
                         except Exception: pass
-                    if mid_trail:
-                        try:
-                            with open(os.path.join(sd, "trail_labels.json"),
-                                      "w", encoding="utf-8") as f:
-                                json.dump([lbl for _, lbl in mid_trail], f, indent=2)
-                        except Exception: pass
+                        for mi, (mimg, label) in enumerate(mid_trail):
+                            try:
+                                mimg.save(os.path.join(sd, f"trail_in_{mi:02d}.png"))
+                            except Exception: pass
+                        if mid_trail:
+                            try:
+                                with open(os.path.join(sd, "trail_labels.json"),
+                                          "w", encoding="utf-8") as f:
+                                    json.dump([lbl for _, lbl in mid_trail], f, indent=2)
+                            except Exception: pass
+                    data_url, image_scale = vlm.encode_image(img)
+                    sent_w = max(1, int(W * image_scale))
+                    sent_h = max(1, int(H * image_scale))
+                else:
+                    if sd and mid_trail:
+                        for mi, (mimg, label) in enumerate(mid_trail):
+                            try:
+                                mimg.save(os.path.join(sd, f"trail_in_{mi:02d}.png"))
+                            except Exception: pass
 
                 # 2) Build user message for this step
-                data_url, image_scale = vlm.encode_image(img)
-                sent_w = max(1, int(W * image_scale))
-                sent_h = max(1, int(H * image_scale))
                 user_content: list[dict] = []
                 # 2.-1) User follow-ups injected since last step (or as ASK answers).
                 pending_followups = self._drain_follow_ups()
@@ -803,31 +880,43 @@ class AgentLoop:
                         user_content.append(vlm.text_part(label))
                         user_content.append(vlm.image_part(trail_url, detail="low"))
                     user_content.append(vlm.text_part("--- end trail ---"))
-                # 2b) Current high-detail screenshot.
-                remaining = max_steps - n
+                # 2b) Current high-detail screenshot — only when this step needs it.
+                remaining = step_budget - n
                 budget = ("This is the LAST step — finish or report honestly."
                           if remaining == 0 else
                           f"{remaining} step(s) left after this one."
                           + (" Running short: go straight for the goal."
                              if remaining <= 3 else ""))
-                # The model cannot tell that its last actions did nothing — the
-                # screenshot simply looks the same. Say it outright.
                 movement = ""
-                if rec_actions_last and not screen["moved"]:
+                if img is not None and rec_actions_last and not screen["moved"]:
                     movement = ("The screen did NOT change after your last actions — they had no "
                                "effect. Do not repeat them; try a different route.\n")
-                user_content.append(vlm.text_part(
-                    f"STEP {n}/{max_steps}\nTASK: {task}\n"
-                    f"CONTEXT: {_now_block()}\n"
-                    f"The screenshot image shown to you is {sent_w}x{sent_h} px "
-                    f"(top-left = 0,0). Output coordinates in the SHOWN IMAGE'S "
-                    f"{sent_w}x{sent_h} pixel space.\n"
-                    + movement
-                    + (f"Previous step status: {last_status}\n" if last_status else "")
-                    + f"{budget}\n"
-                    + "Now think and reply with JSON."
-                ))
-                user_content.append(vlm.image_part(data_url))
+                if img is not None:
+                    user_content.append(vlm.text_part(
+                        f"STEP {n}/{step_budget}\nTASK: {task}\n"
+                        f"CONTEXT: {_now_block()}\n"
+                        f"The screenshot image shown to you is {sent_w}x{sent_h} px "
+                        f"(top-left = 0,0). Output coordinates in the SHOWN IMAGE'S "
+                        f"{sent_w}x{sent_h} pixel space.\n"
+                        + movement
+                        + (f"Previous step status: {last_status}\n" if last_status else "")
+                        + f"{budget}\n"
+                        + "Set need_screen:true in your JSON when the NEXT step must see "
+                          "the desktop; false after shell/write_file when text output is enough.\n"
+                        + "Now think and reply with JSON."
+                    ))
+                    user_content.append(vlm.image_part(data_url))
+                else:
+                    user_content.append(vlm.text_part(
+                        f"STEP {n}/{step_budget}\nTASK: {task}\n"
+                        f"CONTEXT: {_now_block()}\n"
+                        "No new screenshot this step — use shell/file output and history. "
+                        "Set need_screen:true when you need to see the desktop again "
+                        "(clicks, UI checks, verifying on-screen results).\n"
+                        + (f"Previous step status: {last_status}\n" if last_status else "")
+                        + f"{budget}\n"
+                        + "Now think and reply with JSON."
+                    ))
                 msgs = list(pinned_msgs) + list(history_msgs) + [{"role": "user", "content": user_content}]
                 # Trail is consumed; reset before this step's actions repopulate it.
                 mid_trail = []
@@ -882,8 +971,27 @@ class AgentLoop:
                 rec.say     = str(parsed.get("say", "")).strip()[:300]
                 rec.status  = str(parsed.get("status", "continue")).lower()
                 rec.actions = _scale_model_actions(
-                    parsed.get("actions", []) or [], image_scale, W, H
+                    parsed.get("actions", []) or [], image_scale if img is not None else 1.0, W, H
                 )
+                # Decide whether the NEXT step gets a screenshot. Prefer the
+                # model's need_screen flag; otherwise skip after text-only
+                # rounds (shell / write_file) and capture after UI actions.
+                explicit_screen = parsed.get("need_screen", parsed.get("screenshot"))
+                action_types = {
+                    str((action or {}).get("type") or "").lower()
+                    for action in (rec.actions or [])
+                    if isinstance(action, dict)
+                }
+                if explicit_screen is True or str(explicit_screen).strip().lower() in {"1", "true", "yes"}:
+                    need_screen = True
+                elif explicit_screen is False or str(explicit_screen).strip().lower() in {"0", "false", "no"}:
+                    need_screen = False
+                elif action_types & UI_ACTION_TYPES:
+                    need_screen = True
+                elif action_types and action_types <= TEXT_ACTION_TYPES:
+                    need_screen = False
+                else:
+                    need_screen = img is not None
 
                 if self._stop.is_set():
                     self.on_event({"type": "done", "ok": False, "message": "stopped by user", "steps": n - 1})
@@ -1083,14 +1191,6 @@ class AgentLoop:
 
                 self.on_event({"type": "step_end", "n": n, "record": _rec_dict(rec)})
 
-            # Reaching the safety budget is not a claim that the task is done.
-            # The completion checker is reserved for an explicit `status:done`
-            # finish attempt, so it never burns another model call mid-work or
-            # turns a forced stop into a successful completion.
-            self.on_event({
-                "type": "done", "ok": False, "steps": max_steps, "verified": False,
-                "message": "Ran out of steps before finishing.",
-            })
         except Exception as e:
             self.on_event({"type": "log", "msg": f"FATAL: {e}\n{traceback.format_exc()}"})
             self.on_event({"type": "done", "ok": False, "message": f"fatal: {e}", "steps": 0})

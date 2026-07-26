@@ -73,6 +73,7 @@ const state = {
   detailed: prefs.bool("aios_detailed", true),
   haptics: prefs.bool("aios_haptics", true),
   keepAwake: prefs.bool("aios_awake", false),
+  notify: prefs.bool("aios_notify", false),
   background: prefs.get("aios_background", "black"),
   providerMode: "codex",
   hasOpenAIKey: false,
@@ -1080,6 +1081,10 @@ function cinemaEvent(type, payload) {
     cinemaStatus("waiting");
     return cinemaPush("err", "Needs you", say(payload.message));
   }
+  if (type === "max_steps") {
+    cinemaStatus("waiting");
+    return cinemaPush("err", "Out of steps", say(payload.message));
+  }
   if (type === "done") {
     cinemaStatus(payload.ok ? "done" : "failed");
     $("#cinemaStep").textContent = payload.steps ? `${payload.steps} steps` : "";
@@ -1361,13 +1366,86 @@ function hideJump() {
   $("#jumpBtn").classList.add("hidden");
 }
 
+function showJump() {
+  state.stickBottom = false;
+  $("#jumpBtn").classList.remove("hidden");
+}
+
 function scrollFeed(force = false) {
   const feed = $("#timeline");
   if (force || state.stickBottom) {
     feed.scrollTop = feed.scrollHeight;
     hideJump();
   } else {
-    $("#jumpBtn").classList.remove("hidden");
+    showJump();
+  }
+}
+
+async function ensureNotifyPermission() {
+  if (!("Notification" in window)) return false;
+  if (Notification.permission === "granted") return true;
+  if (Notification.permission === "denied") return false;
+  try {
+    return (await Notification.requestPermission()) === "granted";
+  } catch {
+    return false;
+  }
+}
+
+/** Rich PWA alerts when OPERATOR needs you or finishes — only if enabled. */
+async function pushNotify(title, body, {
+  tag = "aios-remote",
+  requireInteraction = false,
+  actions = []
+} = {}) {
+  if (!state.notify || state.replaying) return;
+  if (document.visibilityState === "visible" && document.hasFocus()) return;
+  if (!("Notification" in window) || Notification.permission !== "granted") return;
+  const machine = currentMachine();
+  const machineName = machine?.name || machine?.hostname || "Your PC";
+  const task = String(state.liveRun?.prompt || state.liveRun?.task || "").trim();
+  const detail = String(body || "").trim();
+  const lines = [detail, task ? `Task: ${task.slice(0, 100)}` : "", `On ${machineName}`]
+    .filter(Boolean);
+  const options = {
+    body: lines.join("\n").slice(0, 280),
+    tag,
+    renotify: true,
+    requireInteraction,
+    icon: "icons/aios-icon-192.png",
+    badge: "icons/aios-icon-192.png",
+    data: { url: "./", tag, machineId: machine?.id || "", title },
+  };
+  if (actions.length) options.actions = actions.slice(0, 2);
+  try {
+    const ready = await navigator.serviceWorker?.ready;
+    if (ready?.showNotification) {
+      await ready.showNotification(title, options);
+      return;
+    }
+  } catch { /* fall through */ }
+  try { new Notification(title, options); } catch { /* unsupported */ }
+}
+
+async function continueRun(extraSteps = state.steps) {
+  const steps = Math.max(1, Math.min(200, Number(extraSteps) || state.steps || 30));
+  backToLive();
+  buzz(12);
+  notePrompt(`Continue (+${steps} steps)`);
+  addEvent({ type: "prompt", payload: { message: `Continue (+${steps} steps)` } });
+  showThinkingSoon();
+  try {
+    await sendCommand("followup", {
+      prompt: "Continue — keep going from where you left off.",
+      model: state.model,
+      planner_model: state.plannerModel,
+      max_steps: steps,
+      reasoning_effort: state.effort,
+      shell: state.shell
+    });
+  } catch (error) {
+    clearThinkingPlaceholder();
+    toast(error.message);
   }
 }
 
@@ -1481,6 +1559,15 @@ function describe(event) {
   if (type === "ask") {
     return { kind: "entry", tone: "ask", glyph: "warn", title: "OPERATOR needs you", body: text(payload.message) };
   }
+  if (type === "max_steps") {
+    return {
+      kind: "entry", tone: "ask continue-cta", glyph: "warn",
+      title: "Out of steps",
+      body: text(payload.message) || "Used the step budget before finishing.",
+      continueSteps: Number(payload.steps) || state.steps || 30,
+      hint: payload.steps ? `${payload.steps} steps used` : ""
+    };
+  }
   if (type === "done") {
     const ok = Boolean(payload.ok);
     const stopped = /stop/i.test(text(payload.message));
@@ -1547,8 +1634,42 @@ function addEvent(event) {
     if (event.type === "click_fx") markClick(event.payload || {});
     cinemaEvent(String(event.type || "").toLowerCase(), event.payload || {});
     if (event.type === "step_begin") $("#runMeta").textContent = `${labelOf(MODELS, state.model)} · step ${(event.payload || {}).n || ""}`;
-    if (event.type === "ask") buzz([16, 60, 16]);
-    if (event.type === "done") buzz([12, 40, 12]);
+    if (event.type === "ask") {
+      buzz([16, 60, 16]);
+      pushNotify("OPERATOR needs your input", (event.payload || {}).message || "Waiting for your answer", {
+        tag: "aios-ask",
+        requireInteraction: true,
+        actions: [
+          { action: "open", title: "Open chat" },
+          { action: "dismiss", title: "Dismiss" }
+        ]
+      });
+    }
+    if (event.type === "max_steps") {
+      buzz([16, 60, 16]);
+      pushNotify("OPERATOR needs more steps", (event.payload || {}).message || "Continue the run?", {
+        tag: "aios-max-steps",
+        requireInteraction: true,
+        actions: [
+          { action: "open", title: "Continue in chat" },
+          { action: "dismiss", title: "Dismiss" }
+        ]
+      });
+    }
+    if (event.type === "done") {
+      buzz([12, 40, 12]);
+      const payload = event.payload || {};
+      const steps = payload.steps ? `${payload.steps} steps` : "";
+      pushNotify(
+        payload.ok ? "OPERATOR finished" : "OPERATOR run ended",
+        [payload.message || (payload.ok ? "Task complete" : "The run stopped"), steps]
+          .filter(Boolean).join(" · "),
+        {
+          tag: "aios-done",
+          actions: [{ action: "open", title: "Open chat" }]
+        }
+      );
+    }
   }
 
   const info = describe(event);
@@ -1645,6 +1766,29 @@ function addEvent(event) {
       body.appendChild(extra);
     }
     if (info.shot) body.appendChild(shotCard(info));
+    if (info.continueSteps) {
+      const actions = document.createElement("div");
+      actions.className = "entry-actions";
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "continue-btn";
+      const extra = Math.max(1, Number(state.steps) || Number(info.continueSteps) || 30);
+      button.textContent = `Continue · +${extra} steps`;
+      button.addEventListener("click", async (clickEvent) => {
+        clickEvent.stopPropagation();
+        if (button.disabled) return;
+        button.disabled = true;
+        button.textContent = "Continuing…";
+        try {
+          await continueRun(extra);
+        } catch {
+          button.disabled = false;
+          button.textContent = `Continue · +${extra} steps`;
+        }
+      });
+      actions.appendChild(button);
+      body.appendChild(actions);
+    }
     entry.append(badge, body);
     if (info.click) {
       entry.addEventListener("click", () => {
@@ -2597,6 +2741,21 @@ $("#wakeToggle").addEventListener("change", (event) => {
   prefs.set("aios_awake", state.keepAwake ? 1 : 0);
   applyWakeLock();
 });
+$("#notifyToggle").addEventListener("change", async (event) => {
+  if (event.target.checked) {
+    const granted = await ensureNotifyPermission();
+    if (!granted) {
+      event.target.checked = false;
+      state.notify = false;
+      prefs.set("aios_notify", "");
+      toast("Notifications were blocked — enable them in the browser settings");
+      return;
+    }
+  }
+  state.notify = event.target.checked;
+  prefs.set("aios_notify", state.notify ? "1" : "");
+  if (state.notify) toast("Notifications on — you'll hear when OPERATOR needs you or finishes");
+});
 $("#hapticToggle").addEventListener("change", (event) => {
   state.haptics = event.target.checked;
   prefs.set("aios_haptics", state.haptics ? 1 : 0);
@@ -2643,8 +2802,14 @@ $("#screenToggle").addEventListener("click", () => {
 });
 $("#expandBtn").addEventListener("click", () => toggleImmersive(!$("#viewer").classList.contains("immersive")));
 $("#zoomResetBtn").addEventListener("click", resetZoom);
-$("#jumpBtn").addEventListener("click", () => scrollFeed(true));
-$("#timeline").addEventListener("scroll", () => { if (nearBottom()) hideJump(); });
+$("#jumpBtn").addEventListener("click", () => {
+  scrollFeed(true);
+  buzz(8);
+});
+$("#timeline").addEventListener("scroll", () => {
+  if (nearBottom()) hideJump();
+  else showJump();
+}, { passive: true });
 
 $("#stopBtn").addEventListener("click", async () => {
   buzz(20);
@@ -2804,6 +2969,7 @@ $("#stepsInput").value = state.steps;
 $("#shellToggle").checked = state.shell;
 $("#wakeToggle").checked = state.keepAwake;
 $("#hapticToggle").checked = state.haptics;
+$("#notifyToggle").checked = state.notify;
 applyFilter();
 toggleScreen(state.screenOpen);
 bindViewerGestures();

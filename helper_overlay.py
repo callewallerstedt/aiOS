@@ -6098,6 +6098,9 @@ class HelperOverlay:
                 pass
         elif kind == "ask":
             record["message"] = event.get("message", "")
+        elif kind == "max_steps":
+            record["message"] = event.get("message", "")
+            record["steps"] = event.get("steps")
         elif kind == "follow_up_received":
             record["text"] = event.get("text", "")
             record["answering_ask"] = bool(event.get("answering_ask"))
@@ -6120,7 +6123,7 @@ class HelperOverlay:
 
     def _phone_mirror_state(self, event):
         kind = event.get("type") if isinstance(event, dict) else None
-        if kind not in {"step_begin", "done", "ask", "follow_up_received", "log"}:
+        if kind not in {"step_begin", "done", "ask", "max_steps", "follow_up_received", "log"}:
             return
         loop = self.agent_operator_loop
         state = {
@@ -6130,7 +6133,7 @@ class HelperOverlay:
             "last_question": "",
             "task": self.agent_operator_current_task,
         }
-        if kind == "ask":
+        if kind in {"ask", "max_steps"}:
             state["last_question"] = event.get("message", "")
             state["asking"] = True
         if kind == "done":
@@ -6270,6 +6273,12 @@ class HelperOverlay:
                 self.agent_operator_status_var.set("Agent asks: " + event.get("message", ""))
             self._agent_operator_log_line("status", f"ASK: {event.get('message', '')}\n")
             self._agent_operator_sync_buttons()
+        elif kind == "max_steps":
+            msg = event.get("message") or "Step budget used — continue for another batch?"
+            if self.agent_operator_status_var:
+                self.agent_operator_status_var.set("Out of steps — send Continue")
+            self._agent_operator_log_line("status", f"MAX STEPS: {msg}\n")
+            self._agent_operator_sync_buttons()
         elif kind == "log":
             self._agent_operator_log_line("dim", event.get("msg", "") + "\n")
 
@@ -6299,8 +6308,12 @@ class HelperOverlay:
                 pass
         if self.agent_operator_followup_btn:
             try:
-                self.agent_operator_followup_btn.configure(
-                    text="Answer" if asking else "Send follow-up")
+                more_steps = bool(self.agent_operator_loop and getattr(
+                    self.agent_operator_loop, "_awaiting_more_steps", False))
+                label = ("Continue" if more_steps
+                         else "Answer" if asking
+                         else "Send follow-up")
+                self.agent_operator_followup_btn.configure(text=label)
             except tk.TclError:
                 pass
 
@@ -6313,7 +6326,13 @@ class HelperOverlay:
         loop = self.agent_operator_loop
         if not loop or not loop.is_running():
             return self.agent_operator_run()
-        if loop.add_follow_up(text):
+        extra_steps = None
+        if loop.is_awaiting_answer() and getattr(loop, "_awaiting_more_steps", False):
+            try:
+                extra_steps = max(1, min(200, int(float(self.agent_operator_steps_var.get()))))
+            except (TypeError, ValueError, AttributeError):
+                extra_steps = 25
+        if loop.add_follow_up(text, extra_steps=extra_steps):
             self._agent_operator_log_line("ts", f"\n[{self._ts()}] ")
             self._agent_operator_log_line("status", f"FOLLOW-UP: {text}\n")
             self._phone_mirror_write({"type": "follow_up", "ts": time.time(),
@@ -9840,6 +9859,7 @@ class HelperOverlay:
         if not text and action not in {
             "phone_start", "phone_stop", "reload_operator_settings",
             "operator_stop", "operator_clear", "operator_clear_attachments",
+            "operator_followup",
         }:
             return
         if action == "chat":
@@ -9967,6 +9987,15 @@ class HelperOverlay:
 
     def _remote_operator_followup(self, text, options=None):
         text = (text or "").strip() or "Continue"
+<<<<<<< HEAD
+=======
+        extra_steps = None
+        if isinstance(options, dict) and options.get("steps") not in (None, ""):
+            try:
+                extra_steps = max(1, min(200, int(float(options.get("steps")))))
+            except (TypeError, ValueError):
+                extra_steps = None
+>>>>>>> d03a839 (Improve phone chat UX and make OPERATOR screenshots on-demand)
         try:
             if not self._ensure_agent_operator():
                 self._phone_mirror_fail(
@@ -9978,13 +10007,20 @@ class HelperOverlay:
             return
         loop = self.agent_operator_loop
         if not loop or not loop.is_running():
+<<<<<<< HEAD
             # Nothing running → treat as a fresh task (keep options).
+=======
+            # Nothing running → treat as a fresh task.
+>>>>>>> d03a839 (Improve phone chat UX and make OPERATOR screenshots on-demand)
             self._remote_submit_operator(text, options)
             return
         try:
-            loop.add_follow_up(text)
+            loop.add_follow_up(text, extra_steps=extra_steps)
             self._agent_operator_log_line("ts", f"\n[{self._ts()}] ")
-            self._agent_operator_log_line("status", f"FOLLOW-UP: {text}\n")
+            self._agent_operator_log_line("status", (
+                f"FOLLOW-UP: {text}"
+                + (f" (+{extra_steps} steps)\n" if extra_steps else "\n")
+            ))
             self._phone_mirror_write({"type": "follow_up", "ts": time.time(),
                                        "text": text,
                                        "answering_ask": bool(loop.is_awaiting_answer())})

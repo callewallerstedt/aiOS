@@ -1,4 +1,8 @@
+<<<<<<< HEAD
 const CACHE = "aios-remote-v27";
+=======
+const CACHE = "aios-remote-v26";
+>>>>>>> d03a839 (Improve phone chat UX and make OPERATOR screenshots on-demand)
 const SHELL = [
   "./",
   "phone.css",
@@ -26,4 +30,22 @@ self.addEventListener("fetch", (event) => {
     caches.open(CACHE).then((cache) => cache.put(event.request, copy));
     return response;
   }).catch(() => caches.match(event.request).then((cached) => cached || caches.match("./"))));
+});
+
+self.addEventListener("notificationclick", (event) => {
+  const action = event.action || "open";
+  event.notification.close();
+  if (action === "dismiss") return;
+  const target = event.notification?.data?.url || "./";
+  event.waitUntil(clients.matchAll({ type: "window", includeUncontrolled: true }).then((list) => {
+    for (const client of list) {
+      if ("focus" in client) {
+        client.focus();
+        if (client.navigate) return client.navigate(target);
+        return undefined;
+      }
+    }
+    if (clients.openWindow) return clients.openWindow(target);
+    return undefined;
+  }));
 });

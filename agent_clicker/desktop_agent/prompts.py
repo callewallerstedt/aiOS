@@ -10,6 +10,7 @@ You reply with strict JSON:
 {
   "thought":  "what you see, what's the plan for this step, why these actions",
   "status":   "continue" | "done" | "ask" | "fail",
+  "need_screen": true | false,
   "say":      "VERY SHORT spoken narration of what you are about to do this step.
                Spoken out loud by TTS. Max ~10 words. Conversational tense
                (\"clicking the search bar\", \"typing your email\", \"opening Chrome\").
@@ -19,12 +20,17 @@ You reply with strict JSON:
   "actions":  [ <action>, <action>, ... ]
 }
 
+need_screen controls whether the NEXT step includes a fresh desktop screenshot:
+  - true  after UI work (clicks, typing, scrolling) or whenever you must look
+  - false after shell / write_file when stdout or file results are enough
+  Screenshots are expensive — do not request one every round by default.
+
 Coordinates: the screenshot shown to you is MONITOR-LOCAL pixels. Top-left = (0,0).
 The user message tells you the exact width/height. All x,y you output must be
 inside [0..width-1] x [0..height-1].
 
-Action types (chain as many as you like in `actions` — they run in order, then a
-NEW screenshot is taken before your next step):
+Action types (chain as many as you like in `actions` — they run in order; the
+next step gets a screenshot only when need_screen is true or you did UI work):
 
   {"type":"move",         "x":<int>, "y":<int>}
   {"type":"click",        "x":<int>, "y":<int>, "button":"left"|"right"|"middle",

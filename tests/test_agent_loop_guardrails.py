@@ -104,6 +104,15 @@ def run_loop(model, desktop, monkeypatch, tmp_path, *, max_steps=12, planner="pl
 
     events = []
     agent = AgentLoop(events.append)
+
+    def on_event(event):
+        events.append(event)
+        # Cap hit now pauses for Continue instead of ending — stop so helpers
+        # that only care about progress during the budget still finish.
+        if event.get("type") == "max_steps":
+            agent.stop()
+
+    agent.on_event = on_event
     agent.start("Do the thing", MONITOR, model="clicker", max_steps=max_steps,
                 action_delay=0.0, settle_after_step=0.0, planner_model=planner,
                 backend=backend)
@@ -158,11 +167,107 @@ def test_running_out_of_steps_does_not_invoke_the_completion_checker(monkeypatch
 
     model = Progressing([{"thought": "still working", "status": "continue",
                           "actions": [{"type": "key", "key": "pagedown"}]}])
-    events = run_loop(model, desktop, monkeypatch, tmp_path, max_steps=2, planner="")
-
+    events = []
+    agent = AgentLoop(events.append)
+    monkeypatch.setattr(agent_loop, "DEBUG_ROOT", str(tmp_path / "runs"))
+    monkeypatch.setattr(agent_loop.vlm, "chat_raw", model.chat_raw)
+    monkeypatch.setattr(agent_loop.vlm, "take_last_usage", lambda: {"requests": 1, "model": "m"})
+    monkeypatch.setattr(agent_loop, "capture", desktop.capture)
+    monkeypatch.setattr(agent_loop, "execute",
+                        lambda action, monitor, **kwargs: agent_loop.ExecResult(
+                            action=action, ok=True, detail="ok", elapsed_ms=1, output=""))
+    monkeypatch.setattr(agent_loop, "any_button_held", lambda: False)
+    monkeypatch.setattr(agent_loop, "any_key_held", lambda: False)
+    monkeypatch.setattr(agent_loop, "release_all", _noop)
+    agent.start("Do the thing", MONITOR, model="clicker", max_steps=2,
+                action_delay=0.0, settle_after_step=0.0, planner_model="")
+    # Cap hit pauses for Continue — decline by stopping instead of granting more.
+    deadline = time.time() + 5
+    while time.time() < deadline and not any(e["type"] == "max_steps" for e in events):
+        time.sleep(0.02)
+    assert any(e["type"] == "max_steps" for e in events)
     assert not [event for event in events if event["type"] in {"verify_begin", "verified"}]
+    agent.stop()
+    agent._thread.join(timeout=10)
     assert final(events)["ok"] is False
-    assert final(events)["message"] == "Ran out of steps before finishing."
+
+
+def test_continue_after_max_steps_grants_another_batch(monkeypatch, tmp_path):
+    desktop = FakeDesktop()
+    replies = [
+        {"thought": "working", "status": "continue",
+         "actions": [{"type": "key", "key": "pagedown"}]},
+        {"thought": "working", "status": "continue",
+         "actions": [{"type": "key", "key": "pagedown"}]},
+        {"thought": "finished", "status": "done", "message": "All done."},
+    ]
+
+    class Scripted(FakeModel):
+        def chat_raw(self, system, messages, **kwargs):
+            if "planner" not in system and "actually did" not in system:
+                desktop.marks += 1
+            return super().chat_raw(system, messages, **kwargs)
+
+    model = Scripted(replies, verifier=[{"verdict": "pass", "reason": "ok"}])
+    events = []
+    agent = AgentLoop(events.append)
+    monkeypatch.setattr(agent_loop, "DEBUG_ROOT", str(tmp_path / "runs"))
+    monkeypatch.setattr(agent_loop.vlm, "chat_raw", model.chat_raw)
+    monkeypatch.setattr(agent_loop.vlm, "take_last_usage", lambda: {"requests": 1, "model": "m"})
+    monkeypatch.setattr(agent_loop, "capture", desktop.capture)
+    monkeypatch.setattr(agent_loop, "execute",
+                        lambda action, monitor, **kwargs: agent_loop.ExecResult(
+                            action=action, ok=True, detail="ok", elapsed_ms=1, output=""))
+    monkeypatch.setattr(agent_loop, "any_button_held", lambda: False)
+    monkeypatch.setattr(agent_loop, "any_key_held", lambda: False)
+    monkeypatch.setattr(agent_loop, "release_all", _noop)
+    agent.start("Do the thing", MONITOR, model="clicker", max_steps=2,
+                action_delay=0.0, settle_after_step=0.0, planner_model="")
+    deadline = time.time() + 5
+    while time.time() < deadline and not any(e["type"] == "max_steps" for e in events):
+        time.sleep(0.02)
+    assert any(e["type"] == "max_steps" for e in events)
+    assert agent.is_awaiting_answer()
+    assert agent.add_follow_up("Continue", extra_steps=5)
+    agent._thread.join(timeout=15)
+    assert final(events)["ok"] is True
+    assert max(e.get("n", 0) for e in events if e["type"] == "step_begin") >= 3
+
+
+def test_shell_steps_skip_the_next_screenshot_unless_requested(monkeypatch, tmp_path):
+    model = FakeModel([
+        {"thought": "run a command", "status": "continue", "need_screen": False,
+         "actions": [{"type": "shell", "command": "Get-Date"}]},
+        {"thought": "read the output", "status": "done", "need_screen": False,
+         "message": "done from shell"},
+    ], verifier=[{"verdict": "pass", "reason": "ok"}])
+    captures = {"n": 0}
+    desktop = FakeDesktop()
+
+    def counting_capture(monitor):
+        captures["n"] += 1
+        return desktop.capture(monitor)
+
+    events = []
+    agent = AgentLoop(events.append)
+    monkeypatch.setattr(agent_loop, "DEBUG_ROOT", str(tmp_path / "runs"))
+    monkeypatch.setattr(agent_loop.vlm, "chat_raw", model.chat_raw)
+    monkeypatch.setattr(agent_loop.vlm, "take_last_usage", lambda: {"requests": 1, "model": "m"})
+    monkeypatch.setattr(agent_loop, "capture", counting_capture)
+    monkeypatch.setattr(
+        agent_loop, "execute",
+        lambda action, monitor, **kwargs: agent_loop.ExecResult(
+            action=action, ok=True, detail="ok", elapsed_ms=1, output="Monday"))
+    monkeypatch.setattr(agent_loop, "any_button_held", lambda: False)
+    monkeypatch.setattr(agent_loop, "any_key_held", lambda: False)
+    monkeypatch.setattr(agent_loop, "release_all", _noop)
+    agent.start("What day is it", MONITOR, model="clicker", max_steps=5,
+                action_delay=0.0, settle_after_step=0.0, planner_model="",
+                shell_enabled=True)
+    agent._thread.join(timeout=30)
+    # Step 1 capture + optional completion-check capture — not a capture per step.
+    assert captures["n"] <= 2
+    assert len([e for e in events if e["type"] == "screenshot"]) == 1
 
 
 def test_saying_done_is_checked_and_can_be_rejected(monkeypatch, tmp_path):

@@ -94,12 +94,14 @@ def test_a_wedged_run_is_ended_by_the_stall_watchdog(monkeypatch, tmp_path):
 
 def test_only_one_done_reaches_the_ui(monkeypatch, tmp_path):
     """The watchdog and the loop can both decide it is over; the UI sees one end."""
+    # Leave the model call wedged long enough that the stall watchdog ends the
+    # run; releasing afterward must not produce a second `done`.
     monkeypatch.setattr(agent_loop, "STALL_ABORT_SEC", 0.4)
-    monkeypatch.setattr(agent_loop, "MODEL_CALL_TIMEOUT", 0.4)
+    monkeypatch.setattr(agent_loop, "MODEL_CALL_TIMEOUT", 30.0)
     released = threading.Event()
 
     def chat_raw(system, messages, **kwargs):
-        released.wait(5)
+        released.wait(30)
         return json.dumps({"status": "done", "message": "late"})
 
     _wire(monkeypatch, tmp_path, chat_raw)
@@ -107,11 +109,14 @@ def test_only_one_done_reaches_the_ui(monkeypatch, tmp_path):
     agent = AgentLoop(events.append)
     agent.start("Do the thing", MONITOR, model="clicker", max_steps=3,
                 action_delay=0.0, settle_after_step=0.0, planner_model="")
-    agent._thread.join(timeout=25)
+    deadline = time.time() + 20
+    while time.time() < deadline and not any(e["type"] == "done" for e in events):
+        time.sleep(0.05)
     released.set()
     time.sleep(0.4)
 
     assert len([e for e in events if e["type"] == "done"]) == 1
+    assert not agent.is_running()
 
 
 def test_an_answer_that_arrives_first_still_wakes_the_ask(monkeypatch, tmp_path):
