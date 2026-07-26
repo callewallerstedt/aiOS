@@ -1,3 +1,4 @@
+import json
 from unittest import mock
 
 import pytest
@@ -48,3 +49,20 @@ def test_previous_questions_keep_identity_when_answered():
     )
     assert limit >= 2
     assert payload["previous_questions"] == previous
+
+
+def test_codex_intent_check_uses_the_fast_nano_model():
+    assert prompt_clarifier.CODEX_MODEL == prompt_clarifier.MODEL
+    assert "nano" in prompt_clarifier.CODEX_MODEL
+
+
+def test_api_payload_caps_output_tokens():
+    with mock.patch("urllib.request.urlopen") as urlopen:
+        urlopen.return_value.__enter__.return_value.read.return_value = json.dumps({
+            "choices": [{"message": {"content": '{"questions":[]}'}}],
+        }).encode("utf-8")
+        prompt_clarifier.clarify_prompt("sk-test", "Open Notepad and type hello.")
+    payload = json.loads(urlopen.call_args[0][0].data.decode("utf-8"))
+    assert payload["model"] == prompt_clarifier.MODEL
+    assert payload["max_completion_tokens"] == prompt_clarifier.MAX_OUTPUT_TOKENS
+    assert "reasoning_effort" not in payload

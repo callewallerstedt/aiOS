@@ -12,34 +12,25 @@ from pathlib import Path
 
 
 MODEL = "gpt-5.4-nano"
-CODEX_MODEL = "gpt-5.6-luna"
+CODEX_MODEL = MODEL
 MAX_QUESTIONS = 10
-SYSTEM_PROMPT = """You are the tiny intent-check assistant inside aiOS Operator.
-Read the user's live draft before it is sent to a computer-use agent.
+CLARIFY_TIMEOUT = 8.0
+MAX_OUTPUT_TOKENS = 320
+SYSTEM_PROMPT = """You are aiOS Operator's fast intent checker. The user is drafting a task for a computer-use agent.
 
-Return JSON only with this shape:
-{"questions":[{"id":"short_stable_id","question":"One short question?","answered":false}]}
+Return JSON only:
+{"questions":[{"id":"short_id","question":"One short question?","answered":false}]}
 
 Rules:
-- Ask only about ambiguity that could materially change what the Operator does.
-- Never ask for information already present in the draft.
-- Never exceed question_limit. It is a ceiling, not a target; zero is valid for a clear draft.
-- Adapt the number of questions to the draft as it exists now. A short single action normally needs 0-2. A medium multi-part request may need 2-5. Use 6-10 only for a genuinely large or complex draft with that many independent ambiguities.
-- Do not dump a full checklist early. On an ordinary refresh, add at most 2 newly justified unanswered questions while preserving relevant previous questions. A newly pasted large multi-step draft may justify more.
-- Order questions by importance, with unanswered questions before answered history.
-- Keep each question under 90 characters and easy to answer in the main draft.
-- Use the same language as the draft.
-- Mark answered=true only when the current draft actually answers the question.
-- Evaluate every previous question first. When the draft answers it, return the exact same id and wording with answered=true. Never turn it into a confirmation question.
-- Preserve a previous question's exact id and wording while it remains relevant, including after it is answered.
-- Retire questions that are obsolete. Add a new one only when the evolving draft introduces a material ambiguity.
-- A named app, file path, destination, visual direction, constraint, or success result counts as an answer. Do not ask the user to confirm information they already wrote.
-- Useful categories include target, scope, success result, destination, and constraints.
-- Ask about approval only for an external, destructive, costly, or publishing action whose authorization is genuinely unclear. Never ask who approves ordinary local edits or saved copies.
-- Do not ask generic preference questions or request confirmation merely for confidence.
-
-Example: if a previous question asks which file and the new draft names C:\\work\\logo.psd,
-return that exact previous question with answered=true. Do not ask whether that path is correct.
+- Ask only when ambiguity would materially change what the agent does.
+- Never ask for info already in the draft.
+- question_limit is a ceiling, not a target; 0 is valid for a clear draft.
+- Short single actions: 0-2 questions. Medium drafts: 2-5. Use 6-10 only for large multi-part drafts with that many real ambiguities.
+- On refresh add at most 2 new unanswered questions; preserve previous ids/wording.
+- Mark answered=true only when the draft actually answers it.
+- Each question under 90 characters, same language as the draft.
+- Do not ask for confirmation of details already written (paths, app names, destinations).
+- Ask about approval only for external/destructive/costly actions when genuinely unclear.
 """
 
 
@@ -123,7 +114,7 @@ def _parse_result(raw: str, limit: int) -> list[dict]:
     return normalize_questions(parsed)[:limit]
 
 
-def clarify_prompt(api_key: str, draft: str, previous: list[dict] | None = None, timeout: float = 25) -> dict:
+def clarify_prompt(api_key: str, draft: str, previous: list[dict] | None = None, timeout: float = CLARIFY_TIMEOUT) -> dict:
     started = time.perf_counter()
     user_payload, limit = _request_payload(draft, previous)
     payload = {
@@ -132,8 +123,7 @@ def clarify_prompt(api_key: str, draft: str, previous: list[dict] | None = None,
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
         ],
-        "reasoning_effort": "low",
-        "max_completion_tokens": 1200,
+        "max_completion_tokens": MAX_OUTPUT_TOKENS,
         "response_format": {"type": "json_object"},
     }
     request = urllib.request.Request(
@@ -171,7 +161,7 @@ def clarify_prompt(api_key: str, draft: str, previous: list[dict] | None = None,
 def clarify_prompt_codex(
     draft: str,
     previous: list[dict] | None = None,
-    timeout: float = 25,
+    timeout: float = CLARIFY_TIMEOUT,
 ) -> dict:
     """Run the live intent check through the signed-in Codex account."""
     started = time.perf_counter()
@@ -186,7 +176,7 @@ def clarify_prompt_codex(
         [{"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)}],
         model=CODEX_MODEL,
         timeout=timeout,
-        reasoning_effort="low",
+        reasoning_effort="minimal",
     )
     return {
         "questions": _parse_result(raw, limit),
@@ -203,7 +193,7 @@ def clarify_prompt_for_provider(
     *,
     provider_mode: str = "api",
     api_key: str = "",
-    timeout: float = 25,
+    timeout: float = CLARIFY_TIMEOUT,
 ) -> dict:
     mode = str(provider_mode or "api").strip().lower()
     if mode not in {"codex", "api", "codex_api_fallback"}:

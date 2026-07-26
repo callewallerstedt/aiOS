@@ -2075,7 +2075,16 @@ function scheduleClarification() {
     clearClarifier();
     return;
   }
-  state.clarifierTimer = setTimeout(() => requestClarification(draft), 700);
+  state.clarifierTimer = setTimeout(() => requestClarification(draft), 350);
+}
+
+async function waitForClarification(requestId, timeoutMs = 10_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline && state.clarifierRequestId === requestId && state.clarifierLoading) {
+    await drainEvents(false);
+    if (state.clarifierRequestId !== requestId || !state.clarifierLoading) return;
+    await new Promise((resolve) => setTimeout(resolve, 180));
+  }
 }
 
 async function requestClarification(draft) {
@@ -2090,13 +2099,14 @@ async function requestClarification(draft) {
     if (state.clarifierRequestId !== requestId) return;
     state.clarifierLoading = false;
     renderClarifier();
-  }, 20000);
+  }, 10_000);
   try {
     await sendCommand("clarify", {
       draft,
       request_id: requestId,
       previous: state.clarifierQuestions.map(({ id, question, answered }) => ({ id, question, answered }))
     });
+    await waitForClarification(requestId);
   } catch {
     if (state.clarifierRequestId !== requestId) return;
     state.clarifierLoading = false;

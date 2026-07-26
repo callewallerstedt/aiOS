@@ -462,6 +462,7 @@ class Bridge:
                 normalize_questions(payload.get("previous") or []),
                 provider_mode=provider_mode,
                 api_key=api_key,
+                timeout=8.0,
             )
             return {"ok": True, "request_id": request_id, **result}
         if kind == "stream":
