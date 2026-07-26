@@ -453,10 +453,25 @@ function sheetApplyDrag(offset) {
   if (backdrop) backdrop.style.opacity = String(Math.max(0.12, 1 - y / 420));
 }
 
-function sheetFinishDrag() {
-  detachSheetDocListeners();
+function sheetBodyScrollable(body) {
+  return Boolean(body && body.scrollHeight > body.clientHeight + 2);
+}
+
+function sheetCancelDrag() {
   const drag = sheetUi.drag;
   if (!drag) return;
+  sheetUi.drag = null;
+  drag.sheet.classList.remove("dragging");
+  document.documentElement.classList.remove("sheet-dragging");
+}
+
+function sheetFinishDrag() {
+  const drag = sheetUi.drag;
+  if (!drag) return;
+  if (!drag.active) {
+    sheetCancelDrag();
+    return;
+  }
   const sheet = drag.sheet;
   sheetUi.drag = null;
   sheet.classList.remove("dragging");
@@ -525,7 +540,7 @@ function sheetTouchGuard(event) {
   }
   // Let the menu body scroll; block everything else (chat timeline, backdrop, etc.).
   if (event.target.closest?.(".sheet-body")) return;
-  event.preventDefault();
+  if (event.cancelable) event.preventDefault();
 }
 
 function attachSheetDocListeners() {
@@ -534,6 +549,10 @@ function attachSheetDocListeners() {
   document.addEventListener("touchmove", sheetTouchGuard, { passive: false, capture: true });
   document.addEventListener("touchend", sheetFinishDrag, { capture: true });
   document.addEventListener("touchcancel", sheetFinishDrag, { capture: true });
+}
+
+function ensureSheetDocListeners() {
+  if (sheetOpen() && sheetMobile()) attachSheetDocListeners();
 }
 
 function detachSheetDocListeners() {
@@ -550,6 +569,8 @@ function sheetStartDrag(sheet, body, event, { fromHandle }) {
   if (!fromHandle) {
     if (sheetDragInteractive(event.target)) return false;
     if ((body.scrollTop || 0) > 0) return false;
+    // Scrollable menus should scroll, not fight the dismiss gesture.
+    if (sheetBodyScrollable(body)) return false;
   }
   const y = sheetPointY(event);
   sheetUi.drag = {
@@ -600,6 +621,7 @@ function bindSheetGestures(sheet, handle, body) {
 
   body.addEventListener("touchstart", (event) => {
     if (event.touches.length !== 1) return;
+    ensureSheetDocListeners();
     sheetStartDrag(sheet, body, event, { fromHandle: false });
   }, { passive: true });
 
