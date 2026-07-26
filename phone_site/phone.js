@@ -343,14 +343,22 @@ window.addEventListener("popstate", () => {
 
 function openSheet(id) {
   const replacingSheet = overlayCloser === hideSheets;
-  $$(".sheet").forEach((sheet) => sheet.classList.toggle("hidden", sheet.id !== id));
+  $$(".sheet").forEach((sheet) => {
+    sheet.classList.toggle("hidden", sheet.id !== id);
+    resetSheetDrag(sheet);
+  });
+  resetBackdropDrag();
   $("#backdrop").classList.remove("hidden");
   buzz();
   if (!replacingSheet) openOverlay(hideSheets);
 }
 
 function hideSheets() {
-  $$(".sheet").forEach((sheet) => sheet.classList.add("hidden"));
+  $$(".sheet").forEach((sheet) => {
+    sheet.classList.add("hidden");
+    resetSheetDrag(sheet);
+  });
+  resetBackdropDrag();
   $("#backdrop").classList.add("hidden");
 }
 
@@ -358,6 +366,137 @@ function closeSheets() {
   if (overlayCloser === hideSheets) dismissOverlay();
   else hideSheets();
 }
+
+function resetBackdropDrag() {
+  const backdrop = $("#backdrop");
+  if (!backdrop) return;
+  backdrop.style.opacity = "";
+  backdrop.style.transition = "";
+}
+
+function resetSheetDrag(sheet) {
+  if (!sheet) return;
+  sheet.style.transform = "";
+  sheet.style.transition = "";
+  sheet.classList.remove("sheet-dragging");
+}
+
+function sheetDragInteractive(target) {
+  return Boolean(target.closest(
+    "button, input, textarea, select, label, a, .option, .row, .choice-chip, .theme-option, .history-row, .code-chip"
+  ));
+}
+
+function sheetDragEnabled() {
+  return window.matchMedia("(max-width: 859px)").matches;
+}
+
+/** Bottom sheets slide down from the grabber, or from the top when scrolled to the top. */
+function bindSheetDrag() {
+  const backdrop = $("#backdrop");
+  $$(".sheet").forEach((sheet) => {
+    const grabber = sheet.querySelector(".grabber");
+    if (!grabber || grabber.closest(".sheet-handle")) return;
+    const handle = document.createElement("div");
+    handle.className = "sheet-handle";
+    handle.setAttribute("aria-hidden", "true");
+    grabber.replaceWith(handle);
+    handle.appendChild(grabber);
+
+    let pointerId = null;
+    let startY = 0;
+    let offsetY = 0;
+    let fromHandle = false;
+    let armed = false;
+
+    const applyOffset = (value) => {
+      offsetY = Math.max(0, value);
+      sheet.style.transform = `translateY(${offsetY}px)`;
+      if (backdrop && !backdrop.classList.contains("hidden")) {
+        backdrop.style.transition = "none";
+        backdrop.style.opacity = String(Math.max(0.18, 0.6 - offsetY / 520));
+      }
+    };
+
+    const finishDrag = (dismiss) => {
+      const captureId = pointerId;
+      pointerId = null;
+      armed = false;
+      fromHandle = false;
+      sheet.classList.remove("sheet-dragging");
+      if (captureId !== null) {
+        try { sheet.releasePointerCapture(captureId); } catch { /* already released */ }
+      }
+
+      if (dismiss) {
+        resetSheetDrag(sheet);
+        resetBackdropDrag();
+        closeSheets();
+        return;
+      }
+
+      sheet.style.transition = "transform .22s cubic-bezier(.2, .9, .3, 1)";
+      sheet.style.transform = "";
+      resetBackdropDrag();
+      window.setTimeout(() => { sheet.style.transition = ""; }, 240);
+    };
+
+    const onStart = (event, handleDrag) => {
+      if (!sheetDragEnabled()) return;
+      if (pointerId !== null) return;
+      if (event.pointerType === "mouse" && event.button !== 0) return;
+      if (!handleDrag) {
+        if (sheetDragInteractive(event.target)) return;
+        if (sheet.scrollTop > 0) return;
+      }
+      pointerId = event.pointerId;
+      startY = event.clientY;
+      offsetY = 0;
+      fromHandle = handleDrag;
+      armed = !handleDrag;
+      sheet.classList.add("sheet-dragging");
+      sheet.style.transition = "none";
+      try { sheet.setPointerCapture(event.pointerId); } catch { /* fine */ }
+      if (handleDrag) event.preventDefault();
+    };
+
+    const onMove = (event) => {
+      if (pointerId !== event.pointerId) return;
+      const delta = event.clientY - startY;
+      if (armed && !fromHandle) {
+        if (delta <= 8) return;
+        armed = false;
+        fromHandle = true;
+      }
+      if (!fromHandle) return;
+      if (delta > 0) event.preventDefault();
+      applyOffset(delta);
+    };
+
+    const onEnd = (event) => {
+      if (pointerId !== event.pointerId) return;
+      if (!fromHandle) {
+        pointerId = null;
+        armed = false;
+        sheet.classList.remove("sheet-dragging");
+        return;
+      }
+      const threshold = Math.min(120, Math.max(72, sheet.offsetHeight * 0.18));
+      finishDrag(offsetY > threshold);
+    };
+
+    handle.addEventListener("pointerdown", (event) => onStart(event, true));
+    sheet.addEventListener("pointerdown", (event) => {
+      if (event.target.closest(".sheet-handle")) return;
+      onStart(event, false);
+    });
+    sheet.addEventListener("pointermove", onMove);
+    sheet.addEventListener("pointerup", onEnd);
+    sheet.addEventListener("pointercancel", onEnd);
+  });
+}
+
+bindSheetDrag();
 
 $("#backdrop").addEventListener("click", closeSheets);
 
