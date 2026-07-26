@@ -62,6 +62,7 @@ html.sheet-open .timeline,
 html.sheet-open .viewer-scroll,
 html.sheet-open .dock,
 html.sheet-open .backdrop {
+  overflow: hidden !important;
   touch-action: none;
 }
 html.sheet-dragging,
