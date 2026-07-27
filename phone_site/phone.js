@@ -131,6 +131,7 @@ const state = {
   clarifierQuestions: [],
   clarifierLoading: false,
   attachments: [],
+  relayFeatures: [],
   feedExpanded: false,
   threadSeq: 0,
   seenEvents: new Set(),
@@ -349,6 +350,7 @@ function showApp() {
   $("#pairCode").textContent = state.privateCode || "Unlock with your private code first";
   startPolling();
   refreshPushSubscription();
+  loadRelayStatus();
 }
 
 /* ── overlays (sheets + immersive viewer) ─────────────── */
@@ -2868,6 +2870,33 @@ async function packAttachments(items) {
 
 function attachmentSummary(items) {
   return items.map((item) => ({ name: item.name, kind: item.kind, url: item.preview || "" }));
+}
+
+/** Which half of the deployment is behind.
+ *
+ *  The app republishes itself on every push; the relay is deployed
+ *  separately and can sit several versions back, which is invisible from the
+ *  phone until a feature that needs it fails. Ask it what it can do.
+ */
+async function loadRelayStatus() {
+  const value = $("#relayValue");
+  if (!value) return;
+  try {
+    const health = await api("/api/health", { timeoutMs: 8000 });
+    const features = Array.isArray(health?.features) ? health.features : [];
+    state.relayFeatures = features;
+    if (!features.length) {
+      value.textContent = "Out of date — redeploy it";
+      value.title = "Photos travel inside the message and notifications cannot be sent until this is redeployed.";
+      return;
+    }
+    value.textContent = "Up to date";
+    value.title = features.join(", ");
+  } catch (error) {
+    state.relayFeatures = [];
+    value.textContent = "Unreachable";
+    value.title = String(error.message || error);
+  }
 }
 
 function autoGrow() {

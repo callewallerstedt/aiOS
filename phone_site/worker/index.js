@@ -290,7 +290,16 @@ async function handleApi(request, env, url, context) {
   await ensureSchema(env);
   const path = url.pathname;
 
-  if (path === "/api/health") return json({ ok: true, service: "aiOS Remote" });
+  // The app deploys itself from GitHub Pages and this relay does not, so the
+  // two halves drift. Naming what this build can do lets the phone say which
+  // side is behind instead of leaving a feature quietly broken.
+  if (path === "/api/health") {
+    return json({
+      ok: true,
+      service: "aiOS Remote",
+      features: ["uploads", "push", "event-latest"]
+    });
+  }
 
   // The application server key is public by definition — the service worker
   // needs it before there is any session to authenticate with.
