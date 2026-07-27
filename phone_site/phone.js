@@ -1468,7 +1468,14 @@ async function subscribePush() {
   const blocker = pushBlocker();
   if (blocker) throw new Error(blocker);
   const registration = await navigator.serviceWorker.ready;
-  const { key } = await api("/api/push/key");
+  // The app updates itself from GitHub Pages, the relay is deployed
+  // separately — so it can genuinely be older than the app asking it.
+  const { key } = await api("/api/push/key").catch((error) => {
+    if (error.status === 404 || error.status === 405) {
+      throw new Error("Your relay is out of date — redeploy aiOS Remote's server before turning notifications on.");
+    }
+    throw error;
+  });
   if (!key) throw new Error("The relay has no push key yet — try again in a moment.");
   const applicationServerKey = bytesFromBase64Url(key);
   let subscription = await registration.pushManager.getSubscription();
@@ -2854,7 +2861,7 @@ async function packAttachments(items) {
   }
   const inlineBytes = packed.reduce((total, item) => total + (item.data ? item.data.length : 0), 0);
   if (inlineBytes > INLINE_ATTACHMENT_BUDGET) {
-    throw new Error("Your relay needs updating before it can carry files this big.");
+    throw new Error("Your relay is out of date, so files have to travel inside the message — these are too big for that. Redeploy the server, or send fewer photos.");
   }
   return packed;
 }

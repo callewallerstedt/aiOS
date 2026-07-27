@@ -108,6 +108,25 @@ Clone and run as above. Useful surfaces:
 | `aios_updater.py` | In-app updater. CLI: `python aios_updater.py check\|update\|restart`. |
 | `install_aios.py` | Installer wizard. |
 
+### Deploying aiOS Remote
+
+The phone app and the relay it talks to ship separately, which is worth
+knowing when a new feature only half works.
+
+| Piece | Where it runs | How it updates |
+| --- | --- | --- |
+| The PWA (`phone_site/index.html`, `phone.js`, `phone.css`, `sw.js`) | GitHub Pages, `callewallerstedt.github.io` | Automatically. `.github/workflows/pages.yml` runs `npm run build` and publishes on every push to `main` that touches `phone_site/**`. |
+| The relay API (`phone_site/worker/index.js`) | The OpenAI apps host in `.openai/hosting.json`, serving `aios-remote-control.contact-wallerstedt.chatgpt.site` with its D1 (`DB`) and R2 (`FILES`) bindings | Redeploy that hosting project. Pushing to `main` does **not** do it. |
+
+So a change to the chat, the timeline, or anything else in the app is live as
+soon as Pages finishes — bump `CACHE` in `sw.js` so phones fetch it. Anything
+that needs a new API route is not, and the app is built to notice: photo
+attachments fall back to travelling inside the message, notifications say the
+relay is out of date instead of failing silently, and the rest carries on.
+
+`wrangler.jsonc` is kept for `npm run dev`, which runs the worker locally
+against isolated storage.
+
 ### Running the mobile bridge
 
 After pairing in **Settings → Mobile remote**, aiOS starts both the local Flask bridge and the secure outbound relay automatically. To start it manually:
