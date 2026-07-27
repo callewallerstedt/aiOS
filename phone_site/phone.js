@@ -43,7 +43,6 @@ const STORED_RUNS = 12;                // runs written to storage
 const STORED_EVENTS_PER_RUN = 220;
 const STORED_TEXT_LIMIT = 700;         // characters per stored field
 const SAVE_DEBOUNCE_MS = 400;
-const RESYNC_STALL_MS = 75_000;        // silence from a busy PC means re-ask
 const THREAD_RUNS = 3;                 // recent tasks drawn as one conversation
 const IDLE_RUN_CLOSE_MS = 3 * 60 * 1000;
 const EVENT_PAGE = 200;                // the relay's page size
@@ -133,8 +132,9 @@ const state = {
   clarifierLoading: false,
   attachments: [],
   feedExpanded: false,
+  threadSeq: 0,
   seenEvents: new Set(),
-  lastEventAt: 0,
+  relayLatest: 0,
   resyncing: false
 };
 
@@ -1987,7 +1987,7 @@ function addEvent(event) {
 /** The run this feed is showing right now. */
 function currentThread() {
   if (state.viewingRunId) return state.history.find((run) => run.id === state.viewingRunId) || null;
-  return state.liveRun || machineHistory()[0] || null;
+  return state.liveRun || conversationRuns()[0] || null;
 }
 
 /** The conversation to draw.
@@ -1998,8 +1998,16 @@ function currentThread() {
  */
 function threadEvents() {
   if (state.viewingRunId) return currentThread()?.events || [];
-  return machineHistory().slice(0, THREAD_RUNS).reverse()
-    .flatMap((run) => run.events || []);
+  return conversationRuns().reverse().flatMap((run) => run.events || []);
+}
+
+/** The runs that belong to the conversation on screen: the recent ones on
+ *  this computer, and never anything from before the last New chat. */
+function conversationRuns() {
+  const runs = machineHistory().filter((run) => Number(run.thread || 0) === state.threadSeq);
+  // Whatever the bookkeeping says, the run you are watching is on screen.
+  if (state.liveRun && !runs.includes(state.liveRun)) runs.unshift(state.liveRun);
+  return runs.slice(0, THREAD_RUNS);
 }
 
 /** Keep the DOM bounded without ever deleting something you said.
@@ -2169,6 +2177,7 @@ function openRun(task, stamp) {
   const run = {
     id: `r${stamp.toString(36)}${Math.random().toString(36).slice(2, 6)}`,
     machineId: state.machineId,
+    thread: state.threadSeq,
     task: String(task || "").slice(0, 400),
     startedAt: stamp,
     endedAt: 0,
@@ -2369,15 +2378,22 @@ async function drainEvents(silent = false) {
       if (id !== state.machineId || version !== state.feedVersion) return seen;
       const events = data.events || [];
       for (const event of events) {
-        if (String(event.type || "").toLowerCase() === "clarification") {
-          if (!silent) applyClarification(event.payload || {});
-          continue;
+        // One unusable row must never stop the drain: the cursor would stay
+        // put, the same batch would come back every poll, and the feed would
+        // go quiet for the rest of the run.
+        try {
+          if (String(event.type || "").toLowerCase() === "clarification") {
+            if (!silent) applyClarification(event.payload || {});
+            continue;
+          }
+          // A recovery re-reads rows we already have; only paint the new ones.
+          const fresh = recordEvent(event);
+          if (fresh && !silent && !state.viewingRunId) addEvent(event);
+        } catch (error) {
+          console.debug("skipped an event", event?.type, error);
         }
-        // A resync re-reads rows we already have; only paint the new ones.
-        const fresh = recordEvent(event);
-        if (fresh && !silent && !state.viewingRunId) addEvent(event);
       }
-      if (events.length) state.lastEventAt = Date.now();
+      state.relayLatest = Number(data.latest || 0);
       seen += events.length;
       state.cursor = Number(data.cursor || state.cursor);
       saveCursor();
@@ -2393,37 +2409,58 @@ async function drainEvents(silent = false) {
 
 /** A cursor can outlive the log it points into — a relay that was pruned or
  *  rebuilt hands out lower ids than the one we saved, and the phone would
- *  wait forever on events it has already asked past. If the PC says it is
- *  working and nothing has arrived for over a minute, read the log from the
- *  top again; ids we have already filed are ignored on the way in.
+ *  wait forever on events it has already asked past.
+ *
+ *  The relay reports the newest id it holds, so this only ever fires on
+ *  proof, never on a hunch. It rewinds to the tail of the log, not to the
+ *  beginning: re-reading the archive would replay last week's tasks into the
+ *  chat you are looking at, which is exactly what a stall-timer version of
+ *  this did. The redraw comes from the thread we already keep, so nothing
+ *  raw is dumped into the feed.
  */
-async function resyncIfStalled() {
-  if (state.resyncing || !state.cursor || !state.running || state.viewingRunId) return;
-  if (!state.lastEventAt) { state.lastEventAt = Date.now(); return; }
-  if (Date.now() - state.lastEventAt < RESYNC_STALL_MS) return;
+async function recoverStaleCursor() {
+  const latest = Number(state.relayLatest || 0);
+  if (state.resyncing || !latest || latest >= state.cursor) return false;
   state.resyncing = true;
-  state.lastEventAt = Date.now();
-  const from = state.cursor;
-  state.cursor = 0;
   try {
-    await drainEvents(false);
+    state.cursor = Math.max(0, latest - EVENT_PAGE);
+    saveCursor();
+    await drainEvents(true);
+    replayEvents(threadEvents());
   } finally {
-    if (!state.cursor) {
-      state.cursor = from;   // nothing came back; keep the old place
-      saveCursor();
-    }
     state.resyncing = false;
   }
+  return true;
 }
 
 async function pollEvents() {
   await drainEvents(false);
   closeStaleRun();
-  await resyncIfStalled();
+  await recoverStaleCursor();
 }
 
 function cursorKey() {
   return `aios_cursor_${state.machineId}`;
+}
+
+/** Which conversation this computer is on. New chat moves it forward, so the
+ *  thread you cleared cannot walk back in on the next reload.
+ *
+ *  A counter, not a timestamp: runs are stamped by the PC's clock, and a
+ *  computer a few minutes out of step with the phone would put its own live
+ *  run on the wrong side of a cut-off time and hide it completely.
+ */
+function threadKey() {
+  return `aios_thread_${state.machineId}`;
+}
+
+function loadThread() {
+  state.threadSeq = Number(prefs.get(threadKey(), 0)) || 0;
+}
+
+function beginNewThread() {
+  state.threadSeq += 1;
+  if (state.machineId) prefs.set(threadKey(), state.threadSeq);
 }
 
 function loadCursor() {
@@ -2442,7 +2479,7 @@ function saveCursor() {
  *  brand new history row and your message sits alone in the old one.
  */
 function adoptLiveRun() {
-  const runs = machineHistory();
+  const runs = conversationRuns();
   const recent = runs[0];
   state.liveRun = recent && recent.status === "open" ? recent : null;
   rememberSeen(runs);
@@ -2456,6 +2493,7 @@ async function beginSession(reset = false) {
   if (!state.machineId) return;
   state.sessionMachineId = state.machineId;
   loadCursor();
+  loadThread();
   state.viewingRunId = "";
   $("#historyBanner").classList.add("hidden");
   // Nothing half-finished survives a reopen: no stuck send, no stale draft
@@ -2472,6 +2510,9 @@ async function beginSession(reset = false) {
     closeRun("ended");
     state.liveRun = null;
     state.forceNewPrompt = true;
+    // Remembered, so a reload an hour from now still knows this is where the
+    // conversation starts.
+    beginNewThread();
     resetTimeline("Ready. Ask your computer to do something.");
     if (archived >= SERVER_PRUNE_EVENTS && !state.running) await pruneServerEvents();
     await pollEvents();
@@ -2488,7 +2529,7 @@ async function beginSession(reset = false) {
   // Then catch up. Silent, because the backlog belongs to the thread we just
   // painted and recordEvent is what stitches it back together.
   const arrived = await drainEvents(true);
-  const current = machineHistory()[0];
+  const current = conversationRuns()[0];
   if (arrived && current?.events?.length) {
     // OPERATOR may have started something else entirely while we were away.
     if (current.id !== restored?.id && current.status === "open") state.liveRun = current;

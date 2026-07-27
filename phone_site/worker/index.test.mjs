@@ -323,3 +323,38 @@ test("a phone that uninstalled the app stops being pushed to", async () => {
 
   assert.deepEqual(env.DB.deleted, [subscription.endpoint], "a dead subscription must not be retried forever");
 });
+
+test("the event log says how far it goes, so a stale phone can tell", async () => {
+  const rows = [
+    { id: 41, type: "thought", payload_json: "{}", created_at: 1 },
+    { id: 42, type: "done", payload_json: "{}", created_at: 2 }
+  ];
+  const env = { DB: {
+    prepare(sql) {
+      const self = {
+        args: [],
+        bind(...args) { self.args = args; return self; },
+        async first() {
+          if (/MAX\(id\) AS latest/.test(sql)) return { latest: 42 };
+          if (/FROM machines WHERE id/.test(sql)) return { id: "m1" };
+          if (/FROM sessions/.test(sql)) return { account_id: "account-1", expires_at: Date.now() + 60_000 };
+          return null;
+        },
+        async all() { return { results: rows.filter((row) => row.id > Number(self.args[1] || 0)) }; },
+        async run() { return { success: true }; }
+      };
+      return self;
+    },
+    async batch(statements) { return Promise.all(statements.map((item) => item.run?.() ?? item)); }
+  } };
+
+  const response = await relay.fetch(new Request(
+    "https://relay.example/api/machines/m1/events?since=41",
+    { headers: { authorization: "Bearer session-token" } }
+  ), env, {});
+  const data = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(data.events.map((event) => event.id), [42]);
+  assert.equal(data.latest, 42, "without this a rebuilt log leaves the phone waiting forever");
+});

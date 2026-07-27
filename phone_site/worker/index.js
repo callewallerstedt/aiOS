@@ -533,7 +533,15 @@ async function handleApi(request, env, url, context) {
     const result = await env.DB.prepare("SELECT id, type, payload_json, created_at FROM events WHERE machine_id = ? AND id > ? ORDER BY id LIMIT 200")
       .bind(machineId, since).all();
     const events = (result.results || []).map((row) => ({ id: row.id, type: row.type, payload: safeJson(row.payload_json), created_at: row.created_at }));
-    return json({ events, cursor: events.length ? events[events.length - 1].id : since });
+    // The newest id we hold. A phone whose cursor is past this one is reading
+    // a log that no longer exists, and can say so instead of waiting forever.
+    const newest = await env.DB.prepare("SELECT MAX(id) AS latest FROM events WHERE machine_id = ?")
+      .bind(machineId).first();
+    return json({
+      events,
+      cursor: events.length ? events[events.length - 1].id : since,
+      latest: Number(newest?.latest || 0)
+    });
   }
 
   const frameMatch = path.match(/^\/api\/machines\/([^/]+)\/frame\/([^/]+)$/);

@@ -123,3 +123,74 @@ def test_a_stored_event_keeps_the_fields_the_timeline_draws_from():
     # Truncation only — dropping keys would blank out rows on the way back.
     assert "slice(0, STORED_TEXT_LIMIT)" in shrink
     assert json.dumps({"...": "event"})  # sanity: the module imports cleanly
+
+
+# ── which runs belong to the conversation on screen ──────────────────────
+
+
+def conversation_runs(history, machine_id, thread_seq, live_run=None, limit=3):
+    """Mirror of phone.js conversationRuns."""
+    runs = [
+        run for run in history
+        if run.get("machineId") == machine_id and int(run.get("thread") or 0) == thread_seq
+    ]
+    if live_run is not None and live_run not in runs:
+        runs.insert(0, live_run)
+    return runs[:limit]
+
+
+def a_run(thread=0, machine="m1", task="task", started=1000):
+    return {"machineId": machine, "thread": thread, "task": task, "startedAt": started, "events": []}
+
+
+def test_new_chat_leaves_the_old_conversation_behind():
+    yesterday = [a_run(thread=0, task="rename photos"), a_run(thread=0, task="back up docs")]
+    today = a_run(thread=1, task="check my email")
+
+    shown = conversation_runs([today] + yesterday, "m1", thread_seq=1)
+
+    assert [run["task"] for run in shown] == ["check my email"]
+
+
+def test_without_a_new_chat_recent_tasks_read_as_one_conversation():
+    history = [a_run(task="third"), a_run(task="second"), a_run(task="first")]
+
+    shown = conversation_runs(history, "m1", thread_seq=0)
+
+    assert [run["task"] for run in shown] == ["third", "second", "first"]
+
+
+def test_runs_from_another_computer_never_appear():
+    history = [a_run(machine="m2", task="not mine"), a_run(machine="m1", task="mine")]
+
+    shown = conversation_runs(history, "m1", thread_seq=0)
+
+    assert [run["task"] for run in shown] == ["mine"]
+
+
+def test_the_run_you_are_watching_is_always_on_screen():
+    """Bookkeeping must never be able to hide a live run — that reads as
+    'I sent a prompt and never saw what it was doing'."""
+    live = a_run(thread=7, task="running right now")
+
+    shown = conversation_runs([a_run(thread=1)], "m1", thread_seq=1, live_run=live)
+
+    assert live in shown
+
+
+def test_a_run_saved_before_threads_existed_still_shows():
+    old = {"machineId": "m1", "task": "from an older build", "startedAt": 1, "events": []}
+
+    shown = conversation_runs([old], "m1", thread_seq=0)
+
+    assert [run["task"] for run in shown] == ["from an older build"]
+
+
+def test_the_thread_marker_is_a_counter_not_a_clock():
+    """A PC whose clock is minutes off must not fall outside the thread."""
+    source = PHONE_JS.read_text(encoding="utf-8")
+    start = source.index("function beginNewThread()")
+    body = source[start:source.index("}", start)]
+
+    assert "Date.now" not in body, "the thread marker must not be a timestamp"
+    assert "state.threadSeq += 1" in body
