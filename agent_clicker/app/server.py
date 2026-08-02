@@ -1,6 +1,7 @@
 from __future__ import annotations
 import base64
 import ctypes
+from datetime import datetime
 import io
 import json
 import os
@@ -11,6 +12,7 @@ import tempfile
 import time
 import threading
 import queue
+import secrets
 import uuid
 
 from flask import Flask, render_template, request, Response, jsonify
@@ -56,6 +58,13 @@ SCREEN_CACHE: dict[tuple, dict] = {}
 UPDATE_HEALTH_PATH = REPO_ROOT / ".aios-update-health.json"
 STREAM_HEALTH_PATH = REPO_ROOT / ".aios-stream-health.json"
 
+# The voice agent listens on its own port and mirrors its turns to a JSONL the
+# phone can follow, exactly like OPERATOR does.
+VOICE_PORT = 48737
+VOICE_EVENTS_DIR = REPO_ROOT / "phone_voice_events"
+VOICE_EVENTS_FILE = VOICE_EVENTS_DIR / "events.jsonl"
+VOICE_EVENTS_DIR.mkdir(exist_ok=True)
+
 OPERATOR_EVENTS_DIR = REPO_ROOT / "phone_operator_events"
 OPERATOR_EVENTS_FILE = OPERATOR_EVENTS_DIR / "events.jsonl"
 OPERATOR_FRAMES_DIR = OPERATOR_EVENTS_DIR / "frames"
@@ -64,6 +73,70 @@ OPERATOR_UPLOADS_DIR = OPERATOR_EVENTS_DIR / "uploads"
 OPERATOR_EVENTS_DIR.mkdir(exist_ok=True)
 OPERATOR_FRAMES_DIR.mkdir(exist_ok=True)
 OPERATOR_UPLOADS_DIR.mkdir(exist_ok=True)
+
+PHOTO_DROP_ROOT = Path.home() / "Pictures" / "aiOS Phone Photos"
+PHOTO_DROP_SESSIONS: dict[str, dict] = {}
+PHOTO_DROP_LOCK = threading.Lock()
+PHOTO_DROP_MAX_BYTES = 35 * 1024 * 1024
+PHOTO_DROP_FORMAT_SUFFIXES = {
+    "JPEG": ".jpg",
+    "PNG": ".png",
+    "WEBP": ".webp",
+    "GIF": ".gif",
+    "BMP": ".bmp",
+    "TIFF": ".tif",
+}
+
+
+def _lan_ip():
+    """Return the LAN address a phone can use to reach this PC."""
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        probe.connect(("8.8.8.8", 80))
+        return probe.getsockname()[0]
+    except OSError:
+        try:
+            return socket.gethostbyname(socket.gethostname())
+        except OSError:
+            return "127.0.0.1"
+    finally:
+        probe.close()
+
+
+def _photo_drop_public_session(session):
+    return {
+        "ok": True,
+        "token": session["token"],
+        "url": session["url"],
+        "folder": str(session["folder"]),
+        "count": int(session["count"]),
+        "last_filename": session.get("last_filename", ""),
+        "created_at": session["created_at"],
+    }
+
+
+def _photo_drop_session(token):
+    with PHOTO_DROP_LOCK:
+        return PHOTO_DROP_SESSIONS.get(token)
+
+
+def _photo_suffix(raw, filename=""):
+    """Validate a browser upload as an image and choose a safe suffix."""
+    try:
+        with Image.open(io.BytesIO(raw)) as image:
+            image.verify()
+            suffix = PHOTO_DROP_FORMAT_SUFFIXES.get(str(image.format or "").upper())
+            if suffix:
+                return suffix
+    except Exception:
+        pass
+
+    # Recent iPhones can supply HEIF directly. Pillow does not decode it in a
+    # stock install, but the ISO-BMFF signature is enough to store it safely.
+    brand = raw[4:16].lower() if len(raw) >= 16 else b""
+    if raw[4:8] == b"ftyp" and any(value in brand for value in (b"heic", b"heif", b"mif1")):
+        return ".heic"
+    raise ValueError(f"{filename or 'Upload'} is not a supported image.")
 
 
 def _load_operator_state():
@@ -157,7 +230,7 @@ def add_phone_cors(response):
         response.headers["Access-Control-Allow-Origin"] = origin
         response.headers["Vary"] = "Origin"
         response.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
-        response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type, X-aiOS-Token"
     return response
 
 
@@ -174,6 +247,8 @@ DEFAULT_OPERATOR_CONFIG = {
     "shell": False,
     "codex_auth": False,
     "provider_mode": "",
+    "locate_anything": False,
+    "locate_anything_url": "http://127.0.0.1:7860",
 }
 
 AI_PROVIDER_MODES = {"codex", "api", "codex_api_fallback"}
@@ -207,9 +282,10 @@ def forward_helper(action, text="", options=None):
     if action not in {"chat", "operator", "phone_start", "phone_stop",
                        "reload_operator_settings", "operator_stop",
                        "operator_followup", "operator_clear",
-                       "operator_attach", "operator_clear_attachments"}:
+                       "operator_attach", "operator_clear_attachments",
+                       "codex_cli", "claude_cli"}:
         return {"ok": True, "sent": False}
-    if action in {"chat", "operator"} and not text:
+    if action in {"chat", "operator", "codex_cli", "claude_cli"} and not text:
         return {"ok": True, "sent": False}
     body = {"action": action, "text": text}
     if isinstance(options, dict) and options:
@@ -220,6 +296,17 @@ def forward_helper(action, text="", options=None):
             client.sendall(payload)
     except OSError as exc:
         return {"ok": False, "sent": False, "error": f"aiOS helper is not listening: {exc}"}
+    return {"ok": True, "sent": True}
+
+
+def forward_voice(payload):
+    """Send a control message straight to the voice agent on its own port."""
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    try:
+        with socket.create_connection((HELPER_HOST, VOICE_PORT), timeout=1.5) as client:
+            client.sendall(body)
+    except OSError as exc:
+        return {"ok": False, "sent": False, "error": f"voice agent is not listening: {exc}"}
     return {"ok": True, "sent": True}
 
 
@@ -274,6 +361,86 @@ def index():
 @app.route("/phone")
 def phone():
     return render_template("phone.html")
+
+
+@app.route("/photo-drop/<token>")
+def photo_drop(token):
+    session = _photo_drop_session(token)
+    if session is None:
+        return render_template("photo_drop.html", token="", count=0), 404
+    return render_template("photo_drop.html", token=token, count=session["count"])
+
+
+@app.route("/api/photo-drop/session", methods=["POST"])
+def api_photo_drop_create_session():
+    if request.remote_addr not in {"127.0.0.1", "::1"}:
+        return jsonify({"ok": False, "error": "Photo sessions can only be started on this PC."}), 403
+
+    token = secrets.token_urlsafe(24)
+    created = datetime.now()
+    folder = PHOTO_DROP_ROOT / created.strftime("%Y-%m-%d") / f"{created.strftime('%H%M%S')}-{token[:6]}"
+    folder.mkdir(parents=True, exist_ok=False)
+    port = int(os.environ.get("AIOS_PHONE_BRIDGE_PORT", "5000"))
+    session = {
+        "token": token,
+        "folder": folder,
+        "count": 0,
+        "last_filename": "",
+        "created_at": created.isoformat(timespec="seconds"),
+        "url": f"http://{_lan_ip()}:{port}/photo-drop/{token}",
+    }
+    with PHOTO_DROP_LOCK:
+        PHOTO_DROP_SESSIONS[token] = session
+    return jsonify(_photo_drop_public_session(session))
+
+
+@app.route("/api/photo-drop/<token>/status")
+def api_photo_drop_status(token):
+    session = _photo_drop_session(token)
+    if session is None:
+        return jsonify({"ok": False, "error": "Photo session not found."}), 404
+    return jsonify(_photo_drop_public_session(session))
+
+
+@app.route("/api/photo-drop/<token>/upload", methods=["POST"])
+def api_photo_drop_upload(token):
+    session = _photo_drop_session(token)
+    if session is None:
+        return jsonify({"ok": False, "error": "Photo session not found."}), 404
+    upload = request.files.get("image")
+    if upload is None:
+        return jsonify({"ok": False, "error": "No photo was received."}), 400
+
+    raw = upload.stream.read(PHOTO_DROP_MAX_BYTES + 1)
+    if not raw:
+        return jsonify({"ok": False, "error": "The photo was empty."}), 400
+    if len(raw) > PHOTO_DROP_MAX_BYTES:
+        return jsonify({"ok": False, "error": "The photo is larger than 35 MB."}), 413
+    try:
+        suffix = _photo_suffix(raw, upload.filename or "")
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 415
+
+    with PHOTO_DROP_LOCK:
+        current = PHOTO_DROP_SESSIONS.get(token)
+        if current is None:
+            return jsonify({"ok": False, "error": "Photo session not found."}), 404
+        next_number = int(current["count"]) + 1
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")[:-3]
+        filename = f"phone-photo-{timestamp}-{next_number:03d}{suffix}"
+        target = current["folder"] / filename
+        target.write_bytes(raw)
+        current["count"] = next_number
+        current["last_filename"] = filename
+        count = next_number
+    return jsonify({"ok": True, "count": count, "filename": filename})
+
+
+@app.route("/operator")
+def operator_flow():
+    """Full-flow viewer: scrollable gallery of screenshots + LocateAnything
+    outputs on the left, live activity feed on the right."""
+    return render_template("operator.html")
 
 
 @app.route("/api/phone/status")
@@ -437,8 +604,338 @@ def api_phone_send():
         if result.get("ok"):
             result["mode"] = "new"
         return jsonify(result), 200 if result.get("ok") else 503
+    if target in {"voice", "agent"}:
+        # Straight to the voice agent, which answers with the same tools and
+        # the same conversation it uses when you talk to the PC directly.
+        result = forward_voice({"cmd": "ask", "text": text, "echo_user": True})
+        return jsonify(result), 200 if result.get("ok") else 503
     result = forward_helper(target, text)
     return jsonify(result), 200 if result.get("ok") else 503
+
+
+@app.route("/api/phone/voice/stop", methods=["POST", "OPTIONS"])
+def api_phone_voice_stop():
+    """Panic button: stop the spoken reply, the turn, and any OPERATOR job."""
+    if request.method == "OPTIONS":
+        return "", 204
+    try:
+        with socket.create_connection((HELPER_HOST, VOICE_PORT), timeout=1.5) as client:
+            client.sendall(b"stop_agent")
+    except OSError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 503
+    return jsonify({"ok": True})
+
+
+@app.route("/api/phone/voice/reset", methods=["POST", "OPTIONS"])
+def api_phone_voice_reset():
+    if request.method == "OPTIONS":
+        return "", 204
+    result = forward_voice({"cmd": "reset_agent"})
+    return jsonify(result), 200 if result.get("ok") else 503
+
+
+def _read_voice_events(limit=80):
+    if not VOICE_EVENTS_FILE.exists():
+        return []
+    try:
+        lines = VOICE_EVENTS_FILE.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    events = []
+    for line in lines[-limit:]:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict):
+            events.append(event)
+    return events
+
+
+@app.route("/api/phone/voice/log")
+def api_phone_voice_log():
+    """Recent turns, so the phone shows the conversation already in progress."""
+    events = [
+        event
+        for event in _read_voice_events(limit=200)
+        if event.get("type") in {"turn_start", "turn_done"}
+    ]
+    size = 0
+    try:
+        size = VOICE_EVENTS_FILE.stat().st_size
+    except OSError:
+        pass
+    return jsonify({"events": events[-40:], "size": size})
+
+
+@app.route("/api/phone/voice/events")
+def api_phone_voice_events():
+    """Live stream of the voice agent's turn — same byte-offset protocol as OPERATOR."""
+    last_pos = 0
+    try:
+        if request.args.get("since"):
+            last_pos = max(0, int(request.args.get("since")))
+    except (TypeError, ValueError):
+        last_pos = 0
+
+    def stream():
+        nonlocal last_pos
+        yield "retry: 2000\n\n"
+        idle_ticks = 0
+        while True:
+            try:
+                if VOICE_EVENTS_FILE.exists():
+                    size = VOICE_EVENTS_FILE.stat().st_size
+                    if size < last_pos:
+                        # The log was trimmed; tell the phone to resync.
+                        last_pos = 0
+                        yield "event: reset\ndata: {}\n\n"
+                    if size > last_pos:
+                        with VOICE_EVENTS_FILE.open("rb") as fh:
+                            fh.seek(last_pos)
+                            chunk = fh.read(size - last_pos)
+                            last_pos = size
+                        for raw_line in chunk.splitlines():
+                            line = raw_line.decode("utf-8", "ignore").strip()
+                            if not line:
+                                continue
+                            try:
+                                event = json.loads(line)
+                                event["size"] = size
+                                line = json.dumps(event, ensure_ascii=False)
+                            except json.JSONDecodeError:
+                                pass
+                            yield f"data: {line}\n\n"
+                        idle_ticks = 0
+                    else:
+                        idle_ticks += 1
+                else:
+                    idle_ticks += 1
+                if idle_ticks % 30 == 0:
+                    yield ": ping\n\n"
+                time.sleep(0.12)
+            except GeneratorExit:
+                return
+            except Exception:
+                time.sleep(0.5)
+
+    headers = {
+        "Cache-Control": "no-cache, no-transform",
+        "X-Accel-Buffering": "no",
+        "Connection": "keep-alive",
+    }
+    return Response(stream(), mimetype="text/event-stream", headers=headers)
+
+
+DEFAULT_PROJECTS_ROOT = os.environ.get("AIOS_PROJECTS_ROOT", r"C:\1 - Projects")
+
+
+@app.route("/coding")
+def coding_page():
+    return render_template("coding.html")
+
+
+@app.route("/api/phone/coding/sessions", methods=["GET", "POST", "OPTIONS"])
+def api_phone_coding_sessions():
+    if request.method == "OPTIONS":
+        return "", 204
+    import cli_sessions
+
+    if request.method == "GET":
+        return jsonify({"ok": True, "sessions": cli_sessions.list_sessions()})
+    data = request.get_json(silent=True) or {}
+    result = cli_sessions.create_session(
+        (data.get("cli") or "claude").strip().lower(),
+        project=str(data.get("project") or "").strip(),
+        projects_root=str(data.get("projects_root") or DEFAULT_PROJECTS_ROOT).strip(),
+        model=str(data.get("model") or "").strip(),
+        reasoning=str(data.get("reasoning") or "").strip(),
+        title=str(data.get("title") or "").strip(),
+    )
+    return jsonify(result), 200 if result.get("ok") else 400
+
+
+@app.route("/api/phone/coding/sessions/<sid>", methods=["GET", "DELETE", "OPTIONS"])
+def api_phone_coding_session(sid):
+    if request.method == "OPTIONS":
+        return "", 204
+    import cli_sessions
+
+    if request.method == "DELETE":
+        result = cli_sessions.delete_session(sid)
+        return jsonify(result), 200 if result.get("ok") else 404
+    meta = cli_sessions.get_session_meta(sid)
+    if meta is None:
+        return jsonify({"ok": False, "error": "unknown session"}), 404
+    return jsonify({"ok": True, "session": meta})
+
+
+@app.route("/api/phone/coding/sessions/<sid>/send", methods=["POST", "OPTIONS"])
+def api_phone_coding_send(sid):
+    if request.method == "OPTIONS":
+        return "", 204
+    import cli_sessions
+
+    data = request.get_json(silent=True) or {}
+    result = cli_sessions.send_message(sid, data.get("text") or "")
+    return jsonify(result), 200 if result.get("ok") else 400
+
+
+@app.route("/api/phone/coding/sessions/<sid>/stop", methods=["POST", "OPTIONS"])
+def api_phone_coding_stop(sid):
+    if request.method == "OPTIONS":
+        return "", 204
+    import cli_sessions
+
+    result = cli_sessions.stop_session(sid)
+    return jsonify(result), 200 if result.get("ok") else 404
+
+
+@app.route("/api/phone/coding/sessions/<sid>/log")
+def api_phone_coding_log(sid):
+    import cli_sessions
+
+    try:
+        since = max(0, int(request.args.get("since") or 0))
+    except (TypeError, ValueError):
+        since = 0
+    result = cli_sessions.read_events(sid, since)
+    return jsonify(result), 200 if result.get("ok") else 404
+
+
+@app.route("/api/phone/coding/sessions/<sid>/events")
+def api_phone_coding_events(sid):
+    import cli_sessions
+
+    events_file = cli_sessions.events_file_for(sid)
+    if events_file is None:
+        return jsonify({"error": "unknown session"}), 404
+    try:
+        last_pos = max(0, int(request.args.get("since") or 0))
+    except (TypeError, ValueError):
+        last_pos = 0
+
+    def stream():
+        nonlocal last_pos
+        yield "retry: 2000\n\n"
+        idle_ticks = 0
+        while True:
+            try:
+                if events_file.exists():
+                    size = events_file.stat().st_size
+                    if size < last_pos:
+                        last_pos = 0
+                        yield "event: reset\ndata: {}\n\n"
+                    if size > last_pos:
+                        with events_file.open("rb") as fh:
+                            fh.seek(last_pos)
+                            chunk = fh.read(size - last_pos)
+                            last_pos = size
+                        for raw_line in chunk.splitlines():
+                            line = raw_line.decode("utf-8", "ignore").strip()
+                            if not line:
+                                continue
+                            try:
+                                event = json.loads(line)
+                                event["size"] = size
+                                line = json.dumps(event, ensure_ascii=False)
+                            except json.JSONDecodeError:
+                                continue
+                            yield f"data: {line}\n\n"
+                        idle_ticks = 0
+                    else:
+                        idle_ticks += 1
+                else:
+                    idle_ticks += 1
+                if idle_ticks and idle_ticks % 25 == 0:
+                    yield ": ping\n\n"
+                time.sleep(0.15)
+            except GeneratorExit:
+                return
+            except Exception:
+                time.sleep(0.5)
+
+    headers = {
+        "Cache-Control": "no-cache, no-transform",
+        "X-Accel-Buffering": "no",
+        "Connection": "keep-alive",
+    }
+    return Response(stream(), mimetype="text/event-stream", headers=headers)
+
+
+@app.route("/api/phone/cli/status", methods=["GET", "OPTIONS"])
+def api_phone_cli_status():
+    if request.method == "OPTIONS":
+        return "", 204
+    from pc_cli_runner import cli_status
+
+    return jsonify(cli_status())
+
+
+@app.route("/api/phone/cli", methods=["POST", "OPTIONS"])
+def api_phone_cli():
+    """Legacy entry point — now routed through persistent coding sessions
+    instead of launching a one-shot visible cmd window."""
+    if request.method == "OPTIONS":
+        return "", 204
+    import cli_sessions
+
+    data = request.get_json(silent=True) or {}
+    cli = (data.get("cli") or "codex").strip().lower()
+    if cli in {"claude_cli", "claude"}:
+        cli = "claude"
+    else:
+        cli = "codex"
+    text = (data.get("text") or data.get("prompt") or "").strip()
+    if not text:
+        return jsonify({"error": "text required"}), 400
+    project = str(data.get("project") or "").strip()
+    model = str(data.get("model") or "").strip()
+    reasoning = str(data.get("reasoning") or "").strip()
+    projects_root = str(data.get("projects_root") or DEFAULT_PROJECTS_ROOT).strip()
+    # Reuse the most recent session for this CLI so the conversation stays
+    # continuous; otherwise create one.
+    session_meta = None
+    for meta in cli_sessions.list_sessions():
+        if meta.get("cli") == cli and (not project or meta.get("project_name") == project):
+            session_meta = meta
+            break
+    if session_meta is None:
+        created = cli_sessions.create_session(
+            cli, project=project, projects_root=projects_root,
+            model=model, reasoning=reasoning,
+        )
+        if not created.get("ok"):
+            return jsonify(created), 503
+        session_meta = created["session"]
+    result = cli_sessions.send_message(session_meta["id"], text)
+    result.update({
+        "cli": cli,
+        "session_id": session_meta["id"],
+        "project": session_meta.get("project"),
+    })
+    return jsonify(result), 200 if result.get("ok") else 503
+
+
+@app.route("/api/phone/projects", methods=["GET", "OPTIONS"])
+def api_phone_projects():
+    if request.method == "OPTIONS":
+        return "", 204
+    root_raw = (request.args.get("root") or DEFAULT_PROJECTS_ROOT).strip()
+    root = Path(root_raw)
+    if not root.exists() or not root.is_dir():
+        return jsonify({"ok": False, "error": f"Projects folder not found: {root}", "projects": []}), 404
+    projects = []
+    try:
+        for entry in sorted(root.iterdir(), key=lambda item: item.name.lower()):
+            if entry.is_dir() and not entry.name.startswith("."):
+                projects.append(entry.name)
+    except OSError as exc:
+        return jsonify({"ok": False, "error": str(exc), "projects": []}), 500
+    return jsonify({"ok": True, "root": str(root), "projects": projects})
 
 
 @app.route("/api/phone/operator/clear", methods=["POST", "OPTIONS"])
@@ -845,4 +1342,5 @@ def api_stream(job_id):
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
+    port = int(os.environ.get("AIOS_PHONE_BRIDGE_PORT", "5000"))
+    app.run(host="0.0.0.0", port=port, debug=False, threaded=True)

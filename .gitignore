@@ -15,6 +15,18 @@ startup-*.log
 voice-*.log
 autocorrect.log
 
+# Everything the user has dictated, plus the agent's running conversation and
+# the facts it was told to remember. Personal by definition — never commit.
+voice-transcripts.jsonl
+voice-agent-memory.json
+voice-agent-timers.json
+phone_voice_events/
+
+# The agent's own notes are personal; its SOUL.md (how it behaves) is not, and
+# is tracked so the personality is versioned.
+agent_self/*
+!agent_self/SOUL.md
+
 helper_config.json
 phone-bridge-url.txt
 phone-relay-state.json
@@ -38,6 +50,7 @@ aios-phone-v*.tar.gz
 .aios-phone-secret.pem
 .aios-stream-health.json
 .aios-codex-plan-usage.json
+.aios-dashboard-cache.json
 .aios-update-health.json
 .aios-update-request
 .aios_update_staging/

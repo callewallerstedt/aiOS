@@ -23,7 +23,13 @@
 
   <nav class="target" aria-label="target">
     <button class="target-btn active" type="button" data-target="chat">AIOS</button>
+    <button class="target-btn" type="button" data-target="voice">AGENT</button>
     <button class="target-btn" type="button" data-target="operator">OPERATOR</button>
+  </nav>
+
+  <nav class="target coding-row" aria-label="coding">
+    <button class="target-btn coding-btn claude" type="button" data-cli="claude">CLAUDE</button>
+    <button class="target-btn coding-btn codex" type="button" data-cli="codex">CODEX</button>
   </nav>
 
   <section class="screen">
@@ -34,6 +40,8 @@
     <div id="text" class="text"></div>
   </section>
 
+  <section id="agent-thread" class="agent-thread" aria-live="polite" hidden></section>
+
   <footer class="dock">
     <button id="clear" class="icon-btn" type="button" aria-label="Clear">×</button>
     <button id="mic" class="mic" type="button" aria-label="Microphone">
@@ -41,6 +49,8 @@
     </button>
     <button id="send" class="icon-btn send" type="button" aria-label="Send">↑</button>
   </footer>
+
+  <button id="agent-stop" class="agent-stop" type="button" hidden>Stop</button>
 </main>
 <script src="/static/phone.js"></script>
 </body>

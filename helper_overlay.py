@@ -1,5 +1,4 @@
 import argparse
-import base64
 import ctypes
 from ctypes import wintypes
 from datetime import datetime, timedelta
@@ -18,6 +17,7 @@ import time
 import tkinter as tk
 import tkinter.font as tkfont
 import urllib.error
+import urllib.parse
 import urllib.request
 from tkinter import colorchooser, filedialog, messagebox, simpledialog
 
@@ -28,11 +28,16 @@ from voice_settings import (
     COMPUTE_TYPES,
     DEFAULT_VOICE_DICTATION,
     LANGUAGE_LABELS,
+    SAFE_HOTKEYS,
+    VOICE_HOTKEY_OPTIONS,
     WHISPER_LANGUAGES,
     WHISPER_MODELS,
     load_voice_dictation_settings,
     merge_voice_dictation,
+    normalize_voice_hotkey,
     resolve_transcribe_language,
+    voice_hotkey_label,
+    voice_hotkey_to_ahk,
 )
 
 
@@ -53,11 +58,21 @@ DEFAULT_PROJECT_META = {
 }
 HOST = "127.0.0.1"
 PORT = 48736
+MAX_COMMAND_BYTES = 8 * 1024 * 1024
 CODEX_HOME = aios_codex_accounts.active_home(CONFIG_PATH)
 os.environ["AIOS_ACTIVE_CODEX_HOME"] = str(CODEX_HOME)
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 CREATE_NEW_CONSOLE = 0x00000010 if os.name == "nt" else 0
 OPERATOR_DEFAULT_MODEL = "gpt-5.6-luna"
+# The house default for chat, quick answers and Codex. luna is the fast, cheap
+# tier of the 5.6 family; raise an individual one to terra or sol in Settings.
+DEFAULT_CHAT_MODEL = "gpt-5.6-luna"
+# Retired model names that still linger in older helper_config.json files.
+LEGACY_MODELS = frozenset({
+    "gpt-4o-mini", "gpt-4.1-nano", "gpt-4.1-mini", "gpt-4.1",
+    "gpt-5-mini", "gpt-5-nano", "gpt-5",
+    "gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano", "gpt-5.5",
+})
 # Text files the phone attaches are read this far and no further; the agent
 # loop trims them again before they reach the model.
 PHONE_TEXT_ATTACHMENT_LIMIT = 256 * 1024
@@ -68,7 +83,6 @@ WM_DROPFILES = 0x0233
 BRAND_FONT_PATH = BASE_DIR / "assets" / "fonts" / "Michroma-Regular.ttf"
 BRAND_FONT_FAMILY = "Michroma"
 STARTUP_FRAME_DIR = BASE_DIR / "assets" / "startup" / "aios-logo-reveal-frames"
-OPERATOR_SOUND_PATH = BASE_DIR / "assets" / "startup" / "aios-operator.wav"
 HELPER_HEARTBEAT_PATH = BASE_DIR / ".aios-helper-heartbeat"
 APP_ICON_PATH = BASE_DIR / "assets" / "aios-logo.ico"
 TRAY_ICON_PATH = BASE_DIR / "assets" / "rectangle-logo.ico"
@@ -126,8 +140,9 @@ TRAY_SHOW = 1001
 TRAY_HIDE = 1002
 TRAY_START_VOICE = 1003
 TRAY_RESTART_VOICE = 1004
-TRAY_RESTART_APP = 1005
-TRAY_QUIT = 1006
+TRAY_RESTART_MACROS = 1005
+TRAY_RESTART_APP = 1006
+TRAY_QUIT = 1007
 
 
 class POINT(ctypes.Structure):
@@ -175,7 +190,14 @@ class RGBQUAD(ctypes.Structure):
 class NativeOperatorOverlay:
     CLASS_NAME = "aiOSOperatorOverlay"
 
-    def __init__(self, owner, title_text="aiOPERATOR controlling computer", log_title="aiOPERATOR LOG", class_name=None):
+    def __init__(
+        self,
+        owner,
+        title_text="aiOPERATOR controlling computer",
+        log_title="aiOPERATOR LOG",
+        class_name=None,
+        compact=False,
+    ):
         self.owner = owner
         self.class_name = class_name or self.CLASS_NAME
         self.windows = {}
@@ -183,6 +205,7 @@ class NativeOperatorOverlay:
         self.log_text = ""
         self.title_text = title_text
         self.log_title = log_title
+        self.compact = bool(compact)
         self.placements = {}
         self.enabled = sys.platform.startswith("win")
         self._wndproc = None
@@ -244,7 +267,8 @@ class NativeOperatorOverlay:
         if not self.enabled or self.windows:
             return
         exstyle = WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE
-        for name in ("top", "bottom", "left", "right", "label", "log"):
+        names = ("log",) if self.compact else ("top", "bottom", "left", "right", "label", "log")
+        for name in names:
             hwnd = self.user32.CreateWindowExW(
                 exstyle,
                 self.class_name,
@@ -263,7 +287,8 @@ class NativeOperatorOverlay:
                 continue
             self.windows[name] = hwnd
             self.labels[hwnd] = name
-            self.user32.SetLayeredWindowAttributes(hwnd, 0, 210 if name == "log" else 190, LWA_ALPHA)
+            alpha = 238 if self.compact else 210 if name == "log" else 190
+            self.user32.SetLayeredWindowAttributes(hwnd, 0, alpha, LWA_ALPHA)
             # Keep the visible OPERATOR chrome out of every Windows capture path.
             if not self.user32.SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE):
                 self.user32.SetWindowDisplayAffinity(hwnd, WDA_MONITOR)
@@ -272,21 +297,33 @@ class NativeOperatorOverlay:
         self.ensure()
         if not self.windows:
             return
-        border = 8
         inset = 9
         left, top = int(monitor.left), int(monitor.top)
         width, height = int(monitor.width), int(monitor.height)
-        label_w = min(560, max(280, width - 120))
-        log_w = min(580, max(360, int(width * 0.34)))
-        log_h = min(190, max(120, int(height * 0.20)))
-        self.placements = {
-            "top": (left + inset, top + inset, max(1, width - inset * 2), border),
-            "bottom": (left + inset, top + height - inset - border, max(1, width - inset * 2), border),
-            "left": (left + inset, top + inset, border, max(1, height - inset * 2)),
-            "right": (left + width - inset - border, top + inset, border, max(1, height - inset * 2)),
-            "label": (left + max(20, (width - label_w) // 2), top + inset + 18, label_w, 38),
-            "log": (left + width - inset - log_w - 12, top + height - inset - log_h - 22, log_w, log_h),
-        }
+        if self.compact:
+            log_w = min(520, max(360, int(width * 0.30)))
+            log_h = min(150, max(112, int(height * 0.14)))
+            self.placements = {
+                "log": (
+                    left + width - inset - log_w - 18,
+                    top + height - inset - log_h - 24,
+                    log_w,
+                    log_h,
+                ),
+            }
+        else:
+            border = 8
+            label_w = min(560, max(280, width - 120))
+            log_w = min(580, max(360, int(width * 0.34)))
+            log_h = min(190, max(120, int(height * 0.20)))
+            self.placements = {
+                "top": (left + inset, top + inset, max(1, width - inset * 2), border),
+                "bottom": (left + inset, top + height - inset - border, max(1, width - inset * 2), border),
+                "left": (left + inset, top + inset, border, max(1, height - inset * 2)),
+                "right": (left + width - inset - border, top + inset, border, max(1, height - inset * 2)),
+                "label": (left + max(20, (width - label_w) // 2), top + inset + 18, label_w, 38),
+                "log": (left + width - inset - log_w - 12, top + height - inset - log_h - 22, log_w, log_h),
+            }
         for name, hwnd in self.windows.items():
             x, y, w, h = self.placements[name]
             # WS_EX_TOPMOST alone is not enough once another topmost or
@@ -312,7 +349,7 @@ class NativeOperatorOverlay:
             return
         alpha = int(175 + wave * 80)
         label_alpha = int(210 + wave * 45)
-        log_alpha = int(220 + wave * 30)
+        log_alpha = 238 if self.compact else int(220 + wave * 30)
         for name, hwnd in self.windows.items():
             value = log_alpha if name == "log" else label_alpha if name == "label" else alpha
             self.user32.SetLayeredWindowAttributes(hwnd, 0, max(0, min(255, value)), LWA_ALPHA)
@@ -325,8 +362,10 @@ class NativeOperatorOverlay:
                 )
             self.user32.InvalidateRect(hwnd, None, True)
 
-    def set_log(self, text):
+    def set_log(self, text, title=None):
         self.log_text = text or ""
+        if title:
+            self.log_title = str(title)
         hwnd = self.windows.get("log")
         if hwnd:
             self.user32.InvalidateRect(hwnd, None, True)
@@ -396,8 +435,9 @@ class NativeOperatorOverlay:
         accent_brush = self.gdi32.CreateSolidBrush(self._colorref(self.owner.c("accent")))
         try:
             self.user32.FillRect(hdc, ctypes.byref(rect), panel_brush)
-            frame = wintypes.RECT(rect.left, rect.top, rect.right, rect.top + 3)
-            self.user32.FillRect(hdc, ctypes.byref(frame), accent_brush)
+            if not self.compact:
+                frame = wintypes.RECT(rect.left, rect.top, rect.right, rect.top + 3)
+                self.user32.FillRect(hdc, ctypes.byref(frame), accent_brush)
         finally:
             self.gdi32.DeleteObject(panel_brush)
             self.gdi32.DeleteObject(accent_brush)
@@ -412,9 +452,9 @@ class NativeOperatorOverlay:
             self.gdi32.SelectObject(hdc, old)
             self.gdi32.DeleteObject(title_font)
 
-        text_rect = wintypes.RECT(rect.left + 12, rect.top + 34, rect.right - 12, rect.bottom - 10)
+        text_rect = wintypes.RECT(rect.left + 12, rect.top + 32, rect.right - 12, rect.bottom - 9)
         self.gdi32.SetTextColor(hdc, self._colorref(self.owner.c("text")))
-        font = self.gdi32.CreateFontW(-12, 0, 0, 0, 400, 0, 0, 0, 0, 0, 0, 5, 0, "Cascadia Code")
+        font = self.gdi32.CreateFontW(-13 if self.compact else -12, 0, 0, 0, 400, 0, 0, 0, 0, 0, 0, 5, 0, "Segoe UI")
         old = self.gdi32.SelectObject(hdc, font)
         try:
             text = self.log_text or "waiting..."
@@ -524,16 +564,16 @@ def claim_single_instance():
 
 DEFAULT_CONFIG = {
     "project_root": get_setting("COMPUTER_HELPER_PROJECT_ROOT", DEFAULT_PROJECT_ROOT),
-    "assistant_model": get_setting("COMPUTER_HELPER_MODEL", "gpt-4.1-nano"),
-    "codex_model": "gpt-4.1-nano",
+    "assistant_model": get_setting("COMPUTER_HELPER_MODEL", DEFAULT_CHAT_MODEL),
+    "codex_model": DEFAULT_CHAT_MODEL,
     "codex_reasoning": "none",
-    "quick_codex_model": "gpt-5-mini",
+    "quick_codex_model": DEFAULT_CHAT_MODEL,
     "quick_codex_reasoning": "none",
-    "chat_model": "gpt-5-mini",
+    "chat_model": DEFAULT_CHAT_MODEL,
     "openai_api_key": "",
     "codex_sandbox": "workspace-write",
     "window": "1120x720+520+90",
-    "chat_width": 330,
+    "chat_width": 380,
     "app_usage": {},
     "chat_history": [],
     "todos": [],
@@ -560,6 +600,11 @@ DEFAULT_CONFIG = {
         "enabled": False,
     },
     "voice_dictation": dict(DEFAULT_VOICE_DICTATION),
+    "dashboard": {
+        "notes": "",
+        "location": "Lerkil, Sweden",
+        "tickers": ["^OMX", "TSLA", "NVDA", "BTC-USD", "SEK=X"],
+    },
     "theme": {
         "accent": "#61dafb",
         "panel": "#101722",
@@ -678,16 +723,17 @@ def load_config():
     project_root = Path(str(config.get("project_root") or DEFAULT_PROJECT_ROOT))
     if project_root.drive and not Path(f"{project_root.drive}\\").exists():
         config["project_root"] = DEFAULT_PROJECT_ROOT
-    config.setdefault("assistant_model", "gpt-4.1-nano")
-    config.setdefault("codex_model", "gpt-4.1-nano")
+    config.setdefault("assistant_model", DEFAULT_CHAT_MODEL)
+    config.setdefault("codex_model", DEFAULT_CHAT_MODEL)
     config.setdefault("codex_reasoning", "none")
-    config.setdefault("quick_codex_model", "gpt-5-mini")
-    if config.get("quick_codex_model") in {"gpt-4.1-nano", "gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano", "gpt-5.5"}:
-        config["quick_codex_model"] = "gpt-5-mini"
+    config.setdefault("quick_codex_model", DEFAULT_CHAT_MODEL)
     config.setdefault("quick_codex_reasoning", "none")
-    config.setdefault("chat_model", "gpt-5-mini")
-    if config.get("chat_model") in {"gpt-4o-mini", "gpt-4.1-nano", "gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano", "gpt-5.5"}:
-        config["chat_model"] = "gpt-5-mini"
+    config.setdefault("chat_model", DEFAULT_CHAT_MODEL)
+    # Everything else in aiOS runs on the 5.6 family; these four were still
+    # pinned to retired names and showed up as "gpt-4.1-nano" in the UI.
+    for key in ("assistant_model", "codex_model", "quick_codex_model", "chat_model"):
+        if config.get(key) in LEGACY_MODELS:
+            config[key] = DEFAULT_CHAT_MODEL
     config.setdefault("openai_api_key", "")
     config.setdefault("codex_sandbox", "workspace-write")
     config.setdefault("todos", [])
@@ -700,6 +746,9 @@ def load_config():
     if config["ai_operator"].get("model") == "gpt-5.5":
         config["ai_operator"]["model"] = OPERATOR_DEFAULT_MODEL
     config["voice_dictation"] = merge_voice_dictation(config.get("voice_dictation"))
+    config["dashboard"] = merge_dict(DEFAULT_CONFIG["dashboard"], config.get("dashboard") or {})
+    if not isinstance(config["dashboard"].get("tickers"), list) or not config["dashboard"]["tickers"]:
+        config["dashboard"]["tickers"] = list(DEFAULT_CONFIG["dashboard"]["tickers"])
     migrate_legacy_todos(config)
     return config
 
@@ -1392,6 +1441,251 @@ def usage_text(limit, label):
     return f"{label} {remaining:.0f}% · {reset_text}"
 
 
+DASHBOARD_CACHE_PATH = BASE_DIR / ".aios-dashboard-cache.json"
+DASHBOARD_USER_AGENT = "aiOS-dashboard/1.0 (+local desktop app)"
+# code -> (label, glyph). Glyphs are Segoe UI Symbol characters, not emoji, so
+# they render in the same monochrome style as the rest of the panel.
+WEATHER_CODES = {
+    0: ("Clear", "☀"),
+    1: ("Mostly clear", "☀"),
+    2: ("Partly cloudy", "⛅"),
+    3: ("Cloudy", "☁"),
+    45: ("Fog", "≈"),
+    48: ("Rime fog", "≈"),
+    51: ("Light drizzle", "☂"),
+    53: ("Drizzle", "☂"),
+    55: ("Heavy drizzle", "☂"),
+    56: ("Freezing drizzle", "☂"),
+    57: ("Freezing drizzle", "☂"),
+    61: ("Light rain", "☂"),
+    63: ("Rain", "☂"),
+    65: ("Heavy rain", "☂"),
+    66: ("Freezing rain", "☂"),
+    67: ("Freezing rain", "☂"),
+    71: ("Light snow", "❄"),
+    73: ("Snow", "❄"),
+    75: ("Heavy snow", "❄"),
+    77: ("Snow grains", "❄"),
+    80: ("Light showers", "☂"),
+    81: ("Showers", "☂"),
+    82: ("Heavy showers", "☂"),
+    85: ("Snow showers", "❄"),
+    86: ("Snow showers", "❄"),
+    95: ("Thunder", "⚡"),
+    96: ("Thunder, hail", "⚡"),
+    99: ("Thunder, hail", "⚡"),
+}
+TICKER_LABELS = {
+    "^OMX": "OMX 30",
+    "^GSPC": "S&P 500",
+    "^IXIC": "Nasdaq",
+    "SEK=X": "USD/SEK",
+    "EURSEK=X": "EUR/SEK",
+    "BTC-USD": "Bitcoin",
+    "ETH-USD": "Ethereum",
+}
+
+
+def http_json(url, timeout=12):
+    request = urllib.request.Request(url, headers={"User-Agent": DASHBOARD_USER_AGENT})
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8", "replace"))
+
+
+def load_dashboard_cache():
+    """Last fetched weather/markets, so a fresh launch shows numbers instantly."""
+    try:
+        with DASHBOARD_CACHE_PATH.open("r", encoding="utf-8") as file:
+            data = json.load(file)
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def save_dashboard_cache(cache):
+    try:
+        with DASHBOARD_CACHE_PATH.open("w", encoding="utf-8") as file:
+            json.dump(cache, file)
+    except OSError:
+        pass
+
+
+def weather_code_text(code):
+    try:
+        return WEATHER_CODES[int(code)]
+    except (TypeError, ValueError, KeyError):
+        return ("Weather", "☁")
+
+
+def geocode_location(name):
+    url = (
+        "https://geocoding-api.open-meteo.com/v1/search"
+        f"?name={urllib.parse.quote(str(name))}&count=1&language=en&format=json"
+    )
+    results = (http_json(url).get("results") or [])
+    if not results:
+        raise RuntimeError(f"Location not found: {name}")
+    first = results[0]
+    return float(first["latitude"]), float(first["longitude"]), str(first.get("name") or name)
+
+
+def fetch_weather_snapshot(location):
+    latitude, longitude, label = geocode_location(location)
+    url = (
+        "https://api.open-meteo.com/v1/forecast"
+        f"?latitude={latitude}&longitude={longitude}"
+        "&current=temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,wind_speed_10m"
+        "&hourly=temperature_2m,precipitation_probability,weather_code"
+        "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,sunrise,sunset"
+        "&forecast_days=5&timezone=auto"
+    )
+    data = http_json(url)
+    current = data.get("current") or {}
+    daily = data.get("daily") or {}
+    hourly = data.get("hourly") or {}
+
+    days = []
+    for index, day in enumerate((daily.get("time") or [])[:5]):
+        try:
+            date = datetime.fromisoformat(day)
+        except ValueError:
+            continue
+        days.append(
+            {
+                "name": "Today" if index == 0 else date.strftime("%a"),
+                "high": daily.get("temperature_2m_max", [None] * 5)[index],
+                "low": daily.get("temperature_2m_min", [None] * 5)[index],
+                "rain": daily.get("precipitation_probability_max", [None] * 5)[index],
+                "code": daily.get("weather_code", [0] * 5)[index],
+            }
+        )
+
+    # Next few hours, starting from the current hour.
+    hours = []
+    times = hourly.get("time") or []
+    now_key = datetime.now().strftime("%Y-%m-%dT%H:00")
+    start = times.index(now_key) if now_key in times else 0
+    for index in range(start, min(start + 18, len(times))):
+        hours.append(
+            {
+                "time": times[index][11:16],
+                "temp": (hourly.get("temperature_2m") or [None])[index],
+                "rain": (hourly.get("precipitation_probability") or [None])[index],
+                "code": (hourly.get("weather_code") or [0])[index],
+            }
+        )
+
+    return {
+        "location": label,
+        "temp": current.get("temperature_2m"),
+        "feels": current.get("apparent_temperature"),
+        "humidity": current.get("relative_humidity_2m"),
+        "wind": current.get("wind_speed_10m"),
+        "code": current.get("weather_code", 0),
+        "sunrise": (daily.get("sunrise") or [""])[0][11:16],
+        "sunset": (daily.get("sunset") or [""])[0][11:16],
+        "days": days,
+        "hours": hours,
+        "updated": time.time(),
+    }
+
+
+def fetch_market_quotes(symbols):
+    quotes = []
+    for symbol in symbols:
+        symbol = str(symbol).strip()
+        if not symbol:
+            continue
+        try:
+            url = (
+                "https://query1.finance.yahoo.com/v8/finance/chart/"
+                f"{urllib.parse.quote(symbol)}?range=1d&interval=15m"
+            )
+            result = (http_json(url).get("chart") or {}).get("result") or []
+            if not result:
+                raise RuntimeError("no data")
+            meta = result[0].get("meta") or {}
+            closes = ((result[0].get("indicators") or {}).get("quote") or [{}])[0].get("close") or []
+            spark = [float(value) for value in closes if value is not None]
+            price = meta.get("regularMarketPrice")
+            previous = meta.get("chartPreviousClose") or meta.get("previousClose")
+            change = None
+            if price is not None and previous:
+                change = (float(price) - float(previous)) / float(previous) * 100.0
+            quotes.append(
+                {
+                    "symbol": symbol,
+                    "label": TICKER_LABELS.get(symbol.upper(), symbol.replace("-USD", "").replace("=X", "")),
+                    "name": str(meta.get("shortName") or symbol),
+                    "price": float(price) if price is not None else None,
+                    "change": change,
+                    "currency": str(meta.get("currency") or ""),
+                    "spark": spark[-40:],
+                }
+            )
+        except Exception as exc:
+            quotes.append(
+                {
+                    "symbol": symbol,
+                    "label": TICKER_LABELS.get(symbol.upper(), symbol),
+                    "name": symbol,
+                    "price": None,
+                    "change": None,
+                    "currency": "",
+                    "spark": [],
+                    "error": str(exc)[:60],
+                }
+            )
+    return {"quotes": quotes, "updated": time.time()}
+
+
+def format_price(value, currency=""):
+    if value is None:
+        return "--"
+    value = float(value)
+    if value >= 10000:
+        text = f"{value:,.0f}".replace(",", " ")
+    elif value >= 100:
+        text = f"{value:,.2f}".replace(",", " ")
+    else:
+        text = f"{value:.4f}".rstrip("0").rstrip(".")
+    symbols = {"USD": "$", "SEK": "", "EUR": "€"}
+    prefix = symbols.get(currency.upper(), "")
+    return f"{prefix}{text}"
+
+
+def query_nvidia_gpu():
+    try:
+        raw = subprocess.check_output(
+            [
+                "nvidia-smi",
+                "--query-gpu=name,temperature.gpu,utilization.gpu,memory.used,memory.total,power.draw",
+                "--format=csv,noheader,nounits",
+            ],
+            text=True,
+            timeout=3,
+            creationflags=CREATE_NO_WINDOW,
+        )
+    except Exception:
+        return None
+    parts = [part.strip() for part in raw.strip().splitlines()[0].split(",")]
+    if len(parts) < 6:
+        return None
+    def number(text):
+        try:
+            return float(text)
+        except ValueError:
+            return None
+    return {
+        "name": parts[0].replace("NVIDIA ", ""),
+        "temp": number(parts[1]),
+        "util": number(parts[2]),
+        "mem_used": number(parts[3]),
+        "mem_total": number(parts[4]),
+        "power": number(parts[5]),
+    }
+
+
 class ScrollFrame(tk.Frame):
     _instances = []
 
@@ -1467,6 +1761,10 @@ class HelperOverlay:
         self.shortcuts = start_menu_shortcuts()
         self.apps = self._discover_apps()
         self.active_tab = "Dashboard"
+        # Which sub-page of Settings is showing; survives tab switches.
+        self.settings_page = "General"
+        self.settings_status_var = None
+        self._settings_status_after = None
         self.active_project = None
         self.page_view = None
         self.busy = False
@@ -1480,6 +1778,15 @@ class HelperOverlay:
         self._ui_queue = queue.Queue()
         self.thinking_step = 0
         self.thinking_after = None
+        self.thinking_frame = None
+        self.thinking_label = None
+        self._chat_embeds = []
+        self._live_tool_count = 0
+        self._agent_turn_active = False
+        self._stream_reply_frame = None
+        self._stream_reply_var = None
+        self._stream_reply_text = ""
+        self._stream_reply_meta = None
         self.drag_x = 0
         self.drag_y = 0
         self.chat_resize_start_x = 0
@@ -1487,6 +1794,12 @@ class HelperOverlay:
         self._create_menu_popup = None
         self._autosave_after = None
         self._autosave_project_path = None
+        self._dash_cache = load_dashboard_cache()
+        self._dash_paint = {}
+        self._dash_fetching = set()
+        self._dash_notes_after = None
+        self._dash_notes_widget = None
+        self._dash_net_sample = None
         self._open_with_popup = None
         self._open_with_close_after = None
         self._open_with_target = None
@@ -1506,11 +1819,14 @@ class HelperOverlay:
         self._bottom_tray = None
         self._tray_anim_job = None
         self._tray_hide_job = None
-        self._tray_current_h = 10
+        self._tray_current_h = 30
+        self._tray_current_relwidth = 0.20
         self._tray_open = False
-        self._tray_target_h = 66
-        self._tray_peek_h = 10
-        self._operator_sound_last_at = 0.0
+        self._tray_target_h = 268
+        self._tray_peek_h = 30
+        self._tray_open_relwidth = 0.88
+        self._tray_peek_relwidth = 0.20
+        self.quick_tools_handle = None
         self.screen_record_process = None
         self.screen_record_path = None
         self.screen_record_started_at = 0.0
@@ -1522,6 +1838,9 @@ class HelperOverlay:
         self.screen_record_timer_job = None
         self.screen_record_poll_job = None
         self.screen_record_area_overlay = None
+        self.phone_photos_popup = None
+        self.phone_photos_poll_job = None
+        self.phone_photos_qr_image = None
         self.screen_record_monitors = []
         self.screen_record_windows = []
         self.screen_record_monitor_var = None
@@ -1540,6 +1859,9 @@ class HelperOverlay:
         self.agent_operator_tk_preview = None
         self.agent_operator_last_clicks = []
         self.agent_operator_log_buffer = []
+        self.agent_operator_overlay_step = 0
+        self.agent_operator_overlay_thought = "Looking at the screen..."
+        self.agent_operator_overlay_action = ""
         self.agent_operator_booted = False
         self.agent_operator_booting = False
         self.agent_operator_preview_scale = 1.0
@@ -1636,7 +1958,7 @@ class HelperOverlay:
         self.root.bind("<Destroy>", self._on_root_destroy, add="+")
         self.root.withdraw()
         self.brand_font_family = self._init_brand_font()
-        self.agent_operator_native_overlay = NativeOperatorOverlay(self)
+        self.agent_operator_native_overlay = NativeOperatorOverlay(self, compact=True)
         self.phone_control_native_overlay = NativeOperatorOverlay(
             self,
             "Phone Control",
@@ -1657,6 +1979,7 @@ class HelperOverlay:
         self._poll_ui_queue()
         self._poll_agent_operator_events()
         self._ensure_voice_server()
+        self._ensure_hotkeys()
         self.root.after(100, self._start_agent_operator_load)
         self.root.after(400, self._protect_aios_windows_from_capture)
         self.root.after(1200, self._ensure_phone_relay)
@@ -1762,57 +2085,43 @@ class HelperOverlay:
         head_left.pack(side="left", fill="x", expand=True)
         tk.Label(
             head_left,
-            text="Assistant",
+            text="Agent",
             bg=self.c("surface"),
             fg=self.c("text"),
             font=self.font(10, "bold"),
         ).pack(anchor="w")
-        model_label = self.config.get("chat_model") or "gpt-5-mini"
+        voice_cfg = self.config.get("voice_dictation") or {}
+        model_label = voice_cfg.get("agent_model") or DEFAULT_VOICE_DICTATION.get("agent_model") or "gpt-5.6-luna"
         key_ok = bool(self.get_openai_api_key())
-        codex_ok, codex_label = codex_auth_info()
-        if key_ok:
-            auth_label = "API key ready"
-        elif codex_ok:
-            auth_label = f"Codex {codex_label}"
-        else:
-            auth_label = "No auth"
+        auth_label = "API key ready" if key_ok else "No API key"
         meta = f"{model_label} · {auth_label}"
         self.chat_account_label = tk.Label(
             head_left,
             text=meta,
             bg=self.c("surface"),
-            fg=self.c("success") if (key_ok or codex_ok) else self.c("danger"),
+            fg=self.c("success") if key_ok else self.c("danger"),
             font=self.font(8),
         )
         self.chat_account_label.pack(anchor="w")
         chat_actions = tk.Frame(chat_head, bg=self.c("surface"))
         chat_actions.pack(side="right")
-        self.header_chip(chat_actions, "Reset", self.reset_chat, hint="Clear chat").pack(side="right", padx=(4, 0))
-        self.header_chip(chat_actions, "Login", self.codex_login, hint="Sign in to Codex").pack(side="right", padx=(4, 0))
-        self.header_chip(chat_actions, "Settings", lambda: self.render_tab("Settings"), hint="OpenAI key & model").pack(
+        self.header_chip(chat_actions, "Reset", self.reset_chat, hint="Clear agent chat").pack(side="right", padx=(4, 0))
+        self.header_chip(chat_actions, "Settings", lambda: self.render_tab("Settings"), hint="OpenAI key & voice agent").pack(
             side="right"
         )
 
         chat_box = tk.Frame(chat_content, bg=self.c("surface"))
         chat_box.pack(fill="both", expand=True, padx=(2, 0), pady=(0, 6))
-        self.chat = tk.Text(
+        self.chat_canvas = tk.Canvas(
             chat_box,
             bg=self.c("surface"),
-            fg=self.c("text"),
-            insertbackground=self.c("text"),
-            selectbackground="#29415d",
-            relief="flat",
+            highlightthickness=0,
             bd=0,
-            padx=14,
-            pady=8,
-            wrap="word",
-            font=self.font(9),
-            state="disabled",
         )
         self.chat_scroll = tk.Scrollbar(
             chat_box,
             orient="vertical",
-            command=self.chat.yview,
+            command=self.chat_canvas.yview,
             width=8,
             bd=0,
             relief="flat",
@@ -1821,90 +2130,42 @@ class HelperOverlay:
             activebackground=self.c("accent"),
             highlightthickness=0,
         )
-        self.chat.configure(yscrollcommand=self.chat_scroll.set)
+        self.chat_canvas.configure(yscrollcommand=self.chat_scroll.set)
         self.chat_scroll.pack(side="right", fill="y", padx=(0, 2))
-        self.chat.pack(side="left", fill="both", expand=True)
-        self.chat.tag_configure(
-            "user_label",
-            foreground="#95c7ff",
-            font=self.font(8, "bold"),
-            spacing1=8,
-            spacing3=2,
-        )
-        self.chat.tag_configure("user", foreground=self.c("text"), spacing3=2, lmargin1=12, lmargin2=12)
-        assistant_bg = self.blend_color(self.c("surface"), self.c("text"), 0.08)
-        assistant_label_kwargs = dict(
-            foreground=self.c("accent"),
-            background=assistant_bg,
-            font=self.brand_font(8),
-            spacing1=10,
-            spacing3=4,
-            lmargin1=14,
-            lmargin2=14,
-            rmargin=14,
-        )
-        assistant_kwargs = dict(
-            foreground=self.c("text"),
-            background=assistant_bg,
-            spacing1=2,
-            spacing3=10,
-            lmargin1=14,
-            lmargin2=14,
-            rmargin=14,
-            font=self.font(9),
-        )
-        for key in ("lmargincolor", "rmargincolor"):
-            assistant_label_kwargs[key] = assistant_bg
-            assistant_kwargs[key] = assistant_bg
-        try:
-            self.chat.tag_configure("assistant_label", **assistant_label_kwargs)
-        except tk.TclError:
-            assistant_label_kwargs.pop("lmargincolor", None)
-            assistant_label_kwargs.pop("rmargincolor", None)
-            self.chat.tag_configure("assistant_label", **assistant_label_kwargs)
-        try:
-            self.chat.tag_configure("assistant", **assistant_kwargs)
-        except tk.TclError:
-            assistant_kwargs.pop("lmargincolor", None)
-            assistant_kwargs.pop("rmargincolor", None)
-            self.chat.tag_configure("assistant", **assistant_kwargs)
-        self.chat.tag_configure("heading", foreground=self.c("accent"), font=self.font(10, "bold"), spacing3=4)
-        self.chat.tag_configure("code", foreground="#d6e2ff", background="#080d14", font=("Consolas", max(8, int(self.c("font_size")) - 1)))
-        self.chat.tag_configure("command", foreground=self.c("success"), font=("Consolas", max(8, int(self.c("font_size")) - 1), "bold"))
-        self.chat.tag_configure("diff_add", foreground="#7ee787", font=("Consolas", max(8, int(self.c("font_size")) - 1)))
-        self.chat.tag_configure("diff_del", foreground="#ff7b72", font=("Consolas", max(8, int(self.c("font_size")) - 1)))
-        self.chat.tag_configure(
-            "muted",
-            foreground=self.c("muted"),
-            background=self.c("surface"),
-            font=self.font(8),
-        )
-        meta_kwargs = dict(
-            foreground=self.c("muted"),
-            background=assistant_bg,
-            font=self.font(8, "italic"),
-            spacing3=10,
-            lmargin1=14,
-            lmargin2=14,
-            rmargin=14,
-        )
-        for key in ("lmargincolor", "rmargincolor"):
-            meta_kwargs[key] = assistant_bg
-        try:
-            self.chat.tag_configure("assistant_meta", **meta_kwargs)
-        except tk.TclError:
-            meta_kwargs.pop("lmargincolor", None)
-            meta_kwargs.pop("rmargincolor", None)
-            self.chat.tag_configure("assistant_meta", **meta_kwargs)
+        self.chat_canvas.pack(side="left", fill="both", expand=True)
+        self.chat_inner = tk.Frame(self.chat_canvas, bg=self.c("surface"))
+        self._chat_canvas_window = self.chat_canvas.create_window((0, 0), window=self.chat_inner, anchor="nw")
+        self.chat_inner.bind("<Configure>", self._chat_on_inner_configure)
+        self.chat_canvas.bind("<Configure>", self._chat_on_canvas_configure)
+        self.chat_canvas.bind("<Enter>", lambda _e: self.chat_canvas.bind_all("<MouseWheel>", self._chat_on_mousewheel))
+        self.chat_canvas.bind("<Leave>", lambda _e: self.chat_canvas.unbind_all("<MouseWheel>"))
+        # Keep self.chat as the scroll surface for older hasattr checks.
+        self.chat = self.chat_inner
 
+        assistant_bg = self.blend_color(self.c("surface"), self.c("text"), 0.08)
         self.thinking_canvas = None
+        self.thinking_frame = None
+        self.thinking_label = None
+        self._chat_embeds = []
+        self._live_tool_count = 0
+        self._agent_turn_active = False
+        self._live_turn_col = None
+        self._live_tools_box = None
         self._assistant_bg = assistant_bg
-        self.thinking_status_text = "thinking"
+        self._user_bubble_bg = self.blend_color(self.c("surface"), self.c("accent"), 0.22)
+        self.thinking_status_text = "Thinking"
 
         bottom = tk.Frame(chat_content, bg=self.c("surface"))
         bottom.pack(fill="x", padx=12, pady=(0, 12))
-        self.input = tk.Text(
+        input_wrap = tk.Frame(
             bottom,
+            bg=self.c("panel2"),
+            highlightthickness=1,
+            highlightbackground=self.blend_color(self.c("panel2"), self.c("accent"), 0.18),
+        )
+        input_wrap.pack(side="left", fill="both", expand=True)
+        self.input = tk.Text(
+            input_wrap,
             height=3,
             bg=self.c("panel2"),
             fg=self.c("text"),
@@ -1917,12 +2178,12 @@ class HelperOverlay:
             wrap="word",
             font=self.font(9),
         )
-        self.input.pack(side="left", fill="both", expand=True)
+        self.input.pack(fill="both", expand=True)
         self.send_button = self.button(bottom, "Send", self.send, compact=True)
         self.send_button.pack(side="right", fill="y", padx=(8, 0))
 
     def render_tab(self, tab):
-        previous_tab = self.active_tab
+        self._dash_flush_notes()
         self.active_tab = tab
         self.page_view = None
         self._build_nav()
@@ -1938,8 +2199,6 @@ class HelperOverlay:
         elif tab == "Drop":
             self.render_drop()
         elif tab == "AI Operator":
-            if previous_tab != "AI Operator":
-                self._play_operator_sound()
             self.render_ai_operator()
         elif tab == "Settings":
             self.render_settings()
@@ -2005,46 +2264,692 @@ class HelperOverlay:
     def render_dashboard(self):
         self._close_calendar_popup()
         self._close_create_menu()
+        self._dash_paint = {}
+
         head = tk.Frame(self.page, bg=self.c("panel"))
-        head.pack(fill="x", pady=(0, 12))
+        head.pack(fill="x", pady=(0, 10))
         tk.Label(head, text="Dashboard", bg=self.c("panel"), fg=self.c("text"), font=self.font(18, "bold")).pack(
             side="left"
         )
         self.header_btn(head, "+", self._toggle_create_menu, hint="New To-Do or Project").pack(side="right")
+        self.header_btn(head, "\u21bb", self.refresh_dashboard_data, hint="Refresh weather and markets").pack(
+            side="right", padx=(0, 6)
+        )
 
         scroll = ScrollFrame(self.page, self.c("panel"))
         scroll.pack(fill="both", expand=True)
         body = scroll.inner
+        body.columnconfigure(0, weight=1, uniform="dash")
+        body.columnconfigure(1, weight=1, uniform="dash")
 
-        todos = self.dashboard_todos()
-        todo_card = self.card(body)
-        todo_card.pack(fill="x", pady=(0, 12))
-        self.section(todo_card, "To-Dos")
-        if not todos:
-            self.muted(todo_card, "No active to-dos. Tap + to add one with a deadline.").pack(
-                anchor="w", padx=14, pady=(0, 14)
+        self._dash_hero(body).grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+        self._dash_actions(body).grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+        self._dash_markets_card(body).grid(row=2, column=0, sticky="nsew", padx=(0, 5), pady=(0, 10))
+        self._dash_system_card(body).grid(row=2, column=1, sticky="nsew", padx=(5, 0), pady=(0, 10))
+        self._dash_notes_card(body).grid(row=3, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+        self._dash_todo_card(body).grid(row=4, column=0, sticky="nsew", padx=(0, 5), pady=(0, 12))
+        self._dash_forecast_card(body).grid(row=4, column=1, sticky="nsew", padx=(5, 0), pady=(0, 12))
+
+        self._dash_refresh_weather()
+        self._dash_refresh_markets()
+        self._dash_refresh_gpu()
+
+    # ------------------------------------------------------------------ cards
+
+    def dash_card(self, parent, title, meta=""):
+        """A titled panel card: returns (card, body). card.meta_label is the right-hand note."""
+        border = self.blend_color(self.c("surface"), self.c("muted"), 0.16)
+        card = tk.Frame(parent, bg=self.c("surface"), highlightbackground=border, highlightthickness=1, bd=0)
+        head = tk.Frame(card, bg=self.c("surface"))
+        head.pack(fill="x", padx=14, pady=(11, 0))
+        tk.Label(
+            head, text=title.upper(), bg=self.c("surface"), fg=self.c("muted"), font=self.font(8, "bold")
+        ).pack(side="left")
+        card.meta_label = tk.Label(
+            head,
+            text=meta,
+            bg=self.c("surface"),
+            fg=self.blend_color(self.c("muted"), self.c("surface"), 0.42),
+            font=self.font(8),
+        )
+        card.meta_label.pack(side="right")
+        body = tk.Frame(card, bg=self.c("surface"))
+        body.pack(fill="both", expand=True, padx=14, pady=(8, 12))
+        card.body = body
+        return card
+
+    def _dash_greeting(self):
+        hour = datetime.now().hour
+        if hour < 5:
+            return "Still up"
+        if hour < 10:
+            return "Good morning"
+        if hour < 14:
+            return "Good day"
+        if hour < 18:
+            return "Good afternoon"
+        return "Good evening"
+
+    def _dash_hero(self, parent):
+        accent = self.c("accent")
+        bg = self.blend_color(self.c("surface"), accent, 0.05)
+        border = self.blend_color(bg, accent, 0.22)
+        hero = tk.Frame(parent, bg=bg, highlightbackground=border, highlightthickness=1, bd=0)
+
+        # The weather column is packed first so it always keeps its full width;
+        # the clock column takes whatever is left over.
+        right = tk.Frame(hero, bg=bg)
+        right.pack(side="right", fill="y", padx=(10, 16), pady=14)
+        self._dash_weather_block(right, bg)
+
+        left = tk.Frame(hero, bg=bg)
+        left.pack(side="left", fill="both", expand=True, padx=(16, 10), pady=14)
+        tk.Label(left, text=self._dash_greeting(), bg=bg, fg=accent, font=self.font(9, "bold")).pack(anchor="w")
+
+        clock_row = tk.Frame(left, bg=bg)
+        clock_row.pack(anchor="w", pady=(2, 0))
+        clock = tk.Label(clock_row, text="--:--", bg=bg, fg=self.c("text"), font=self.font(32, "bold"))
+        clock.pack(side="left")
+        seconds = tk.Label(
+            clock_row, text="00", bg=bg, fg=self.blend_color(self.c("muted"), bg, 0.25), font=self.font(11, "bold"), width=2
+        )
+        seconds.pack(side="left", anchor="s", pady=(0, 8), padx=(4, 0))
+
+        date_label = tk.Label(left, text="", bg=bg, fg=self.c("text"), font=self.font(10))
+        date_label.pack(anchor="w")
+        progress = tk.Canvas(left, height=6, bg=bg, highlightthickness=0, bd=0)
+        progress.pack(fill="x", pady=(10, 4))
+        span_label = tk.Label(left, text="", bg=bg, fg=self.c("muted"), font=self.font(8))
+        span_label.pack(anchor="w")
+
+        self._dash_tick(clock, seconds, date_label, progress, span_label)
+        return hero
+
+    def _dash_weather_block(self, parent, bg):
+        top = tk.Frame(parent, bg=bg)
+        top.pack(anchor="e")
+        glyph = tk.Label(top, text="\u2601", bg=bg, fg=self.c("accent"), font=("Segoe UI Symbol", 26))
+        glyph.pack(side="left", padx=(0, 8))
+        temp = tk.Label(top, text="--\u00b0", bg=bg, fg=self.c("text"), font=self.font(26, "bold"))
+        temp.pack(side="left")
+        condition = tk.Label(parent, text="Loading weather...", bg=bg, fg=self.c("text"), font=self.font(10))
+        condition.pack(anchor="e")
+        detail = tk.Label(parent, text="", bg=bg, fg=self.c("muted"), font=self.font(8))
+        detail.pack(anchor="e")
+        sun = tk.Label(parent, text="", bg=bg, fg=self.blend_color(self.c("muted"), bg, 0.3), font=self.font(8))
+        sun.pack(anchor="e", pady=(6, 0))
+
+        def paint():
+            data = self._dash_cache.get("weather") or {}
+            if data.get("error") or data.get("temp") is None:
+                condition.configure(text="Weather unavailable")
+                detail.configure(text=str(data.get("error", ""))[:40])
+                return
+            label, symbol = weather_code_text(data.get("code"))
+            glyph.configure(text=symbol)
+            temp.configure(text=f"{round(float(data['temp']))}\u00b0")
+            condition.configure(text=f"{label} \u00b7 {data.get('location', '')}")
+            bits = []
+            if data.get("feels") is not None:
+                bits.append(f"feels {round(float(data['feels']))}\u00b0")
+            if data.get("wind") is not None:
+                bits.append(f"wind {round(float(data['wind']))} km/h")
+            if data.get("humidity") is not None:
+                bits.append(f"{round(float(data['humidity']))}% rh")
+            detail.configure(text="  \u00b7  ".join(bits))
+            if data.get("sunrise") and data.get("sunset"):
+                sun.configure(text=f"\u2191 {data['sunrise']}   \u2193 {data['sunset']}")
+
+        self._dash_paint["weather_now"] = (condition, paint)
+        paint()
+
+    def _dash_tick(self, clock, seconds, date_label, progress, span_label):
+        if not clock.winfo_exists():
+            return
+        now = datetime.now()
+        clock.configure(text=now.strftime("%H:%M"))
+        seconds.configure(text=now.strftime("%S"))
+        date_label.configure(text=now.strftime("%A, %d %B %Y").replace(" 0", " "))
+
+        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        elapsed = (now - start).total_seconds() / 86400.0
+        week = now.isocalendar()[1]
+        day_of_year = int(now.strftime("%j"))
+        year_days = 366 if (now.year % 4 == 0 and (now.year % 100 != 0 or now.year % 400 == 0)) else 365
+        span_label.configure(
+            text=f"week {week}  \u00b7  day {day_of_year} of {year_days}  \u00b7  {int(round((1 - elapsed) * 24))}h left today"
+        )
+        self._dash_draw_day_bar(progress, elapsed)
+        self.root.after(1000, lambda: self._dash_tick(clock, seconds, date_label, progress, span_label))
+
+    def _dash_draw_day_bar(self, canvas, elapsed):
+        if not canvas.winfo_exists():
+            return
+        width = canvas.winfo_width()
+        if width <= 1:
+            canvas.after(60, lambda: self._dash_draw_day_bar(canvas, elapsed))
+            return
+        bg = canvas.cget("bg")
+        canvas.delete("all")
+        track = self.blend_color(bg, self.c("muted"), 0.28)
+        canvas.create_rectangle(0, 1, width, 5, fill=track, outline="")
+        canvas.create_rectangle(0, 1, max(2, width * elapsed), 5, fill=self.c("accent"), outline="")
+        weather = self._dash_cache.get("weather") or {}
+        for key, color in (("sunrise", "#ffcf70"), ("sunset", "#ff9b6a")):
+            stamp = str(weather.get(key) or "")
+            if len(stamp) == 5 and ":" in stamp:
+                hour, minute = stamp.split(":")
+                position = (int(hour) * 60 + int(minute)) / 1440.0 * width
+                canvas.create_rectangle(position - 1, 0, position + 1, 6, fill=color, outline="")
+
+    def _dash_actions(self, parent):
+        row = tk.Frame(parent, bg=self.c("panel"))
+        actions = (
+            ("Codex", lambda: self.render_tab("Codex"), "Open the Codex tab"),
+            ("OPERATOR", lambda: self.render_tab("AI Operator"), "Hand the mouse to the agent"),
+            ("Drop", lambda: self.render_tab("Drop"), "Drop files in"),
+            ("Phone \u2192 PC", self.open_phone_photos, "Send photos from your phone"),
+            ("Downloads", self.open_downloads_folder, "Open the downloads folder"),
+            ("Record", self.open_screen_recorder_menu, "Record the screen"),
+            ("Pad", self._dash_start_macropad, "Start the macropad controller"),
+        )
+        for index, (label, command, hint) in enumerate(actions):
+            self.header_chip(row, label, command, hint=hint).pack(side="left", padx=(0 if index == 0 else 5, 0))
+        return row
+
+    def _find_macropad_script(self):
+        """Locate the ESP32 macro pad app (macro_pad.py)."""
+        candidates = [
+            Path(r"C:\1 - Projects\macro keybaord\macro_pad.py"),
+            Path.home() / "Documents" / "macro keybaord" / "macro_pad.py",
+            Path(__file__).resolve().parent.parent / "macro keybaord" / "macro_pad.py",
+        ]
+        for path in candidates:
+            if path.exists():
+                return path
+        return None
+
+    def _macropad_running(self):
+        if not sys.platform.startswith("win"):
+            return False
+        try:
+            completed = subprocess.run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-Command",
+                    (
+                        "(Get-CimInstance Win32_Process | Where-Object { "
+                        "$_.CommandLine -like '*macro_pad.py*' "
+                        "} | Measure-Object).Count"
+                    ),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=3,
+                creationflags=CREATE_NO_WINDOW,
             )
-        else:
-            list_frame = tk.Frame(todo_card, bg=self.c("surface"))
-            list_frame.pack(fill="x", padx=12, pady=(0, 12))
-            for project_path, meta in todos:
-                self.dashboard_todo_row(list_frame, project_path, meta).pack(fill="x", pady=(0, 6))
+            return int((completed.stdout or "0").strip() or "0") > 0
+        except (OSError, subprocess.TimeoutExpired, ValueError):
+            return False
 
-        recent_names = {p.name for p, _m in todos}
-        recent = [p for p in self.projects() if p.name not in recent_names][:6]
-        recent_card = self.card(body)
-        recent_card.pack(fill="x")
-        self.section(recent_card, "Recent Projects")
-        if not recent:
-            self.muted(recent_card, "No other projects yet.").pack(anchor="w", padx=14, pady=(0, 14))
+    def _start_macropad_app(self):
+        script = self._find_macropad_script()
+        if script is None:
+            return False, "Macropad app not found (macro_pad.py)."
+        if self._macropad_running():
+            return True, "Macropad already running."
+        pythonw = self._find_pythonw() or sys.executable
+        try:
+            creationflags = 0x00000008 if sys.platform.startswith("win") else 0  # DETACHED_PROCESS
+            subprocess.Popen(
+                [pythonw, "-B", str(script), "--hidden"],
+                cwd=str(script.parent),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+                creationflags=creationflags,
+            )
+            return True, "Macropad started."
+        except OSError as exc:
+            return False, f"Could not start macropad: {exc}"
+
+    def _dash_start_macropad(self):
+        """Dashboard Pad: start the ESP32 macropad app + ensure AHK hotkeys."""
+        ok, msg = self._start_macropad_app()
+        # Dictate / open-aiOS keys still need autocorrect.ahk.
+        try:
+            self._ensure_hotkeys()
+        except Exception:
+            pass
+        try:
+            self.local_reply(msg)
+        except Exception:
+            pass
+
+    def _dash_markets_card(self, parent):
+        card = self.dash_card(parent, "Markets", "--")
+        body = card.body
+        body.columnconfigure(0, weight=1)
+        rows = []
+        tickers = list((self.config.get("dashboard") or {}).get("tickers") or [])
+        for index, symbol in enumerate(tickers[:6]):
+            name = tk.Label(
+                body,
+                text=TICKER_LABELS.get(symbol.upper(), symbol),
+                bg=self.c("surface"),
+                fg=self.c("text"),
+                font=self.font(9, "bold"),
+                anchor="w",
+            )
+            name.grid(row=index, column=0, sticky="w", pady=3)
+            spark = tk.Canvas(body, width=58, height=20, bg=self.c("surface"), highlightthickness=0, bd=0)
+            spark.grid(row=index, column=1, padx=6)
+            price = tk.Label(body, text="--", bg=self.c("surface"), fg=self.c("text"), font=self.font(9), anchor="e")
+            price.grid(row=index, column=2, sticky="e")
+            change = tk.Label(
+                body, text="--", bg=self.c("surface"), fg=self.c("muted"), font=self.font(9, "bold"), anchor="e", width=7
+            )
+            change.grid(row=index, column=3, sticky="e", padx=(6, 0))
+            rows.append((symbol, spark, price, change))
+
+        def paint():
+            data = self._dash_cache.get("markets") or {}
+            quotes = {quote["symbol"]: quote for quote in data.get("quotes", [])}
+            for symbol, spark, price, change in rows:
+                quote = quotes.get(symbol)
+                if not quote or quote.get("price") is None:
+                    price.configure(text="--")
+                    change.configure(text="", fg=self.c("muted"))
+                    continue
+                price.configure(text=format_price(quote["price"], quote.get("currency", "")))
+                delta = quote.get("change")
+                color = self.c("muted")
+                if delta is not None:
+                    color = self.c("success") if delta >= 0 else self.c("danger")
+                    change.configure(text=f"{delta:+.2f}%", fg=color)
+                else:
+                    change.configure(text="", fg=color)
+                self._dash_draw_spark(spark, quote.get("spark") or [], color)
+            if data.get("updated"):
+                card.meta_label.configure(text=datetime.fromtimestamp(data["updated"]).strftime("%H:%M"))
+
+        self._dash_paint["markets"] = (card, paint)
+        paint()
+        return card
+
+    def _dash_draw_spark(self, canvas, values, color):
+        if not canvas.winfo_exists():
+            return
+        canvas.delete("all")
+        if len(values) < 2:
+            return
+        width = int(canvas["width"])
+        height = int(canvas["height"])
+        low, high = min(values), max(values)
+        span = (high - low) or 1.0
+        step = width / (len(values) - 1)
+        points = []
+        for index, value in enumerate(values):
+            points.append(index * step)
+            points.append(height - 2 - (value - low) / span * (height - 4))
+        canvas.create_line(*points, fill=color, width=1, smooth=True)
+
+    def _dash_system_card(self, parent):
+        card = self.dash_card(parent, "This machine", "")
+        body = card.body
+        meters = {
+            "cpu": self._dash_meter(body, "CPU"),
+            "ram": self._dash_meter(body, "RAM"),
+            "gpu": self._dash_meter(body, "GPU"),
+            "disk": self._dash_meter(body, "Disk C:"),
+        }
+        footer = tk.Label(
+            body,
+            text="",
+            bg=self.c("surface"),
+            fg=self.blend_color(self.c("muted"), self.c("surface"), 0.25),
+            font=self.font(8),
+            anchor="w",
+        )
+        footer.pack(fill="x", pady=(8, 0))
+        self._dash_system_tick(card, meters, footer)
+        return card
+
+    def _dash_meter(self, parent, title):
+        wrap = tk.Frame(parent, bg=self.c("surface"))
+        wrap.pack(fill="x", pady=(0, 7))
+        head = tk.Frame(wrap, bg=self.c("surface"))
+        head.pack(fill="x")
+        tk.Label(head, text=title, bg=self.c("surface"), fg=self.c("muted"), font=self.font(8, "bold")).pack(side="left")
+        value = tk.Label(head, text="--", bg=self.c("surface"), fg=self.c("text"), font=self.font(9))
+        value.pack(side="right")
+        bar = tk.Canvas(wrap, height=4, bg=self.c("surface"), highlightthickness=0, bd=0)
+        bar.pack(fill="x", pady=(3, 0))
+        bar.ratio = 0.0
+        bar.color = self.c("accent")
+        bar.bind("<Configure>", lambda _event, canvas=bar: self._dash_draw_meter(canvas))
+        return {"value": value, "bar": bar}
+
+    def _dash_draw_meter(self, canvas):
+        if not canvas.winfo_exists():
+            return
+        width = canvas.winfo_width()
+        if width <= 1:
+            return
+        canvas.delete("all")
+        track = self.blend_color(self.c("surface"), self.c("muted"), 0.30)
+        canvas.create_rectangle(0, 0, width, 4, fill=track, outline="")
+        if canvas.ratio > 0:
+            canvas.create_rectangle(0, 0, max(2, width * canvas.ratio), 4, fill=canvas.color, outline="")
+
+    def _dash_set_meter(self, meter, text, ratio, color=None):
+        meter["value"].configure(text=text)
+        bar = meter["bar"]
+        bar.ratio = max(0.0, min(1.0, float(ratio)))
+        if color:
+            bar.color = color
+        self._dash_draw_meter(bar)
+
+    def _dash_load_color(self, ratio):
+        if ratio >= 0.9:
+            return self.c("danger")
+        if ratio >= 0.7:
+            return "#ffb35c"
+        return self.c("accent")
+
+    def _dash_system_tick(self, card, meters, footer):
+        if not card.winfo_exists():
+            return
+        try:
+            import psutil
+        except ImportError:
+            footer.configure(text="Install psutil for live system stats")
+            return
+
+        cpu = psutil.cpu_percent(interval=None)
+        self._dash_set_meter(meters["cpu"], f"{cpu:.0f}%", cpu / 100.0, self._dash_load_color(cpu / 100.0))
+        memory = psutil.virtual_memory()
+        self._dash_set_meter(
+            meters["ram"],
+            f"{memory.used / 1024 ** 3:.1f} / {memory.total / 1024 ** 3:.0f} GB",
+            memory.percent / 100.0,
+            self._dash_load_color(memory.percent / 100.0),
+        )
+        try:
+            disk = psutil.disk_usage("C:\\")
+            self._dash_set_meter(
+                meters["disk"],
+                f"{disk.free / 1024 ** 3:.0f} GB free",
+                disk.percent / 100.0,
+                self._dash_load_color(disk.percent / 100.0),
+            )
+        except OSError:
+            pass
+
+        gpu = self._dash_cache.get("gpu")
+        if gpu:
+            memory_text = ""
+            if gpu.get("mem_used") and gpu.get("mem_total"):
+                memory_text = f" \u00b7 {gpu['mem_used'] / 1024:.1f}/{gpu['mem_total'] / 1024:.0f} GB"
+            temperature = f" \u00b7 {gpu['temp']:.0f}\u00b0C" if gpu.get("temp") else ""
+            utilisation = float(gpu.get("util") or 0)
+            self._dash_set_meter(
+                meters["gpu"],
+                f"{utilisation:.0f}%{temperature}{memory_text}",
+                utilisation / 100.0,
+                self._dash_load_color(utilisation / 100.0),
+            )
+            card.meta_label.configure(text=str(gpu.get("name", "")).replace("GeForce ", "")[:20])
         else:
-            for project in recent:
-                self.recent_project_row(recent_card, project).pack(fill="x", padx=12, pady=(0, 6))
+            self._dash_set_meter(meters["gpu"], "no nvidia gpu", 0.0)
+
+        bits = [f"up {format_duration(time.time() - psutil.boot_time())}"]
+        counters = psutil.net_io_counters()
+        now = time.time()
+        if self._dash_net_sample:
+            previous_time, previous_recv, previous_sent = self._dash_net_sample
+            gap = max(0.5, now - previous_time)
+            down = (counters.bytes_recv - previous_recv) / gap / 1024 ** 2
+            up = (counters.bytes_sent - previous_sent) / gap / 1024 ** 2
+            bits.append(f"net \u2193 {down:.1f} \u2191 {up:.1f} MB/s")
+        self._dash_net_sample = (now, counters.bytes_recv, counters.bytes_sent)
+        footer.configure(text="  \u00b7  ".join(bits))
+
+        # nvidia-smi is a subprocess, so it runs off-thread on every third tick.
+        card.tick = getattr(card, "tick", 0) + 1
+        if card.tick % 3 == 0:
+            self._dash_refresh_gpu()
+        self.root.after(2000, lambda: self._dash_system_tick(card, meters, footer))
+
+    def _dash_notes_card(self, parent):
+        card = self.dash_card(parent, "Notes", "saves as you type")
+        body = card.body
+        notes = tk.Text(
+            body,
+            height=7,
+            bg=self.c("panel2"),
+            fg=self.c("text"),
+            insertbackground=self.c("accent"),
+            selectbackground="#29415d",
+            relief="flat",
+            bd=0,
+            padx=12,
+            pady=10,
+            wrap="word",
+            undo=True,
+            font=self.font(10),
+        )
+        notes.pack(fill="both", expand=True)
+        notes.insert("1.0", str((self.config.get("dashboard") or {}).get("notes") or ""))
+        # <<Modified>> catches typing, paste, undo and drops alike.
+        notes.edit_modified(False)
+        notes.bind("<<Modified>>", self._dash_notes_modified, add="+")
+        notes.bind("<FocusOut>", lambda _event: self._dash_flush_notes(), add="+")
+        notes.bind("<Destroy>", lambda _event: self._dash_notes_destroyed(), add="+")
+        self._dash_notes_widget = notes
+        return card
+
+    def _dash_notes_destroyed(self):
+        self._dash_flush_notes()
+        self._dash_notes_widget = None
+
+    def _dash_notes_modified(self, event):
+        widget = event.widget
+        try:
+            if not widget.edit_modified():
+                return
+            widget.edit_modified(False)
+        except tk.TclError:
+            return
+        self._dash_notes_changed()
+
+    def _dash_notes_changed(self, _event=None):
+        if self._dash_notes_after:
+            try:
+                self.root.after_cancel(self._dash_notes_after)
+            except tk.TclError:
+                pass
+        self._dash_notes_after = self.root.after(700, self._dash_flush_notes)
+
+    def _dash_flush_notes(self):
+        """Silent autosave — no toast, no confirmation, just persist the text."""
+        if self._dash_notes_after:
+            try:
+                self.root.after_cancel(self._dash_notes_after)
+            except tk.TclError:
+                pass
+            self._dash_notes_after = None
+        widget = self._dash_notes_widget
+        if widget is None:
+            return
+        try:
+            text = widget.get("1.0", "end-1c")
+        except tk.TclError:
+            self._dash_notes_widget = None
+            return
+        dashboard = self.config.setdefault("dashboard", {})
+        if dashboard.get("notes") == text:
+            return
+        dashboard["notes"] = text
+        save_config(self.config)
+
+    def _dash_todo_card(self, parent):
+        todos = self.dashboard_todos()
+        card = self.dash_card(parent, "To-Dos", f"{len(todos)} open" if todos else "")
+        body = card.body
+        if not todos:
+            tk.Label(
+                body,
+                text="Nothing tracked yet.\nTap + to add a to-do with a deadline.",
+                bg=self.c("surface"),
+                fg=self.c("muted"),
+                font=self.font(8),
+                justify="left",
+                anchor="w",
+                wraplength=220,
+            ).pack(anchor="w", pady=(0, 4))
+            return card
+        for project_path, meta in todos[:4]:
+            self.dashboard_todo_row(body, project_path, meta).pack(fill="x", pady=(0, 6))
+        if len(todos) > 4:
+            tk.Button(
+                body,
+                text=f"+{len(todos) - 4} more in Projects",
+                command=lambda: self.render_tab("Projects"),
+                bg=self.c("surface"),
+                fg=self.c("muted"),
+                activebackground=self.c("surface"),
+                activeforeground=self.c("accent"),
+                relief="flat",
+                bd=0,
+                anchor="w",
+                cursor="hand2",
+                font=self.font(8),
+            ).pack(fill="x")
+        return card
+
+    def _dash_forecast_card(self, parent):
+        card = self.dash_card(parent, "Next days", "")
+        body = card.body
+
+        def paint():
+            self.clear(body)
+            data = self._dash_cache.get("weather") or {}
+            days = data.get("days") or []
+            if not days:
+                self.muted(body, "Forecast loading...").pack(anchor="w")
+                return
+            for day in days:
+                row = tk.Frame(body, bg=self.c("surface"))
+                row.pack(fill="x", pady=2)
+                label, symbol = weather_code_text(day.get("code"))
+                tk.Label(
+                    row, text=day["name"], bg=self.c("surface"), fg=self.c("text"), font=self.font(9, "bold"), width=6, anchor="w"
+                ).pack(side="left")
+                tk.Label(
+                    row, text=symbol, bg=self.c("surface"), fg=self.c("accent"), font=("Segoe UI Symbol", 11)
+                ).pack(side="left", padx=(0, 6))
+                high = f"{round(float(day['high']))}\u00b0" if day.get("high") is not None else "--"
+                low = f"{round(float(day['low']))}\u00b0" if day.get("low") is not None else "--"
+                tk.Label(row, text=high, bg=self.c("surface"), fg=self.c("text"), font=self.font(9)).pack(side="left")
+                tk.Label(row, text=f"/ {low}", bg=self.c("surface"), fg=self.c("muted"), font=self.font(9)).pack(
+                    side="left", padx=(3, 0)
+                )
+                rain = day.get("rain")
+                if rain is not None:
+                    tk.Label(
+                        row,
+                        text=f"{round(float(rain))}%",
+                        bg=self.c("surface"),
+                        fg=self.blend_color(self.c("muted"), self.c("accent"), 0.5),
+                        font=self.font(8, "bold"),
+                    ).pack(side="right")
+                tk.Label(row, text=label[:14], bg=self.c("surface"), fg=self.c("muted"), font=self.font(8)).pack(
+                    side="right", padx=(0, 8)
+                )
+            if data.get("updated"):
+                card.meta_label.configure(text=datetime.fromtimestamp(data["updated"]).strftime("%H:%M"))
+
+        self._dash_paint["forecast"] = (card, paint)
+        paint()
+        return card
+
+    # ------------------------------------------------------------------ data
+
+    def refresh_dashboard_data(self):
+        self._dash_refresh_weather(force=True)
+        self._dash_refresh_markets(force=True)
+        self._dash_refresh_gpu()
+
+    def _dash_fresh(self, key, max_age):
+        cached = self._dash_cache.get(key) or {}
+        return bool(cached) and not cached.get("error") and time.time() - cached.get("updated", 0) < max_age
+
+    def _dash_store(self, key, data):
+        self._dash_fetching.discard(key)
+        if data.get("error") and self._dash_cache.get(key) and not self._dash_cache[key].get("error"):
+            return  # keep the last good payload on a failed refresh
+        self._dash_cache[key] = data
+        # GPU stats are polled every few seconds and are worthless once stale,
+        # so only the slow network payloads go to disk.
+        if not data.get("error") and key != "gpu":
+            save_dashboard_cache({name: value for name, value in self._dash_cache.items() if name != "gpu"})
+        self._dash_repaint(key)
+
+    def _dash_repaint(self, key):
+        targets = {"weather": ("weather_now", "forecast"), "markets": ("markets",)}.get(key, (key,))
+        for name in targets:
+            entry = self._dash_paint.get(name)
+            if not entry:
+                continue
+            widget, paint = entry
+            try:
+                if widget.winfo_exists():
+                    paint()
+            except tk.TclError:
+                pass
+
+    def _dash_background(self, key, worker):
+        if key in self._dash_fetching:
+            return
+        self._dash_fetching.add(key)
+
+        def run():
+            try:
+                data = worker()
+            except Exception as exc:
+                data = {"error": str(exc)[:80], "updated": time.time()}
+            self._ui_async(self._dash_store, key, data)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _dash_refresh_weather(self, force=False):
+        if not force and self._dash_fresh("weather", 900):
+            return
+        location = str((self.config.get("dashboard") or {}).get("location") or "Lerkil, Sweden")
+        self._dash_background("weather", lambda: fetch_weather_snapshot(location))
+
+    def _dash_refresh_markets(self, force=False):
+        if not force and self._dash_fresh("markets", 300):
+            return
+        tickers = list((self.config.get("dashboard") or {}).get("tickers") or [])[:6]
+        self._dash_background("markets", lambda: fetch_market_quotes(tickers))
+
+    def _dash_refresh_gpu(self):
+        def worker():
+            gpu = query_nvidia_gpu()
+            if not gpu:
+                return {"error": "no gpu", "updated": time.time()}
+            gpu["updated"] = time.time()
+            return gpu
+
+        self._dash_background("gpu", worker)
 
     def _build_bottom_tray(self):
-        tray_bg = self.blend_color(self.c("panel"), self.c("surface2"), 0.62)
-        border = self._header_border_color()
-        accent_line = self.blend_color(border, self.c("accent"), 0.45)
+        tray_bg = self.blend_color(self.c("panel"), self.c("surface2"), 0.72)
+        border = self.blend_color(self._header_border_color(), self.c("accent"), 0.18)
+        accent_line = self.blend_color(border, self.c("accent"), 0.62)
 
         self._bottom_tray = tk.Frame(
             self.panel,
@@ -2053,84 +2958,147 @@ class HelperOverlay:
             highlightbackground=border,
         )
 
-        accent = tk.Frame(self._bottom_tray, bg=accent_line, height=1)
+        accent = tk.Frame(self._bottom_tray, bg=accent_line, height=2)
         accent.pack(fill="x")
 
-        handle_row = tk.Frame(self._bottom_tray, bg=tray_bg, height=12)
+        handle_row = tk.Frame(self._bottom_tray, bg=tray_bg, height=28, cursor="hand2")
         handle_row.pack(fill="x")
         handle_row.pack_propagate(False)
-        handle = tk.Frame(handle_row, bg=self.blend_color(self.c("muted"), self.c("text"), 0.35), width=46, height=3)
-        handle.place(relx=0.5, rely=0.5, anchor="center")
+        self.quick_tools_handle = tk.Label(
+            handle_row,
+            text="QUICK TOOLS  ↑",
+            bg=tray_bg,
+            fg=self.blend_color(self.c("muted"), self.c("text"), 0.62),
+            font=self.font(8, "bold"),
+            cursor="hand2",
+        )
+        self.quick_tools_handle.place(relx=0.5, rely=0.5, anchor="center")
 
         content = tk.Frame(self._bottom_tray, bg=tray_bg)
-        content.pack(fill="x", padx=18, pady=(2, 12))
+        content.pack(fill="both", expand=True, padx=14, pady=(3, 10))
 
-        actions = tk.Frame(content, bg=tray_bg)
-        actions.pack(side="left")
-        paste_btn = self.quick_tool_chip(
-            actions,
-            "Paste Image",
+        groups = tk.Frame(content, bg=tray_bg)
+        groups.pack(fill="both", expand=True)
+
+        transfer, transfer_cards = self.quick_tools_category(
+            groups, "TRANSFER", "Move images onto this PC", self.c("accent")
+        )
+        transfer.pack(side="left", fill="both", expand=True, padx=(0, 5))
+        phone_photos_btn = self.quick_tool_card(
+            transfer_cards,
+            "⇄",
+            "Phone to PC",
+            "Scan QR, shoot, auto-send",
+            self.open_phone_photos,
+            accent_color=self.c("accent"),
+            featured=True,
+        )
+        phone_photos_btn.pack(side="left", fill="both", expand=True, padx=(0, 3))
+        paste_btn = self.quick_tool_card(
+            transfer_cards,
+            "V",
+            "Paste image",
+            "Save the clipboard image",
             self.save_clipboard_image,
-            hint="Save clipboard image to Downloads",
+            accent_color=self.c("accent"),
         )
-        paste_btn.pack(side="left")
-        downloads_btn = self.quick_tool_chip(
-            actions,
-            "Downloads",
-            self.open_downloads_folder,
-            hint="Open Downloads folder",
+        paste_btn.pack(side="left", fill="both", expand=True, padx=(3, 0))
+
+        capture_color = "#ffb35c"
+        capture, capture_cards = self.quick_tools_category(
+            groups, "SCREEN CAPTURE", "Record anything you see", capture_color
         )
-        downloads_btn.pack(side="left", padx=(8, 0))
-        record_btn = self.quick_tool_chip(
-            actions,
-            "Record",
+        capture.pack(side="left", fill="both", expand=True, padx=5)
+        record_btn = self.quick_tool_card(
+            capture_cards,
+            "●",
+            "Record screen",
+            "Area, window, or monitor",
             self.open_screen_recorder_menu,
-            hint="Record screen, monitor, area, or window",
+            accent_color=capture_color,
         )
-        record_btn.pack(side="left", padx=(8, 0))
+        record_btn.pack(side="left", fill="both", expand=True, padx=(0, 3))
         self.screen_record_quick_btn = record_btn
-        recordings_btn = self.quick_tool_chip(
-            actions,
+        recordings_btn = self.quick_tool_card(
+            capture_cards,
+            "▶",
             "Recordings",
+            "Browse your saved videos",
             self.open_recordings_folder,
-            hint="Open screen recordings folder",
+            accent_color=capture_color,
         )
-        recordings_btn.pack(side="left", padx=(8, 0))
+        recordings_btn.pack(side="left", fill="both", expand=True, padx=(3, 0))
 
+        files_color = "#a99cff"
+        files, file_cards = self.quick_tools_category(
+            groups, "FILES", "Jump to common folders", files_color
+        )
+        files.pack(side="left", fill="both", expand=True, padx=(5, 0))
+        downloads_btn = self.quick_tool_card(
+            file_cards,
+            "↓",
+            "Downloads",
+            "Open your downloads folder",
+            self.open_downloads_folder,
+            accent_color=files_color,
+        )
+        downloads_btn.pack(fill="both", expand=True)
+
+        footer = tk.Frame(content, bg=tray_bg)
+        footer.pack(fill="x", pady=(8, 0))
         self.quick_tools_status = tk.Label(
-            content,
-            text="Quick tools",
+            footer,
+            text="Ready",
             bg=tray_bg,
-            fg=self.blend_color(self.c("muted"), self.c("text"), 0.45),
-            anchor="e",
-            font=self.font(9, "bold"),
+            fg=self.blend_color(self.c("muted"), self.c("text"), 0.58),
+            anchor="w",
+            font=self.font(8, "bold"),
         )
-        self.quick_tools_status.pack(side="right", fill="x", expand=True, padx=(12, 0))
+        self.quick_tools_status.pack(side="left")
+        close_hint = tk.Label(
+            footer,
+            text="Move away to close",
+            bg=tray_bg,
+            fg=self.blend_color(self.c("muted"), tray_bg, 0.72),
+            anchor="e",
+            font=self.font(8),
+        )
+        close_hint.pack(side="right")
 
-        self._bottom_tray.place(relx=0, rely=1, relwidth=1, anchor="sw", height=self._tray_peek_h)
+        self._bottom_tray.place(
+            relx=0.5,
+            rely=1,
+            relwidth=self._tray_peek_relwidth,
+            anchor="s",
+            height=self._tray_peek_h,
+        )
         self._bottom_tray.lift()
         self._tray_current_h = self._tray_peek_h
+        self._tray_current_relwidth = self._tray_peek_relwidth
 
         tray_widgets = {
             self._bottom_tray,
             accent,
             handle_row,
-            handle,
+            self.quick_tools_handle,
             content,
-            actions,
+            groups,
+            transfer,
+            capture,
+            files,
+            footer,
+            close_hint,
             paste_btn,
             downloads_btn,
             record_btn,
             recordings_btn,
+            phone_photos_btn,
         }
         self._tray_widget_ids = {id(widget) for widget in tray_widgets}
         self._tray_widget_ids.add(id(self.quick_tools_status))
 
-        for widget in tray_widgets:
-            widget.bind("<Enter>", self._tray_show, add="+")
-            widget.bind("<Leave>", self._tray_schedule_hide, add="+")
-        self.quick_tools_status.bind("<Enter>", self._tray_show, add="+")
-        self.quick_tools_status.bind("<Leave>", self._tray_schedule_hide, add="+")
+        handle_row.bind("<Button-1>", self._tray_toggle, add="+")
+        self.quick_tools_handle.bind("<Button-1>", self._tray_toggle, add="+")
 
         self.panel.bind("<Motion>", self._tray_on_motion, add="+")
         self.root.bind("<Motion>", self._tray_on_motion, add="+")
@@ -2149,18 +3117,37 @@ class HelperOverlay:
         if self._bottom_tray is None:
             return
         try:
+            panel_w = self.panel.winfo_width()
             panel_h = self.panel.winfo_height()
-            if panel_h <= 1:
+            if panel_w <= 1 or panel_h <= 1:
                 return
+            x_in_panel = self.root.winfo_pointerx() - self.panel.winfo_rootx()
             y_in_panel = self.root.winfo_pointery() - self.panel.winfo_rooty()
         except tk.TclError:
             return
 
-        hot_zone = max(18, self._tray_peek_h + 8)
-        if y_in_panel >= panel_h - hot_zone:
+        if self._tray_open:
+            try:
+                tray_left = self._bottom_tray.winfo_rootx() - self.panel.winfo_rootx()
+                tray_top = self._bottom_tray.winfo_rooty() - self.panel.winfo_rooty()
+                tray_right = tray_left + self._bottom_tray.winfo_width()
+                inside_open_tray = (
+                    tray_left - 8 <= x_in_panel <= tray_right + 8
+                    and tray_top - 8 <= y_in_panel <= panel_h
+                )
+            except tk.TclError:
+                inside_open_tray = False
+            if inside_open_tray:
+                self._tray_show()
+            else:
+                self._tray_schedule_hide()
+            return
+
+        collapsed_w = panel_w * self._tray_peek_relwidth
+        centered = abs(x_in_panel - panel_w / 2) <= collapsed_w / 2 + 8
+        hot_zone = self._tray_peek_h + 8
+        if centered and y_in_panel >= panel_h - hot_zone:
             self._tray_show()
-        elif self._tray_open and y_in_panel < panel_h - self._tray_target_h - 6:
-            self._tray_schedule_hide()
 
     def _tray_show(self, _event=None):
         if self._bottom_tray is None:
@@ -2168,13 +3155,28 @@ class HelperOverlay:
         if self._tray_hide_job is not None:
             self.root.after_cancel(self._tray_hide_job)
             self._tray_hide_job = None
-        self._tray_animate_to(self._tray_target_h)
+        if self._tray_open:
+            return
+        self._tray_open = True
+        if self.quick_tools_handle is not None:
+            try:
+                self.quick_tools_handle.configure(text="QUICK TOOLS  ↓", fg=self.c("accent"))
+            except tk.TclError:
+                pass
+        self._tray_start_animation()
+
+    def _tray_toggle(self, _event=None):
+        if self._tray_open:
+            self._tray_close()
+        else:
+            self._tray_show()
+        return "break"
 
     def _tray_schedule_hide(self, _event=None):
-        if self._bottom_tray is None:
+        if self._bottom_tray is None or not self._tray_open:
             return
         if self._tray_hide_job is not None:
-            self.root.after_cancel(self._tray_hide_job)
+            return
 
         def hide():
             self._tray_hide_job = None
@@ -2184,56 +3186,90 @@ class HelperOverlay:
                 widget = None
             if widget is not None and self._tray_widget_contains(widget):
                 return
-            try:
-                panel_h = self.panel.winfo_height()
-                y_in_panel = self.root.winfo_pointery() - self.panel.winfo_rooty()
-                if y_in_panel >= panel_h - max(18, self._tray_peek_h + 8):
-                    return
-            except tk.TclError:
-                pass
-            self._tray_animate_to(self._tray_peek_h)
+            self._tray_close()
 
-        self._tray_hide_job = self.root.after(280, hide)
+        self._tray_hide_job = self.root.after(360, hide)
 
-    def _tray_animate_to(self, target_h):
+    def _tray_close(self):
         if self._bottom_tray is None:
             return
-        if self._tray_anim_job is not None:
-            self.root.after_cancel(self._tray_anim_job)
-            self._tray_anim_job = None
-
-        current = self._tray_current_h
-        if abs(current - target_h) <= 1:
-            self._tray_current_h = target_h
-            self._tray_open = target_h > self._tray_peek_h + 2
+        if self._tray_hide_job is not None:
+            self.root.after_cancel(self._tray_hide_job)
+            self._tray_hide_job = None
+        if not self._tray_open:
+            return
+        self._tray_open = False
+        if self.quick_tools_handle is not None:
             try:
-                self._bottom_tray.place_configure(height=int(target_h))
+                self.quick_tools_handle.configure(
+                    text="QUICK TOOLS  ↑",
+                    fg=self.blend_color(self.c("muted"), self.c("text"), 0.62),
+                )
             except tk.TclError:
                 pass
-            if target_h <= self._tray_peek_h + 1 and self.quick_tools_status is not None:
+        self._tray_start_animation()
+
+    def _tray_start_animation(self):
+        if self._bottom_tray is None or self._tray_anim_job is not None:
+            return
+        self._tray_animation_step()
+
+    def _tray_animation_step(self):
+        self._tray_anim_job = None
+        if self._bottom_tray is None:
+            return
+
+        target_h = self._tray_target_h if self._tray_open else self._tray_peek_h
+        target_relwidth = self._tray_open_relwidth if self._tray_open else self._tray_peek_relwidth
+        current_h = self._tray_current_h
+        current_w = self._tray_current_relwidth
+
+        if abs(current_h - target_h) <= 1 and abs(current_w - target_relwidth) <= 0.005:
+            self._tray_current_h = target_h
+            self._tray_current_relwidth = target_relwidth
+            try:
+                self._bottom_tray.place_configure(height=int(target_h), relwidth=target_relwidth)
+            except tk.TclError:
+                pass
+            if not self._tray_open and self.quick_tools_status is not None:
                 try:
                     self.quick_tools_status.configure(
-                        text="Quick tools",
-                        fg=self.blend_color(self.c("muted"), self.c("text"), 0.45),
+                        text="Ready",
+                        fg=self.blend_color(self.c("muted"), self.c("text"), 0.58),
                     )
                 except tk.TclError:
                     pass
             return
 
-        diff = target_h - current
-        step = max(2, min(10, int(abs(diff) * 0.38)))
-        next_h = current + step if diff > 0 else current - step
-        if diff > 0 and next_h > target_h:
+        diff_h = target_h - current_h
+        if abs(diff_h) <= 1:
             next_h = target_h
-        elif diff < 0 and next_h < target_h:
-            next_h = target_h
+        else:
+            step_h = max(2, min(12, int(abs(diff_h) * 0.34)))
+            next_h = current_h + step_h if diff_h > 0 else current_h - step_h
+            if diff_h > 0 and next_h > target_h:
+                next_h = target_h
+            elif diff_h < 0 and next_h < target_h:
+                next_h = target_h
+
+        diff_w = target_relwidth - current_w
+        if abs(diff_w) <= 0.005:
+            next_w = target_relwidth
+        else:
+            step_w = max(0.012, min(0.08, abs(diff_w) * 0.34))
+            next_w = current_w + step_w if diff_w > 0 else current_w - step_w
+            if diff_w > 0 and next_w > target_relwidth:
+                next_w = target_relwidth
+            elif diff_w < 0 and next_w < target_relwidth:
+                next_w = target_relwidth
 
         self._tray_current_h = next_h
+        self._tray_current_relwidth = next_w
         try:
-            self._bottom_tray.place_configure(height=int(next_h))
+            self._bottom_tray.place_configure(height=int(next_h), relwidth=next_w)
         except tk.TclError:
             return
-        self._tray_anim_job = self.root.after(12, lambda value=target_h: self._tray_animate_to(value))
+        self._tray_anim_job = self.root.after(12, self._tray_animation_step)
 
     def save_clipboard_image(self):
         saved_path = None
@@ -2388,6 +3424,153 @@ class HelperOverlay:
             self._set_quick_tools_status("Opened recordings", True)
         except OSError as exc:
             self._set_quick_tools_status(str(exc), False)
+
+    def phone_photos_dir(self):
+        path = Path.home() / "Pictures" / "aiOS Phone Photos"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def open_phone_photos(self):
+        self._set_quick_tools_status("Creating phone photo link…", True)
+
+        def create_session():
+            try:
+                req = urllib.request.Request(
+                    "http://127.0.0.1:5000/api/photo-drop/session",
+                    data=b"{}",
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=4) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                self.root.after(0, lambda: self._show_phone_photos_session(payload))
+            except Exception as exc:
+                message = f"Phone bridge unavailable: {exc}"
+                self.root.after(0, lambda value=message: self._set_quick_tools_status(value, False))
+
+        threading.Thread(target=create_session, daemon=True).start()
+
+    def _show_phone_photos_session(self, session):
+        self._close_phone_photos()
+        try:
+            import qrcode
+            from PIL import Image, ImageTk
+
+            qr = qrcode.make(session["url"]).convert("RGB").resize(
+                (270, 270), Image.Resampling.NEAREST
+            )
+            qr_image = ImageTk.PhotoImage(qr)
+        except Exception as exc:
+            self._set_quick_tools_status(f"Could not create QR code: {exc}", False)
+            return
+
+        popup = tk.Toplevel(self.root)
+        popup.title("Phone Photos")
+        popup.configure(bg=self.c("panel"))
+        popup.resizable(False, False)
+        popup.attributes("-topmost", True)
+        popup.geometry("430x590")
+        try:
+            popup.iconbitmap(str(APP_ICON_PATH))
+        except (OSError, tk.TclError):
+            pass
+        self.phone_photos_popup = popup
+        self.phone_photos_qr_image = qr_image
+
+        tk.Label(
+            popup, text="Phone Photos", bg=self.c("panel"), fg=self.c("text"),
+            font=self.font(19, "bold"),
+        ).pack(pady=(22, 4))
+        tk.Label(
+            popup, text="Scan with any phone on the same Wi-Fi", bg=self.c("panel"),
+            fg=self.c("muted"), font=self.font(10),
+        ).pack()
+        qr_frame = tk.Frame(popup, bg="#ffffff", padx=12, pady=12)
+        qr_frame.pack(pady=18)
+        tk.Label(qr_frame, image=qr_image, bg="#ffffff").pack()
+
+        status = tk.Label(
+            popup, text="Waiting for photos…", bg=self.c("panel"), fg=self.c("accent"),
+            font=self.font(11, "bold"),
+        )
+        status.pack(pady=(0, 4))
+        detail = tk.Label(
+            popup, text="Photos upload automatically after each shot", bg=self.c("panel"),
+            fg=self.c("muted"), font=self.font(9),
+        )
+        detail.pack()
+
+        actions = tk.Frame(popup, bg=self.c("panel"))
+        actions.pack(fill="x", padx=26, pady=(22, 8))
+        self.button(
+            actions, "Open Folder",
+            lambda path=session["folder"]: os.startfile(path),
+            compact=True, active=True,
+        ).pack(side="left", fill="x", expand=True, padx=(0, 5))
+        self.button(
+            actions, "Copy Link",
+            lambda url=session["url"]: self._copy_phone_photos_link(url),
+            compact=True,
+        ).pack(side="left", fill="x", expand=True, padx=(5, 0))
+
+        popup.protocol("WM_DELETE_WINDOW", self._close_phone_photos)
+        popup.bind("<Escape>", lambda _event: self._close_phone_photos())
+        self._set_quick_tools_status("Scan QR to send photos", True)
+        self._poll_phone_photos(session["token"], status, detail)
+
+    def _copy_phone_photos_link(self, url):
+        self.root.clipboard_clear()
+        self.root.clipboard_append(url)
+        self._set_quick_tools_status("Phone photo link copied", True)
+
+    def _poll_phone_photos(self, token, status_label, detail_label):
+        popup = self.phone_photos_popup
+        if popup is None or not popup.winfo_exists():
+            return
+
+        def fetch():
+            try:
+                url = f"http://127.0.0.1:5000/api/photo-drop/{token}/status"
+                with urllib.request.urlopen(url, timeout=2) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                self.root.after(0, lambda: update(payload))
+            except Exception:
+                self.root.after(0, schedule)
+
+        def update(payload):
+            if self.phone_photos_popup is not popup or not popup.winfo_exists():
+                return
+            count = int(payload.get("count") or 0)
+            status_label.configure(text=f"{count} photo{'s' if count != 1 else ''} received")
+            last_name = payload.get("last_filename") or "Take photos on your phone"
+            detail_label.configure(text=last_name)
+            if count:
+                self._set_quick_tools_status(f"Received {count} phone photo{'s' if count != 1 else ''}", True)
+            schedule()
+
+        def schedule():
+            if self.phone_photos_popup is popup and popup.winfo_exists():
+                self.phone_photos_poll_job = self.root.after(
+                    900, lambda: threading.Thread(target=fetch, daemon=True).start()
+                )
+
+        schedule()
+
+    def _close_phone_photos(self):
+        if self.phone_photos_poll_job is not None:
+            try:
+                self.root.after_cancel(self.phone_photos_poll_job)
+            except tk.TclError:
+                pass
+        self.phone_photos_poll_job = None
+        popup = self.phone_photos_popup
+        self.phone_photos_popup = None
+        self.phone_photos_qr_image = None
+        if popup is not None:
+            try:
+                popup.destroy()
+            except tk.TclError:
+                pass
 
     def unique_download_path(self, stem, suffix):
         downloads = self.downloads_dir()
@@ -2801,6 +3984,31 @@ class HelperOverlay:
         if button is None:
             return
         try:
+            if hasattr(button, "_quick_card_title"):
+                title = button._quick_card_title
+                icon_box = button._quick_card_icon_box
+                icon = button._quick_card_icon
+                accent = button._quick_card_accent
+                if recording:
+                    button.configure(
+                        highlightbackground=self.c("danger"),
+                        highlightcolor=self.c("danger"),
+                    )
+                    icon_box.configure(bg=self.c("danger"))
+                    icon.configure(text="■", bg=self.c("danger"), fg="#ffffff")
+                    title.configure(text="Stop recording")
+                else:
+                    icon_bg = self.blend_color(self.c("surface2"), accent, 0.28)
+                    button.configure(
+                        highlightbackground=self.blend_color(
+                            self._header_border_color(), accent, 0.20
+                        ),
+                        highlightcolor=accent,
+                    )
+                    icon_box.configure(bg=icon_bg)
+                    icon.configure(text="●", bg=icon_bg, fg=accent)
+                    title.configure(text="Record screen")
+                return
             if recording:
                 button.configure(
                     text="● Stop Recording",
@@ -2949,7 +4157,7 @@ class HelperOverlay:
             self._tray_show()
             if self._tray_hide_job is not None:
                 self.root.after_cancel(self._tray_hide_job)
-            self._tray_hide_job = self.root.after(2200, lambda: self._tray_animate_to(self._tray_peek_h))
+            self._tray_hide_job = self.root.after(2200, self._tray_close)
         try:
             self.subtitle.configure(text=text, fg=color)
             self.root.after(2600, lambda: self.subtitle.configure(text=self._status_subtitle(), fg=self.c("muted")))
@@ -5710,6 +6918,9 @@ class HelperOverlay:
             self.agent_operator_delay_var.set(f"{delay:.2f}")
         self.agent_operator_current_task = task
         self.agent_operator_clear_log()
+        self.agent_operator_overlay_step = 0
+        self.agent_operator_overlay_thought = "Starting OPERATOR..."
+        self.agent_operator_overlay_action = ""
         self.agent_operator_last_clicks.clear()
         model = self._agent_operator_model()
         planner_model = self._agent_operator_planner_model()
@@ -6170,15 +7381,20 @@ class HelperOverlay:
             if self.active_tab == "AI Operator":
                 self.render_tab("AI Operator")
         elif kind == "step_begin":
+            self.agent_operator_overlay_step = int(event.get("n") or 0)
+            self.agent_operator_overlay_thought = "Looking at the latest screen..."
+            self.agent_operator_overlay_action = ""
             if self.agent_operator_step_var:
                 self.agent_operator_step_var.set(f"step {event.get('n')}")
             self.agent_operator_last_clicks.clear()
             self._agent_operator_log_line("step", f"\n[{self._ts()}] Step {event.get('n')}\n")
         elif kind == "planning_begin":
+            self.agent_operator_overlay_thought = "Planning the task..."
             if self.agent_operator_status_var:
                 self.agent_operator_status_var.set("Planning")
             self._agent_operator_log_line("step", f"\n[{self._ts()}] Planning with {event.get('model', 'planner')}\n")
         elif kind == "plan":
+            self.agent_operator_overlay_thought = str(event.get("plan") or "Plan ready")
             self._agent_operator_log_line("status", (event.get("plan") or "").rstrip() + "\n")
             todo = event.get("todo") or []
             if todo:
@@ -6188,11 +7404,16 @@ class HelperOverlay:
             for item in event.get("done_when") or []:
                 self._agent_operator_log_line("dim", f"  done when: {item}\n")
         elif kind == "verify_begin":
+            self.agent_operator_overlay_thought = "Checking that the requested result is actually complete..."
             if self.agent_operator_status_var:
                 self.agent_operator_status_var.set("Checking the result")
             self._agent_operator_log_line("step", f"\n[{self._ts()}] Checking whether the task is really done\n")
         elif kind == "verified":
             passed = str(event.get("verdict")) == "pass"
+            self.agent_operator_overlay_action = (
+                f"Completion check {'passed' if passed else 'needs more work'}: "
+                f"{event.get('reason', '')}"
+            ).strip()
             self._agent_operator_log_line(
                 "ok" if passed else "err",
                 f"CHECK {'passed' if passed else 'failed'}: {event.get('reason', '')}\n")
@@ -6202,6 +7423,9 @@ class HelperOverlay:
             self.agent_operator_current_image = event.get("image")
             self._agent_operator_redraw_preview()
         elif kind == "thought":
+            self.agent_operator_overlay_thought = str(
+                event.get("thought") or event.get("message") or "Thinking..."
+            )
             self._agent_operator_log_line("ts", f"[{self._ts()}] ")
             self._agent_operator_log_line("thought", "thought: ")
             self._agent_operator_log_line("thought", (event.get("thought") or "").rstrip() + "\n")
@@ -6220,6 +7444,8 @@ class HelperOverlay:
             result = event.get("result") or {}
             tag = "ok" if result.get("ok") else "err"
             atype = (result.get("action") or {}).get("type") or "?"
+            detail = str(result.get("detail") or "").strip()
+            self.agent_operator_overlay_action = f"{atype}: {detail}" if detail else str(atype)
             self._agent_operator_log_line("ts", f"[{self._ts()}] ")
             self._agent_operator_log_line(tag, "ok " if result.get("ok") else "fail ")
             self._agent_operator_log_line("action", f"{atype:<12}")
@@ -6249,18 +7475,21 @@ class HelperOverlay:
             self._agent_operator_log_line(tag, f"DONE ok={ok} steps={event.get('steps')} message={event.get('message', '')}\n")
             usage = event.get("usage") if isinstance(event.get("usage"), dict) else {}
             if usage:
-                input_tokens = int(usage.get("input_tokens") or 0)
-                output_tokens = int(usage.get("output_tokens") or 0)
-                cached_tokens = int(usage.get("cached_input_tokens") or 0)
-                requests = int(usage.get("requests") or 0)
+                counts = model_pricing.token_breakdown(usage)
                 self._agent_operator_log_line(
                     "status",
-                    f"USAGE {input_tokens:,} input + {output_tokens:,} output"
-                    f" ({cached_tokens:,} cached) across {requests} model call(s)\n",
+                    f"TOKENS {counts['input_tokens']:,} input "
+                    f"({counts['fresh_input_tokens']:,} fresh, "
+                    f"{counts['cached_input_tokens']:,} cached, "
+                    f"{counts['cache_write_input_tokens']:,} cache-write) + "
+                    f"{counts['output_tokens']:,} output = {counts['total_tokens']:,} total "
+                    f"across {counts['requests']} model call(s)\n",
                 )
                 try:
+                    cost = model_pricing.estimate_cost(usage, self._agent_operator_model())
                     cost_line = model_pricing.describe_cost(usage, self._agent_operator_model())
                 except Exception:
+                    cost = {}
                     cost_line = ""
                 if cost_line:
                     self._agent_operator_log_line("status", f"COST {cost_line}\n")
@@ -6268,16 +7497,28 @@ class HelperOverlay:
                 self._agent_operator_log_line("err", "SAFETY STOP loop exited. aiOPERATOR is no longer controlling input.\n")
                 self.agent_operator_stop_requested = False
             if self.agent_operator_status_var:
-                self.agent_operator_status_var.set("Stopped" if "stop" in str(event.get("message", "")).lower() else f"Done. {event.get('message', '')}")
+                stopped = "stop" in str(event.get("message", "")).lower()
+                if stopped:
+                    status = "Stopped"
+                elif usage:
+                    status = (
+                        f"Done · {counts['total_tokens']:,} tokens · "
+                        f"{model_pricing.format_usd_exact(cost)} API"
+                    )
+                else:
+                    status = f"Done. {event.get('message', '')}"
+                self.agent_operator_status_var.set(status)
             self._agent_operator_tts_speak("done" if ok else ("stopped" if "stop" in str(event.get("message", "")).lower() else "failed"))
             self._agent_operator_sync_buttons()
         elif kind == "ask":
+            self.agent_operator_overlay_thought = str(event.get("message") or "Waiting for your answer")
             if self.agent_operator_status_var:
                 self.agent_operator_status_var.set("Agent asks: " + event.get("message", ""))
             self._agent_operator_log_line("status", f"ASK: {event.get('message', '')}\n")
             self._agent_operator_sync_buttons()
         elif kind == "max_steps":
             msg = event.get("message") or "Step budget used — continue for another batch?"
+            self.agent_operator_overlay_thought = str(msg)
             if self.agent_operator_status_var:
                 self.agent_operator_status_var.set("Out of steps — send Continue")
             self._agent_operator_log_line("status", f"MAX STEPS: {msg}\n")
@@ -6494,19 +7735,26 @@ class HelperOverlay:
     def _agent_operator_control_update_log(self):
         if not self.agent_operator_native_overlay or not self.agent_operator_control_visible:
             return
-        self.agent_operator_native_overlay.set_log(self._agent_operator_overlay_log_text())
+        step = int(getattr(self, "agent_operator_overlay_step", 0) or 0)
+        title = f"OPERATOR · STEP {step}" if step else "OPERATOR · STARTING"
+        self.agent_operator_native_overlay.set_log(
+            self._agent_operator_overlay_log_text(),
+            title=title,
+        )
 
     def _agent_operator_overlay_log_text(self):
-        chunks = "".join(text for _tag, text in self.agent_operator_log_buffer[-120:])
-        lines = []
-        for line in chunks.splitlines():
-            line = " ".join(line.strip().split())
-            if not line:
-                continue
-            if len(line) > 88:
-                line = line[:85] + "..."
-            lines.append(line)
-        return "\n".join(lines[-7:])
+        def clean(value, limit=260):
+            text = " ".join(str(value or "").strip().split())
+            return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+        thought = clean(getattr(self, "agent_operator_overlay_thought", ""))
+        action = clean(getattr(self, "agent_operator_overlay_action", ""))
+        rows = []
+        if thought:
+            rows.extend(("THINKING", thought))
+        if action:
+            rows.extend(("DID", action))
+        return "\n".join(rows) or "THINKING\nLooking at the screen..."
 
     def _agent_operator_control_hide(self, temporary=False):
         self.agent_operator_control_visible = False
@@ -6598,39 +7846,352 @@ class HelperOverlay:
     def _ts(self):
         return datetime.now().strftime("%H:%M:%S.%f")[:-3]
 
+    # Sub-pages of the Settings tab. One screen per concern, so the page stops
+    # being a single scroll of unrelated cards.
+    SETTINGS_PAGES = (
+        ("General", "Project folder, mobile remote and updates."),
+        ("Appearance", "Colors, sizing and how the window behaves."),
+        ("Voice", "Dictation keys, microphone and transcription quality."),
+        ("Voice agent", "What the agent you talk to is allowed to do."),
+        ("OPERATOR", "The agent that drives your mouse and keyboard."),
+        ("Models", "Codex, quick chat and API keys."),
+        ("Macro pad", "The buttons that drive aiOS from your macro keyboard."),
+    )
+
+    # ------------------------------------------------------------ settings shell
+
     def render_settings(self):
         self.page_title("Settings")
+        names = [name for name, _hint in self.SETTINGS_PAGES]
+        if getattr(self, "settings_page", None) not in names:
+            self.settings_page = names[0]
+
+        rail = tk.Frame(self.page, bg=self.c("panel"))
+        rail.pack(fill="x", pady=(0, 2))
+        for name in names:
+            self.button(
+                rail,
+                name,
+                lambda choice=name: self.open_settings_page(choice),
+                compact=True,
+                active=(name == self.settings_page),
+            ).pack(side="left", padx=(0, 6))
+
+        status = tk.Frame(self.page, bg=self.c("panel"))
+        status.pack(fill="x", pady=(0, 10))
+        hint = dict(self.SETTINGS_PAGES)[self.settings_page]
+        tk.Label(
+            status, text=hint, bg=self.c("panel"), fg=self.c("muted"), font=self.font(8), anchor="w"
+        ).pack(side="left")
+        self.settings_status_var = tk.StringVar(value="")
+        tk.Label(
+            status,
+            textvariable=self.settings_status_var,
+            bg=self.c("panel"),
+            fg=self.c("success"),
+            font=self.font(8, "bold"),
+            anchor="e",
+        ).pack(side="right")
+
         scroll = ScrollFrame(self.page, self.c("panel"))
         scroll.pack(fill="both", expand=True)
+        body = scroll.inner
+        {
+            "General": self._settings_general,
+            "Appearance": self._settings_appearance,
+            "Voice": self._settings_voice,
+            "Voice agent": self._settings_voice_agent,
+            "OPERATOR": self._settings_operator,
+            "Models": self._settings_models,
+            "Macro pad": self._settings_macro_pad,
+        }[self.settings_page](body)
 
-        self._render_update_card(scroll.inner)
+    def open_settings_page(self, name):
+        self.settings_page = name
+        self.render_tab("Settings")
+
+    # ------------------------------------------------------- settings building blocks
+
+    def settings_group(self, parent, title, hint=""):
+        """A titled card. Returns the frame to drop fields into."""
+        card = self.card(parent)
+        card.pack(fill="x", pady=(0, 12))
+        tk.Label(
+            card, text=title, bg=self.c("surface"), fg=self.c("text"), font=self.font(11, "bold")
+        ).pack(anchor="w", padx=14, pady=(12, 2))
+        if hint:
+            tk.Label(
+                card,
+                text=hint,
+                bg=self.c("surface"),
+                fg=self.c("muted"),
+                font=self.font(8),
+                anchor="w",
+                justify="left",
+                wraplength=640,
+            ).pack(fill="x", padx=14, pady=(0, 6))
+        body = tk.Frame(card, bg=self.c("surface"))
+        body.pack(fill="x", padx=14, pady=(4, 12))
+        return body
+
+    def settings_field(self, parent, label, hint=""):
+        """One labelled row. Returns the frame the control goes in."""
+        wrap = tk.Frame(parent, bg=self.c("surface"))
+        wrap.pack(fill="x", pady=(0, 9))
+        head = tk.Frame(wrap, bg=self.c("surface"))
+        head.pack(fill="x")
+        tk.Label(
+            head,
+            text=label,
+            bg=self.c("surface"),
+            fg=self.c("text"),
+            font=self.font(9, "bold"),
+            width=18,
+            anchor="w",
+        ).pack(side="left")
+        control = tk.Frame(head, bg=self.c("surface"))
+        control.pack(side="left", fill="x", expand=True)
+        if hint:
+            tk.Label(
+                wrap,
+                text=hint,
+                bg=self.c("surface"),
+                fg=self.c("muted"),
+                font=self.font(8),
+                anchor="w",
+                justify="left",
+                wraplength=640,
+            ).pack(fill="x", padx=(4, 0), pady=(3, 0))
+        return control
+
+    def settings_saved(self, label=""):
+        """Flash the autosave confirmation next to the page description."""
+        var = getattr(self, "settings_status_var", None)
+        if var is None:
+            return
+        var.set(f"Saved · {label}" if label else "Saved")
+        pending = getattr(self, "_settings_status_after", None)
+        if pending:
+            try:
+                self.root.after_cancel(pending)
+            except tk.TclError:
+                pass
+        self._settings_status_after = self.root.after(2200, lambda: var.set(""))
+
+    def settings_problem(self, message):
+        var = getattr(self, "settings_status_var", None)
+        if var is not None:
+            var.set(message)
+
+    def auto_entry(self, parent, label, value, on_commit, hint="", placeholder=""):
+        """Text field that saves when you leave it or press Enter.
+
+        Committing on blur rather than on every keystroke matters here: these
+        fields hold paths and model names, and saving half-typed values would
+        persist nonsense (or, for the project root, create nonsense folders).
+        """
+        control = self.settings_field(parent, label, hint)
+        entry = self.single_line(control, value)
+        entry.pack(side="left", fill="x", expand=True)
+        if placeholder and not str(value).strip():
+            entry.insert("1.0", "")
+        state = {"last": str(value).strip()}
+
+        def commit(_event=None):
+            text = entry.get("1.0", "end").strip()
+            if text == state["last"]:
+                return None
+            try:
+                on_commit(text)
+            except Exception as exc:
+                self.settings_problem(f"{label}: {exc}")
+                return None
+            state["last"] = text
+            self.settings_saved(label)
+            return None
+
+        entry.bind("<FocusOut>", commit)
+        # Return would otherwise insert a newline into a one-line Text widget.
+        entry.bind("<Return>", lambda event: (commit(), "break")[1])
+        return entry
+
+    def auto_toggle(self, parent, label, value, on_change, hint=""):
+        control = self.settings_field(parent, label, hint)
+        var = tk.BooleanVar(value=bool(value))
+
+        def changed():
+            on_change(var.get())
+            self.settings_saved(label)
+
+        tk.Checkbutton(
+            control,
+            variable=var,
+            command=changed,
+            bg=self.c("surface"),
+            activebackground=self.c("surface"),
+            fg=self.c("text"),
+            selectcolor=self.c("panel2"),
+            highlightthickness=0,
+            bd=0,
+        ).pack(side="left")
+        return var
+
+    def auto_scale(self, parent, label, start, end, value, on_change, hint="", suffix="", resolution=1):
+        """Slider with a live readout that persists once you stop dragging."""
+        control = self.settings_field(parent, label, hint)
+        readout = tk.StringVar(value=f"{value:g}{suffix}" if isinstance(value, float) else f"{value}{suffix}")
+        key = "_scale_after_" + re.sub(r"\W+", "_", label).lower()
+
+        def changed(raw):
+            readout.set(f"{float(raw):g}{suffix}")
+            pending = getattr(self, key, None)
+            if pending:
+                try:
+                    self.root.after_cancel(pending)
+                except tk.TclError:
+                    pass
+            # Dragging fires this per pixel; only the settled value is written.
+            setattr(self, key, self.root.after(220, lambda: self._commit_scale(key, on_change, raw)))
+
+        scale = tk.Scale(
+            control,
+            from_=start,
+            to=end,
+            orient="horizontal",
+            resolution=resolution,
+            showvalue=0,
+            bg=self.c("surface"),
+            fg=self.c("text"),
+            troughcolor=self.c("panel2"),
+            highlightthickness=0,
+            activebackground=self.c("accent"),
+            sliderrelief="flat",
+            bd=0,
+        )
+        scale.set(value)
+        # Attached only after the initial value is in place — otherwise merely
+        # opening the page would write to disk and flash "Saved".
+        scale.configure(command=changed)
+        scale.pack(side="left", fill="x", expand=True)
+        tk.Label(
+            control,
+            textvariable=readout,
+            bg=self.c("surface"),
+            fg=self.c("muted"),
+            font=self.font(9),
+            width=6,
+            anchor="e",
+        ).pack(side="left", padx=(8, 0))
+        return scale
+
+    def _commit_scale(self, key, on_change, raw):
+        setattr(self, key, None)
+        on_change(raw)
+        self.settings_saved(key.replace("_scale_after_", "").replace("_", " ").strip())
+
+    def auto_option(self, parent, label, var, choices, on_change, hint=""):
+        control = self.settings_field(parent, label, hint)
+        menu = tk.OptionMenu(
+            control,
+            var,
+            *choices,
+            command=lambda _value: (on_change(), self.settings_saved(label)),
+        )
+        self.style_option(menu)
+        menu.pack(side="left")
+        return menu
+
+    # ------------------------------------------------------------ settings pages
+
+    def _settings_general(self, body):
+        group = self.settings_group(
+            body, "Project folder", "Where aiOS looks for your markdown projects."
+        )
+        self.root_entry = self.auto_entry(
+            group,
+            "Location",
+            str(self.project_root),
+            self._commit_project_root,
+            hint="Saved when you leave the field or press Enter. The folder is created if missing.",
+        )
 
         relay_cfg = self.config.get("phone_relay") or {}
-        remote = self.card(scroll.inner)
-        remote.pack(fill="x", pady=(0, 12))
-        self.section(remote, "Mobile remote")
         paired = bool(relay_cfg.get("machine_token"))
+        group = self.settings_group(
+            body,
+            "Mobile remote",
+            "Control OPERATOR from the aiOS phone app. Use the same private code on every PC.",
+        )
+        self.mobile_remote_url_entry = self.auto_entry(
+            group, "Remote URL", relay_cfg.get("url", ""), lambda text: self._commit_relay("url", text)
+        )
+        self.mobile_remote_code_entry = self.auto_entry(
+            group,
+            "Private code",
+            "",
+            lambda _text: None,
+            hint="Typed once to pair. Not stored in settings — press Connect after entering it.",
+        )
+        self.mobile_remote_name_entry = self.auto_entry(
+            group,
+            "Computer name",
+            relay_cfg.get("machine_name") or os.environ.get("COMPUTERNAME", "My computer"),
+            lambda text: self._commit_relay("machine_name", text),
+        )
         self.mobile_remote_status_var = tk.StringVar(
             value=(f"Connected as {relay_cfg.get('machine_name') or 'this PC'}" if paired else "Not connected")
         )
-        self.muted(remote, "Control OPERATOR securely from the aiOS PWA. Use the same private code on every PC.").pack(
-            anchor="w", padx=12, pady=(0, 8)
+        actions = tk.Frame(group, bg=self.c("surface"))
+        actions.pack(fill="x", pady=(4, 0))
+        self.button(actions, "Connect", self.pair_mobile_remote, compact=True).pack(side="left")
+        self.button(actions, "Open remote", self.open_mobile_remote, compact=True).pack(side="left", padx=(8, 0))
+        tk.Label(
+            actions,
+            textvariable=self.mobile_remote_status_var,
+            bg=self.c("surface"),
+            fg=self.c("muted"),
+            font=self.font(8),
+        ).pack(side="left", padx=(12, 0))
+
+        self._render_update_card(body)
+
+    def _settings_appearance(self, body):
+        group = self.settings_group(body, "Window", "Applies as you drag.")
+        self.auto_scale(
+            group, "Opacity", 75, 100, int(float(self.c("opacity")) * 100), self.set_opacity, suffix="%"
         )
-        self.mobile_remote_url_entry = self.setting_entry(remote, "Remote URL", relay_cfg.get("url", ""))
-        self.mobile_remote_code_entry = self.setting_entry(remote, "Private code", "")
-        self.mobile_remote_name_entry = self.setting_entry(
-            remote, "Computer name", relay_cfg.get("machine_name") or os.environ.get("COMPUTERNAME", "My computer")
+        self.auto_scale(group, "Text size", 8, 15, int(self.c("font_size")), self.set_font_size)
+        self.auto_scale(group, "Corner radius", 12, 40, int(self.c("radius")), self.set_radius)
+        self.auto_toggle(
+            group,
+            "Always on top",
+            bool(self.c("always_on_top")),
+            self.set_always_on_top,
+            hint="Keeps aiOS above other windows.",
         )
-        remote_actions = tk.Frame(remote, bg=self.c("surface"))
-        remote_actions.pack(fill="x", padx=12, pady=(0, 12))
-        self.button(remote_actions, "Connect", self.pair_mobile_remote, compact=True).pack(side="left")
-        self.button(remote_actions, "Open remote", self.open_mobile_remote, compact=True).pack(side="left", padx=(8, 0))
-        tk.Label(remote_actions, textvariable=self.mobile_remote_status_var, bg=self.c("surface"), fg=self.c("muted"), font=self.font(8)).pack(side="left", padx=(12, 0))
+
+        group = self.settings_group(body, "Thinking dots", "The pulse shown while a model is working.")
+        self.auto_scale(
+            group,
+            "Base opacity",
+            0,
+            100,
+            int(self.c("thinking_base_opacity")),
+            lambda value: self.set_theme_int("thinking_base_opacity", value),
+            suffix="%",
+        )
+        self.auto_scale(
+            group,
+            "Pulse opacity",
+            0,
+            100,
+            int(self.c("thinking_pulse_opacity")),
+            lambda value: self.set_theme_int("thinking_pulse_opacity", value),
+            suffix="%",
+        )
 
         self.settings_color_rows = {}
-        colors = self.card(scroll.inner)
-        colors.pack(fill="x", pady=(0, 12))
-        self.section(colors, "Colors")
+        group = self.settings_group(body, "Colors", "Click a swatch to change it.")
         for key, label in (
             ("accent", "Accent"),
             ("panel", "Panel"),
@@ -6641,161 +8202,572 @@ class HelperOverlay:
             ("muted", "Muted"),
             ("success", "Success"),
             ("danger", "Danger"),
-            ("thinking_base", "Dot Base"),
-            ("thinking_pulse", "Dot Pulse"),
+            ("thinking_base", "Dot base"),
+            ("thinking_pulse", "Dot pulse"),
         ):
-            self.color_row(colors, key, label)
+            self.color_row(group, key, label)
 
-        visual = self.card(scroll.inner)
-        visual.pack(fill="x", pady=(0, 12))
-        self.section(visual, "Visual")
-        self.scale_row(visual, "Opacity", 75, 100, int(float(self.c("opacity")) * 100), self.set_opacity)
-        self.scale_row(visual, "Text Size", 8, 15, int(self.c("font_size")), self.set_font_size)
-        self.scale_row(visual, "Corner Radius", 12, 40, int(self.c("radius")), self.set_radius)
-        self.scale_row(visual, "Dot Base Opacity", 0, 100, int(self.c("thinking_base_opacity")), lambda value: self.set_theme_int("thinking_base_opacity", value))
-        self.scale_row(visual, "Dot Pulse Opacity", 0, 100, int(self.c("thinking_pulse_opacity")), lambda value: self.set_theme_int("thinking_pulse_opacity", value))
-        self.toggle_row(visual, "Always On Top", bool(self.c("always_on_top")), self.set_always_on_top)
+    def _settings_voice(self, body):
+        voice_cfg = self._voice_cfg()
+        separate = bool(voice_cfg.get("separate_hotkeys"))
+        voice_ahk = voice_hotkey_to_ahk(voice_cfg.get("voice_hotkey") or "Insert")
+        voice_key = voice_hotkey_label(voice_ahk)
+        aios_ahk = voice_hotkey_to_ahk(voice_cfg.get("aios_hotkey") or "Insert")
+        aios_key = voice_hotkey_label(aios_ahk)
 
-        models = self.card(scroll.inner)
-        models.pack(fill="x", pady=(0, 12))
-        self.section(models, "Models")
-        self.codex_model_settings_entry = self.setting_entry(models, "Codex Model", self.config["codex_model"])
-        self.quick_model_settings_entry = self.setting_entry(models, "Quick Model", self.config["quick_codex_model"])
-        row = tk.Frame(models, bg=self.c("surface"))
-        row.pack(fill="x", padx=12, pady=(0, 6))
-        tk.Label(row, text="Codex Thinking", bg=self.c("surface"), fg=self.c("muted"), font=self.font(9, "bold"), width=16, anchor="w").pack(side="left")
-        self.settings_reasoning_var = tk.StringVar(value=self.config["codex_reasoning"])
-        option = tk.OptionMenu(row, self.settings_reasoning_var, "none", "low", "medium", "high", "xhigh")
-        self.style_option(option)
-        option.pack(side="left")
-        row2 = tk.Frame(models, bg=self.c("surface"))
-        row2.pack(fill="x", padx=12, pady=(0, 12))
-        tk.Label(row2, text="Quick Thinking", bg=self.c("surface"), fg=self.c("muted"), font=self.font(9, "bold"), width=16, anchor="w").pack(side="left")
-        self.quick_reasoning_var = tk.StringVar(value=self.config["quick_codex_reasoning"])
-        quick_option = tk.OptionMenu(row2, self.quick_reasoning_var, "none", "low", "medium", "high", "xhigh")
-        self.style_option(quick_option)
-        quick_option.pack(side="left")
-        tk.Label(models, text="Side Chat (OpenAI)", bg=self.c("surface"), fg=self.c("muted"), font=self.font(9, "bold")).pack(
-            anchor="w", padx=12, pady=(8, 0)
+        if separate:
+            summary = (
+                f"Quick press {voice_key} toggles dictation; holding it ≥0.6 s stops on release. "
+                f"{aios_key} opens and closes aiOS."
+            )
+        else:
+            summary = (
+                f"Short press {voice_key} opens aiOS. Hold {voice_key} to dictate — release to stop and type."
+            )
+        group = self.settings_group(body, "Keys", summary)
+        self.auto_toggle(
+            group,
+            "Separate keys",
+            separate,
+            self.set_voice_separate_hotkeys,
+            hint="One key for dictation, another for opening aiOS. Recommended with a macro pad.",
         )
-        self.chat_model_settings_entry = self.setting_entry(models, "Chat Model", self.config.get("chat_model", "gpt-5-mini"))
-        env_key = get_setting("OPENAI_API_KEY", "")
-        key_hint = "(using OPENAI_API_KEY env)" if env_key and not self.config.get("openai_api_key") else ""
-        self.openai_key_settings_entry = self.setting_entry(
-            models,
-            "OpenAI API Key",
-            self.config.get("openai_api_key", "") or key_hint,
+        key_control = self.settings_field(
+            group,
+            "Dictation key" if separate else "Shared key",
+            "F13–F24 are macro-pad keys. Side mouse buttons work too. AutoHotkey picks changes up within ~2 s.",
         )
-        self.button(row2, "Save Models", self.save_model_settings, compact=True).pack(side="right")
-
-        root_card = self.card(scroll.inner)
-        root_card.pack(fill="x", pady=(0, 12))
-        self.section(root_card, "Project Root")
-        row = tk.Frame(root_card, bg=self.c("surface"))
-        row.pack(fill="x", padx=12, pady=(0, 12))
-        self.root_entry = self.single_line(row, str(self.project_root))
-        self.root_entry.pack(side="left", fill="x", expand=True)
-        self.button(row, "Save", self.save_project_root, compact=True).pack(side="right", padx=(8, 0))
-
-        voice = self.card(scroll.inner)
-        voice.pack(fill="x", pady=(0, 12))
-        self.section(voice, "Voice Dictation")
-        voice_cfg = self.config.get("voice_dictation") or dict(DEFAULT_VOICE_DICTATION)
-        current_key = voice_cfg.get("voice_hotkey") or "Insert"
-        self.muted(
-            voice,
-            f"Short {current_key} opens aiOS on release. Hold {current_key} to dictate — "
-            "release to stop and type.",
-        ).pack(anchor="w", padx=12, pady=(0, 8))
-
-        # Editable hotkey row.
-        key_row = tk.Frame(voice, bg=self.c("surface"))
-        key_row.pack(fill="x", padx=12, pady=(0, 8))
-        tk.Label(key_row, text="Hotkey", bg=self.c("surface"), fg=self.c("muted"),
-                 font=self.font(9, "bold"), width=16, anchor="w").pack(side="left")
-        self.voice_hotkey_var = tk.StringVar(value=current_key)
-        tk.Label(key_row, textvariable=self.voice_hotkey_var,
-                 bg="#080d14", fg=self.c("text"), font=self.font(9, "bold"),
-                 padx=10, pady=4).pack(side="left", padx=(0, 8))
-        self.button(key_row, "Change…",
-                     self._capture_voice_hotkey, compact=True).pack(side="left")
-        self.muted(key_row,
-                    "Press the key you want to use. Function keys, Insert, "
-                    "PageUp/Down, Home/End, Pause, ScrollLock all work."
-                    ).pack(side="left", padx=(10, 0))
-
-        hold_ms = int(voice_cfg.get("hold_ms", voice_cfg.get("double_press_ms", 280)))
-        self.scale_row(
-            voice,
-            "Hold threshold (ms)",
-            150,
-            800,
-            hold_ms,
-            self.set_voice_hold_ms,
+        self.voice_hotkey_var = tk.StringVar(value=voice_key)
+        key_menu = tk.OptionMenu(
+            key_control,
+            self.voice_hotkey_var,
+            *VOICE_HOTKEY_OPTIONS,
+            command=lambda name: self._on_hotkey_choice("voice_hotkey", name),
         )
-        self.scale_row(
-            voice,
-            "Mic sensitivity",
+        self.style_option(key_menu)
+        key_menu.pack(side="left", padx=(0, 8))
+        self.button(key_control, "Capture…", lambda: self._capture_hotkey("voice_hotkey"), compact=True).pack(
+            side="left"
+        )
+
+        if separate:
+            open_control = self.settings_field(group, "Open aiOS key", "Immediate open/close — no hold wait.")
+            self.aios_hotkey_var = tk.StringVar(value=aios_key)
+            open_menu = tk.OptionMenu(
+                open_control,
+                self.aios_hotkey_var,
+                *VOICE_HOTKEY_OPTIONS,
+                command=lambda name: self._on_hotkey_choice("aios_hotkey", name),
+            )
+            self.style_option(open_menu)
+            open_menu.pack(side="left", padx=(0, 8))
+            self.button(
+                open_control, "Capture…", lambda: self._capture_hotkey("aios_hotkey"), compact=True
+            ).pack(side="left")
+        else:
+            self.auto_scale(
+                group,
+                "Hold threshold",
+                150,
+                800,
+                int(voice_cfg.get("hold_ms", 280)),
+                self.set_voice_hold_ms,
+                hint="Held longer than this means dictate; shorter means open aiOS.",
+                suffix=" ms",
+            )
+
+        group = self.settings_group(body, "Microphone", "What aiOS listens to, and how hard it listens.")
+        self.voice_input_device_entry = self.auto_entry(
+            group,
+            "Device",
+            voice_cfg.get("input_device", ""),
+            lambda text: self._commit_voice_text("input_device", text),
+            hint="Part of the device name, e.g. 'Yeti'. Leave empty to follow the Windows default.",
+        )
+        self.auto_scale(
+            group,
+            "Sensitivity",
             1,
             50,
             max(1, min(50, int(float(voice_cfg.get("silence_rms", 0.006)) * 10000))),
             self.set_voice_mic_sensitivity,
+            hint="Lower picks up quieter speech but also more room noise.",
         )
-        self.voice_model_settings_entry = self.setting_entry(
-            voice, "Whisper model", voice_cfg.get("whisper_model", "small")
+
+        group = self.settings_group(
+            body, "Transcription", "Whisper runs locally. Bigger models are slower but hear you better."
         )
-        lang_row = tk.Frame(voice, bg=self.c("surface"))
-        lang_row.pack(fill="x", padx=12, pady=(0, 8))
-        tk.Label(lang_row, text="Language", bg=self.c("surface"), fg=self.c("muted"), font=self.font(9, "bold"), width=16, anchor="w").pack(
-            side="left"
+        self.voice_model_settings_entry = self.auto_entry(
+            group,
+            "Model",
+            voice_cfg.get("whisper_model", "small"),
+            lambda text: self._commit_voice_text("whisper_model", text),
+            hint="large-v3-turbo is the best pick on a GPU: near-large accuracy at small speed. "
+            "Also: tiny, base, small, medium, large-v3, distil-large-v3, and .en variants. "
+            "Restart dictation to load a new model.",
         )
         self.voice_language_var = tk.StringVar(value=voice_cfg.get("language", "auto"))
-        lang_menu = tk.OptionMenu(
-            lang_row,
+        self.auto_option(
+            group,
+            "Language",
             self.voice_language_var,
-            *WHISPER_LANGUAGES,
-        )
-        self.style_option(lang_menu)
-        lang_menu.pack(side="left")
-        self.muted(lang_row, "Use Auto or Swedish with multilingual models (small, not small.en).").pack(
-            side="left", padx=(10, 0)
-        )
-        row = tk.Frame(voice, bg=self.c("surface"))
-        row.pack(fill="x", padx=12, pady=(0, 8))
-        tk.Label(row, text="Compute", bg=self.c("surface"), fg=self.c("muted"), font=self.font(9, "bold"), width=16, anchor="w").pack(
-            side="left"
+            WHISPER_LANGUAGES,
+            lambda: self._commit_voice_var("language", self.voice_language_var),
+            hint="Auto and Swedish need a multilingual model (small, not small.en).",
         )
         self.voice_compute_var = tk.StringVar(value=voice_cfg.get("compute_type", "int8"))
-        compute_menu = tk.OptionMenu(row, self.voice_compute_var, *COMPUTE_TYPES)
-        self.style_option(compute_menu)
-        compute_menu.pack(side="left")
-        self.scale_row(
-            voice,
-            "Typing delay (ms)",
+        self.auto_option(
+            group,
+            "Compute",
+            self.voice_compute_var,
+            COMPUTE_TYPES,
+            lambda: self._commit_voice_var("compute_type", self.voice_compute_var),
+            hint="float16 on a GPU, int8 on CPU.",
+        )
+        self.voice_vocabulary_entry = self.auto_entry(
+            group,
+            "Vocabulary",
+            ", ".join(voice_cfg.get("vocabulary") or []),
+            lambda text: self._commit_voice_text("vocabulary", text),
+            hint="Names Whisper has never heard, comma separated. Biases the decoder toward them.",
+        )
+        self.voice_replacements_entry = self.auto_entry(
+            group,
+            "Fix words",
+            ", ".join(f"{key}={value}" for key, value in (voice_cfg.get("replacements") or {}).items()),
+            lambda text: self._commit_voice_text("replacements", text),
+            hint="wrong=right pairs applied to every transcript, e.g. ayos=aiOS, operator=OPERATOR.",
+        )
+        self.auto_toggle(
+            group,
+            "Filter silence junk",
+            bool(voice_cfg.get("hallucination_filter", True)),
+            self.set_voice_hallucination_filter,
+            hint="Drops the stock phrases Whisper invents on silence instead of typing them.",
+        )
+        self.auto_toggle(
+            group,
+            "Keep transcript log",
+            bool(voice_cfg.get("transcript_history", True)),
+            self.set_voice_transcript_history,
+            hint="Appends every finished turn to voice-transcripts.jsonl (git-ignored).",
+        )
+
+        group = self.settings_group(body, "Output", "What happens when a turn finishes.")
+        self.auto_scale(
+            group,
+            "Overlay opacity",
+            20,
+            100,
+            int(voice_cfg.get("overlay_opacity", 85)),
+            self.set_voice_overlay_opacity,
+            hint="Background of the dictation pill and the agent chat panel.",
+            suffix="%",
+        )
+        self.auto_scale(
+            group,
+            "Typing delay",
             0,
             50,
             int(voice_cfg.get("typing_delay_ms", 0)),
             self.set_voice_typing_delay_ms,
+            hint="Raise this only if an app drops characters when text is typed quickly.",
+            suffix=" ms",
         )
-        self.toggle_row(
-            voice,
-            "Discord mute while dictating",
+        self.auto_toggle(
+            group,
+            "Speak replies",
+            bool(voice_cfg.get("agent_tts_enabled", True)),
+            self.set_voice_agent_tts,
+            hint="Read the agent's answers out loud.",
+        )
+        self.auto_toggle(
+            group,
+            "Stop on new speech",
+            bool(voice_cfg.get("barge_in", True)),
+            self.set_voice_barge_in,
+            hint="Cuts the spoken reply the moment you press to talk, so it never talks into your mic.",
+        )
+
+        group = self.settings_group(body, "Discord", "Mute yourself in Discord while dictating.")
+        self.auto_toggle(
+            group,
+            "Mute while dictating",
             bool(voice_cfg.get("discord_mute_enabled")),
             self.set_voice_discord_mute_enabled,
         )
-        self.voice_discord_hotkey_entry = self.setting_entry(
-            voice,
-            "Discord mute key",
+        self.voice_discord_hotkey_entry = self.auto_entry(
+            group,
+            "Mute key",
             voice_cfg.get("discord_mute_hotkey", ""),
+            lambda text: self._commit_voice_text("discord_mute_hotkey", text),
+            hint="Match Discord → Keybinds → Toggle Mute. Combos work: Alt+M, Ctrl+Shift+M, F8. "
+            "Applies after AutoHotkey reloads.",
         )
-        self.muted(
-            voice,
-            "Match Discord → Keybinds → Toggle Mute. Combos OK: Alt+M, Ctrl+Shift+M, F8, etc.",
-        ).pack(anchor="w", padx=12, pady=(0, 8))
-        voice_actions = tk.Frame(voice, bg=self.c("surface"))
-        voice_actions.pack(fill="x", padx=12, pady=(0, 12))
-        self.button(voice_actions, "Save Voice", self.save_voice_settings, compact=True).pack(side="left")
-        self.muted(voice_actions, "Sliders save instantly. Model/compute need Save Voice.").pack(side="left", padx=(10, 0))
+
+    def _settings_voice_agent(self, body):
+        voice_cfg = self._voice_cfg()
+        group = self.settings_group(
+            body,
+            "Tools",
+            "Each switch adds or removes a capability. Off means the tool is never offered to the model.",
+        )
+        for key, label, hint in (
+            ("agent_web_search", "Web search", "Look things up online."),
+            ("agent_open_apps", "Open apps & URLs", "Launch Start Menu apps and web pages."),
+            ("agent_shell", "PowerShell", "Run local commands for facts and small changes."),
+            ("agent_operator", "OPERATOR", "Hand multi-step GUI work to the computer-use agent."),
+            ("agent_clipboard_read", "Read clipboard", "Use what you just copied as context."),
+            ("agent_screen", "Read screen", "Look at the monitor and answer questions about it."),
+            ("agent_files", "Files", "Read and write text files in your allowed folders."),
+            ("agent_media", "Volume & media", "Set the volume, play/pause, skip tracks."),
+            ("agent_timers", "Reminders", "Schedule reminders that are spoken out loud."),
+            ("agent_windows", "Windows", "List, focus and close open windows."),
+            ("agent_remember", "Long-term memory", "Remember facts about you across restarts."),
+        ):
+            self.auto_toggle(
+                group,
+                label,
+                bool(voice_cfg.get(key, True)),
+                lambda value, name=key: self.set_voice_agent_tool(name, value),
+                hint=hint,
+            )
+
+        group = self.settings_group(
+            body,
+            "Shell safety",
+            "The agent's input is dictated speech, so a mis-heard sentence must not be able to do damage.",
+        )
+        self.auto_toggle(
+            group,
+            "Block destructive",
+            bool(voice_cfg.get("agent_shell_guard", True)),
+            lambda value: self.set_voice_agent_tool("agent_shell_guard", value),
+            hint="Refuses recursive deletes, formats, shutdowns and download-and-run outright.",
+        )
+        self.auto_toggle(
+            group,
+            "Confirm changes",
+            bool(voice_cfg.get("agent_shell_confirm", True)),
+            lambda value: self.set_voice_agent_tool("agent_shell_confirm", value),
+            hint="Anything that changes state is read back to you and waits for a spoken yes.",
+        )
+
+        group = self.settings_group(body, "Conversation", "How much the agent carries between turns.")
+        self.auto_toggle(
+            group,
+            "Remember chat",
+            bool(voice_cfg.get("agent_persist_memory", True)),
+            lambda value: self.set_voice_agent_tool("agent_persist_memory", value),
+            hint="Keeps the conversation across a restart of the dictation process.",
+        )
+        self.auto_scale(
+            group,
+            "Forget after",
+            0,
+            120,
+            int(voice_cfg.get("agent_memory_minutes", 10)),
+            lambda value: self._commit_voice_number("agent_memory_minutes", value),
+            hint="Minutes of silence before the conversation resets. 0 never forgets.",
+            suffix=" min",
+        )
+        self.auto_scale(
+            group,
+            "Tool rounds",
+            1,
+            12,
+            int(voice_cfg.get("agent_max_rounds", 6)),
+            lambda value: self._commit_voice_number("agent_max_rounds", value),
+            hint="How many times the agent may call tools before it must answer.",
+        )
+
+    def _settings_operator(self, body):
+        settings = self.config.get("ai_operator") or dict(DEFAULT_CONFIG["ai_operator"])
+        # Bound to the same variables the OPERATOR tab uses, so the two screens
+        # can never disagree about what is configured.
+        if not self.agent_operator_model_var:
+            self.agent_operator_model_var = tk.StringVar(
+                value=str(settings.get("model") or self.agent_operator_default_model)
+            )
+        if not self.agent_operator_planner_model_var:
+            self.agent_operator_planner_model_var = tk.StringVar(value=str(settings.get("planner_model") or "off"))
+        if not self.agent_operator_reason_var:
+            self.agent_operator_reason_var = tk.StringVar(value=str(settings.get("reasoning") or "low"))
+        if not self.agent_operator_steps_var:
+            self.agent_operator_steps_var = tk.StringVar(value=str(settings.get("steps") or "25"))
+        if not self.agent_operator_delay_var:
+            self.agent_operator_delay_var = tk.StringVar(value=str(settings.get("delay") or "0.20"))
+        if not self.agent_operator_tts_var:
+            self.agent_operator_tts_var = tk.BooleanVar(value=bool(settings.get("tts", False)))
+        if not self.agent_operator_voice_var:
+            self.agent_operator_voice_var = tk.StringVar(
+                value=str(settings.get("voice") or self.agent_operator_default_voice)
+            )
+        if not self.agent_operator_shell_var:
+            self.agent_operator_shell_var = tk.BooleanVar(value=bool(settings.get("shell", False)))
+        if not self.agent_operator_codex_var:
+            self.agent_operator_codex_var = tk.BooleanVar(value=bool(settings.get("codex_auth", False)))
+
+        save = self.save_agent_operator_settings
+        group = self.settings_group(body, "Models", "Which models plan and drive the run.")
+        model_choices = ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"]
+        if self.agent_operator_model_var.get() not in model_choices:
+            model_choices.insert(0, self.agent_operator_model_var.get())
+        self.auto_option(
+            group,
+            "Acting model",
+            self.agent_operator_model_var,
+            model_choices,
+            save,
+            hint="Looks at the screen and decides the next click.",
+        )
+        planner_choices = ["off", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"]
+        if self.agent_operator_planner_model_var.get() not in planner_choices:
+            planner_choices.insert(0, self.agent_operator_planner_model_var.get())
+        self.auto_option(
+            group,
+            "Planning model",
+            self.agent_operator_planner_model_var,
+            planner_choices,
+            save,
+            hint="Optional second model that writes the plan before OPERATOR starts.",
+        )
+        self.auto_option(
+            group,
+            "Reasoning",
+            self.agent_operator_reason_var,
+            ("minimal", "low", "medium", "high", "xhigh", "max"),
+            save,
+            hint="Higher thinks longer per step. Costs more and runs slower.",
+        )
+
+        group = self.settings_group(body, "Run limits", "Guard rails for a run that goes wrong.")
+        self.auto_scale(
+            group,
+            "Max steps",
+            1,
+            200,
+            int(float(self.agent_operator_steps_var.get() or 25)),
+            lambda value: self._commit_operator_var(self.agent_operator_steps_var, int(float(value))),
+            hint="OPERATOR stops and asks once it has used this many actions.",
+        )
+        self.auto_scale(
+            group,
+            "Step delay",
+            0.0,
+            3.0,
+            float(self.agent_operator_delay_var.get() or 0.20),
+            lambda value: self._commit_operator_var(self.agent_operator_delay_var, f"{float(value):.2f}"),
+            hint="Pause between actions. Raise it if apps cannot keep up.",
+            suffix=" s",
+            resolution=0.05,
+        )
+
+        group = self.settings_group(body, "Behaviour", "What OPERATOR may do and how it reports back.")
+        self.auto_toggle(
+            group,
+            "Speak progress",
+            bool(self.agent_operator_tts_var.get()),
+            lambda value: self._commit_operator_flag(self.agent_operator_tts_var, value),
+            hint="Narrates what it is doing out loud.",
+        )
+        self.auto_toggle(
+            group,
+            "Allow shell",
+            bool(self.agent_operator_shell_var.get()),
+            lambda value: self._commit_operator_flag(self.agent_operator_shell_var, value),
+            hint="Lets OPERATOR run commands instead of only clicking.",
+        )
+        self.auto_toggle(
+            group,
+            "Use Codex auth",
+            bool(self.agent_operator_codex_var.get()),
+            lambda value: self._commit_operator_flag(self.agent_operator_codex_var, value),
+            hint="Bills through your Codex sign-in instead of the API key.",
+        )
+        tk.Label(
+            group,
+            text="Monitor choice, preview and cursor test live on the OPERATOR tab, next to the run controls.",
+            bg=self.c("surface"),
+            fg=self.c("muted"),
+            font=self.font(8),
+            anchor="w",
+            justify="left",
+            wraplength=560,
+        ).pack(fill="x", pady=(2, 0))
+
+    def _settings_models(self, body):
+        group = self.settings_group(body, "Codex", "The coding agent behind the Codex tab.")
+        self.codex_model_settings_entry = self.auto_entry(
+            group, "Model", self.config["codex_model"], lambda text: self._commit_config("codex_model", text)
+        )
+        self.settings_reasoning_var = tk.StringVar(value=self.config["codex_reasoning"])
+        self.auto_option(
+            group,
+            "Thinking",
+            self.settings_reasoning_var,
+            ("none", "low", "medium", "high", "xhigh"),
+            lambda: self._commit_config("codex_reasoning", self.settings_reasoning_var.get()),
+        )
+
+        group = self.settings_group(body, "Quick chat", "The faster model used for short questions.")
+        self.quick_model_settings_entry = self.auto_entry(
+            group,
+            "Model",
+            self.config["quick_codex_model"],
+            lambda text: self._commit_config("quick_codex_model", text),
+        )
+        self.quick_reasoning_var = tk.StringVar(value=self.config["quick_codex_reasoning"])
+        self.auto_option(
+            group,
+            "Thinking",
+            self.quick_reasoning_var,
+            ("none", "low", "medium", "high", "xhigh"),
+            lambda: self._commit_config("quick_codex_reasoning", self.quick_reasoning_var.get()),
+        )
+
+        env_key = get_setting("OPENAI_API_KEY", "")
+        stored_key = self.config.get("openai_api_key", "")
+        group = self.settings_group(body, "OpenAI", "Used by the side chat, the voice agent and OPERATOR.")
+        self.chat_model_settings_entry = self.auto_entry(
+            group,
+            "Chat model",
+            self.config.get("chat_model", DEFAULT_CHAT_MODEL),
+            lambda text: self._commit_config("chat_model", text),
+        )
+        self.openai_key_settings_entry = self.auto_entry(
+            group,
+            "API key",
+            stored_key,
+            self._commit_openai_key,
+            hint=(
+                "Currently using the OPENAI_API_KEY environment variable — leave empty to keep it."
+                if env_key and not stored_key
+                else "Stored in helper_config.json, which is git-ignored."
+            ),
+        )
+
+    def _settings_macro_pad(self, body):
+        group = self.settings_group(
+            body,
+            "How it works today",
+            "Macro-pad buttons talk to aiOS over a local socket by running one of these files. "
+            "Bind each one in your macro software.",
+        )
+        for filename, description in (
+            ("voice_ptt_down.bat", "Button down: start dictating."),
+            ("voice_ptt_up.bat", "Button release: stop and send."),
+            ("voice_target_cursor.bat", "Send the transcript to whatever window is focused."),
+            ("voice_target_clipboard.bat", "Copy the transcript instead of typing it."),
+            ("voice_target_agent.bat", "Send the transcript to the voice agent."),
+            ("voice_cancel.bat", "Throw the turn away without sending it."),
+            ("voice_stop_agent.bat", "Panic button: stop the reply, the turn and any OPERATOR job."),
+        ):
+            row = tk.Frame(group, bg=self.c("surface"))
+            row.pack(fill="x", pady=(0, 6))
+            exists = (BASE_DIR / filename).exists()
+            tk.Label(
+                row,
+                text=filename,
+                bg=self.c("surface"),
+                fg=self.c("text") if exists else self.c("danger"),
+                font=self.font(9, "bold"),
+                width=26,
+                anchor="w",
+            ).pack(side="left")
+            tk.Label(
+                row,
+                text=description if exists else f"{description}  (missing)",
+                bg=self.c("surface"),
+                fg=self.c("muted"),
+                font=self.font(8),
+                anchor="w",
+                justify="left",
+                wraplength=420,
+            ).pack(side="left", fill="x", expand=True)
+
+        actions = tk.Frame(group, bg=self.c("surface"))
+        actions.pack(fill="x", pady=(6, 0))
+        self.button(
+            actions,
+            "Open folder",
+            lambda: os.startfile(str(BASE_DIR)),
+            compact=True,
+        ).pack(side="left")
+
+        group = self.settings_group(
+            body,
+            "Planned",
+            "Macro-pad configuration is moving into aiOS so buttons can be bound here instead of "
+            "through .bat files and external macro software.",
+        )
+        for line in (
+            "Bind a button to any aiOS action from this page.",
+            "Per-profile layouts that follow the focused app.",
+            "Actions beyond voice: switch tabs, start an OPERATOR task, run a saved prompt.",
+            "Live button feedback while a run is in progress.",
+        ):
+            tk.Label(
+                group,
+                text=f"·  {line}",
+                bg=self.c("surface"),
+                fg=self.c("muted"),
+                font=self.font(9),
+                anchor="w",
+                justify="left",
+                wraplength=600,
+            ).pack(fill="x", pady=(0, 4))
+
+    # -------------------------------------------------------- settings commit helpers
+
+    def _commit_config(self, key, value):
+        self.config[key] = value
+        save_config(self.config)
+
+    def _commit_openai_key(self, text):
+        if text.startswith("(using OPENAI_API_KEY"):
+            return
+        self.config["openai_api_key"] = text
+        save_config(self.config)
+        self.refresh_chat_account()
+
+    def _commit_project_root(self, text):
+        if not text:
+            return
+        path = Path(text)
+        path.mkdir(parents=True, exist_ok=True)
+        self.project_root = path
+        self.config["project_root"] = str(path)
+        save_config(self.config)
+
+    def _commit_relay(self, key, value):
+        relay = self.config.setdefault("phone_relay", {})
+        relay[key] = value
+        save_config(self.config)
+
+    def _commit_voice_text(self, key, text):
+        """Settings-UI text field → voice config. merge parses the list forms."""
+        self._voice_cfg()[key] = text
+        self._save_voice_cfg()
+        self._reload_voice_dictation()
+
+    def _commit_voice_var(self, key, var):
+        self._voice_cfg()[key] = var.get()
+        self._save_voice_cfg()
+        self._reload_voice_dictation()
+
+    def _commit_voice_number(self, key, value):
+        self._voice_cfg()[key] = int(float(value))
+        self._save_voice_cfg()
+        self._reload_voice_dictation()
+
+    def _commit_operator_var(self, var, value):
+        var.set(str(value))
+        self.save_agent_operator_settings()
+
+    def _commit_operator_flag(self, var, value):
+        var.set(bool(value))
+        self.save_agent_operator_settings()
 
     def _ensure_phone_relay(self):
         relay = self.config.get("phone_relay") or {}
@@ -6888,49 +8860,6 @@ class HelperOverlay:
         self.settings_color_rows[key] = entry
         self.button(row, "Pick", lambda value=key: self.pick_color(value), compact=True).pack(side="right", padx=(8, 0))
         self.button(row, "Apply", lambda value=key: self.apply_color(value), compact=True).pack(side="right", padx=(8, 0))
-
-    def scale_row(self, parent, label, start, end, value, command):
-        row = tk.Frame(parent, bg=self.c("surface"))
-        row.pack(fill="x", padx=12, pady=(0, 10))
-        tk.Label(row, text=label, bg=self.c("surface"), fg=self.c("muted"), font=self.font(9, "bold"), width=16, anchor="w").pack(side="left")
-        scale = tk.Scale(
-            row,
-            from_=start,
-            to=end,
-            orient="horizontal",
-            bg=self.c("surface"),
-            fg=self.c("text"),
-            troughcolor=self.c("panel2"),
-            highlightthickness=0,
-            activebackground=self.c("accent"),
-            command=command,
-        )
-        scale.set(value)
-        scale.pack(side="left", fill="x", expand=True)
-
-    def toggle_row(self, parent, label, value, command):
-        row = tk.Frame(parent, bg=self.c("surface"))
-        row.pack(fill="x", padx=12, pady=(0, 10))
-        tk.Label(row, text=label, bg=self.c("surface"), fg=self.c("muted"), font=self.font(9, "bold"), width=16, anchor="w").pack(side="left")
-        var = tk.BooleanVar(value=value)
-        check = tk.Checkbutton(
-            row,
-            variable=var,
-            command=lambda: command(var.get()),
-            bg=self.c("surface"),
-            activebackground=self.c("surface"),
-            fg=self.c("text"),
-            selectcolor=self.c("panel2"),
-        )
-        check.pack(side="left")
-
-    def setting_entry(self, parent, label, value):
-        row = tk.Frame(parent, bg=self.c("surface"))
-        row.pack(fill="x", padx=12, pady=(0, 8))
-        tk.Label(row, text=label, bg=self.c("surface"), fg=self.c("muted"), font=self.font(9, "bold"), width=16, anchor="w").pack(side="left")
-        entry = self.single_line(row, value)
-        entry.pack(side="left", fill="x", expand=True)
-        return entry
 
     def create_from_entry(self):
         self.open_create_project()
@@ -7611,7 +9540,7 @@ class HelperOverlay:
 
     def save_codex_settings(self):
         if hasattr(self, "codex_model_entry"):
-            self.config["codex_model"] = self.codex_model_entry.get("1.0", "end").strip() or "gpt-4.1-nano"
+            self.config["codex_model"] = self.codex_model_entry.get("1.0", "end").strip() or DEFAULT_CHAT_MODEL
         if hasattr(self, "codex_reasoning_var"):
             self.config["codex_reasoning"] = self.codex_reasoning_var.get() or "none"
         save_config(self.config)
@@ -7640,7 +9569,7 @@ class HelperOverlay:
 
         output_file = Path(tempfile.gettempdir()) / f"aios-codex-{int(time.time())}.txt"
         reasoning = self.config.get("codex_reasoning", "none")
-        model = self.config.get("codex_model", "gpt-4.1-nano")
+        model = self.config.get("codex_model", DEFAULT_CHAT_MODEL)
         args = [
             codex,
             "exec",
@@ -7731,7 +9660,7 @@ class HelperOverlay:
             self._ui_queue.put(run)
 
     def _status_subtitle(self):
-        chat_model = self.config.get("chat_model") or "gpt-5-mini"
+        chat_model = self.config.get("chat_model") or DEFAULT_CHAT_MODEL
         return f"{self.project_root}  |  Chat {chat_model}  |  Codex {self.config['codex_model']}"
 
     def get_openai_api_key(self):
@@ -7790,8 +9719,12 @@ class HelperOverlay:
         messages = [{"role": "system", "content": CHAT_SYSTEM_PROMPT}]
         ctx = self.chat_app_context()
         messages.append({"role": "system", "content": f"Current aiOS context:\n{json.dumps(ctx, indent=2)}"})
-        for role, text in self.history[-12:-1]:
-            if role == "User":
+        for item in self.history[-12:-1]:
+            if isinstance(item, (list, tuple)):
+                role, text = item[0], item[1]
+            else:
+                role, text = item.get("role", ""), item.get("text", "")
+            if str(role) == "User":
                 messages.append({"role": "user", "content": str(text)})
             else:
                 messages.append({"role": "assistant", "content": str(text)})
@@ -8114,7 +10047,7 @@ class HelperOverlay:
 
         if tools_used is None:
             tools_used = []
-        model = (self.config.get("chat_model") or "gpt-5-mini").strip()
+        model = (self.config.get("chat_model") or DEFAULT_CHAT_MODEL).strip()
         messages = self.build_chat_messages(prompt)
 
         for _round in range(8):
@@ -8175,10 +10108,9 @@ class HelperOverlay:
             self.local_reply(local_reply, elapsed=time.perf_counter() - sent_at)
             return "break"
 
-        codex_ok, _codex_label = codex_auth_info()
-        if not self.get_openai_api_key() and not codex_ok:
+        if not self.get_openai_api_key():
             self.local_reply(
-                "Add your OpenAI API key in Settings, set OPENAI_API_KEY, or click Login for Codex.",
+                "Add your OpenAI API key in Settings (same key the dictation agent uses).",
                 elapsed=time.perf_counter() - sent_at,
             )
             return "break"
@@ -8190,8 +10122,122 @@ class HelperOverlay:
         self.subtitle.configure(text="thinking")
         self.send_button.configure(state="disabled")
         self.show_thinking()
-        threading.Thread(target=self._ask_ai, args=(prompt, sent_at, run_id), daemon=True).start()
+        # Hand off to the dictation voice agent so typed + spoken share one brain.
+        threading.Thread(target=self._ask_voice_agent, args=(prompt, sent_at, run_id), daemon=True).start()
         return "break"
+
+    def _ask_voice_agent(self, prompt, sent_at, run_id):
+        """Send a typed turn to voice_dictation's VoiceAgent; reply arrives via voice_log."""
+        self._ensure_voice_server()
+        # Give a freshly spawned server a moment to bind.
+        deadline = time.perf_counter() + 2.5
+        delivered = False
+        while time.perf_counter() < deadline:
+            if self._send_voice_ask(prompt, echo_user=False):
+                delivered = True
+                break
+            time.sleep(0.12)
+        if delivered:
+            # voice_log finishes the turn (hide thinking + append reply).
+            return
+        # Fallback: run the agent in-process if the voice server is unavailable.
+        try:
+            from voice_agent import VoiceAgent
+
+            def on_event(kind, payload):
+                if kind == "status":
+                    status = payload if isinstance(payload, str) else "Thinking"
+                    self._ui_async(self.set_thinking_status, status)
+                elif kind == "tool_start":
+                    detail = payload if isinstance(payload, dict) else {}
+                    self._ui_async(
+                        self.set_thinking_status,
+                        detail.get("label") or detail.get("name") or "Running tool",
+                    )
+                elif kind == "tool_done":
+                    detail = payload if isinstance(payload, dict) else {}
+                    if detail:
+                        self._ui_async(self._embed_tool_card, detail, before_thinking=True)
+                    self._ui_async(self.set_thinking_status, "Thinking")
+                elif kind == "reply_start":
+                    self._ui_async(self._start_stream_reply)
+                elif kind == "reply_delta":
+                    self._ui_async(self._append_stream_reply, str(payload or ""))
+                elif kind == "reply_done":
+                    self._ui_async(self._set_stream_reply, str(payload or ""))
+
+            if getattr(self, "_gui_voice_agent", None) is None:
+                self._gui_voice_agent = VoiceAgent(on_event=on_event)
+            else:
+                self._gui_voice_agent.on_event = on_event
+            result = self._gui_voice_agent.run(prompt)
+            reply = (result.reply or result.error or "No reply.").strip()
+            details = list(getattr(result, "tool_details", None) or [])
+        except Exception as exc:
+            reply = self._error_message(exc)
+            details = []
+
+        def finish():
+            if run_id != self.chat_run_id:
+                return
+            had_live = bool(self._agent_turn_active)
+            live_tools = self._live_tool_count
+            self.hide_thinking()
+            meta = self.format_elapsed(time.perf_counter() - sent_at)
+            stream_frame = getattr(self, "_stream_reply_frame", None)
+            try:
+                stream_ok = stream_frame is not None and stream_frame.winfo_exists()
+            except tk.TclError:
+                stream_ok = False
+            if stream_ok:
+                if live_tools <= 0 and details:
+                    for detail in details:
+                        self._embed_tool_card(detail, before_thinking=False)
+                self._finalize_stream_reply(reply, meta=meta)
+            elif had_live:
+                if live_tools <= 0 and details:
+                    for detail in details:
+                        self._embed_tool_card(detail, before_thinking=False)
+                self._append_assistant_body(reply, meta=meta)
+            else:
+                self.append_assistant_message(reply, tools=details or None, meta=meta)
+            self.add_history("Assistant", reply, tools=details or None)
+            self.busy = False
+            self.chat_busy_since = 0.0
+            self._live_tool_count = 0
+            if hasattr(self, "send_button"):
+                try:
+                    self.send_button.configure(state="normal")
+                except tk.TclError:
+                    pass
+            try:
+                self.subtitle.configure(text=self._status_subtitle())
+            except tk.TclError:
+                pass
+
+        self._ui_async(finish)
+
+    def _send_voice_ask(self, text, echo_user=True):
+        payload = json.dumps({"cmd": "ask", "text": str(text or ""), "echo_user": bool(echo_user)})
+        try:
+            with socket.create_connection(("127.0.0.1", 48737), timeout=1.5) as client:
+                client.sendall(payload.encode("utf-8"))
+            return True
+        except OSError:
+            return False
+
+    def _send_voice_reset_agent(self):
+        for payload in (
+            json.dumps({"cmd": "reset_agent"}),
+            "reset_agent",
+        ):
+            try:
+                with socket.create_connection(("127.0.0.1", 48737), timeout=0.4) as client:
+                    client.sendall(payload.encode("utf-8"))
+                return True
+            except OSError:
+                continue
+        return False
 
     def should_use_quick_codex(self, prompt):
         lower = prompt.casefold().strip()
@@ -8277,7 +10323,11 @@ class HelperOverlay:
         model = (self.config.get("quick_codex_model") or "").strip()
         reasoning = self.config.get("quick_codex_reasoning", "none")
         context_lines = []
-        for role, text in self.history[-5:-1]:
+        for item in self.history[-5:-1]:
+            if isinstance(item, (list, tuple)):
+                role, text = item[0], item[1]
+            else:
+                role, text = item.get("role", ""), item.get("text", "")
             snippet = str(text).strip().replace("\n", " ")
             if len(snippet) > 240:
                 snippet = snippet[:240] + "..."
@@ -8479,7 +10529,7 @@ class HelperOverlay:
 
     def local_reply(self, text, elapsed=None):
         meta = self.format_elapsed(elapsed) if elapsed is not None else None
-        self.append("aiOS", text, "assistant", meta=meta)
+        self.append_assistant_message(text, meta=meta)
         self.add_history("Assistant", text)
 
     def format_elapsed(self, elapsed):
@@ -8487,33 +10537,217 @@ class HelperOverlay:
             return f"{elapsed * 1000:.0f} ms"
         return f"{elapsed:.1f} s"
 
-    def show_thinking(self):
-        if not hasattr(self, "chat"):
-            return
-        bg = getattr(self, "_assistant_bg", self.c("surface"))
+    def _chat_on_inner_configure(self, _event=None):
         try:
-            if self.thinking_canvas is None or not self.thinking_canvas.winfo_exists():
-                self.thinking_canvas = tk.Canvas(
-                    self.chat, width=22, height=8, bg=bg, highlightthickness=0, bd=0
-                )
-            self.chat.configure(state="normal")
-            self.chat.mark_set("thinking_start", "end-1c")
-            self.chat.mark_gravity("thinking_start", "left")
-            self.chat.insert("end", "aiOS\n", "assistant_label")
-            self.chat.window_create("end", window=self.thinking_canvas, padx=12, pady=2)
-            self.chat.insert("end", "\n\n", "assistant")
+            self.chat_canvas.configure(scrollregion=self.chat_canvas.bbox("all"))
         except tk.TclError:
             pass
-        finally:
+
+    def _chat_on_canvas_configure(self, event):
+        try:
+            self.chat_canvas.itemconfigure(self._chat_canvas_window, width=event.width)
+        except tk.TclError:
+            pass
+
+    def _chat_on_mousewheel(self, event):
+        try:
+            self.chat_canvas.yview_scroll(int(-event.delta / 120), "units")
+        except tk.TclError:
+            pass
+
+    def _chat_scroll_end(self):
+        if not hasattr(self, "chat_canvas"):
+            return
+
+        def apply():
+            self._chat_scroll_after = None
+            if not hasattr(self, "chat_canvas"):
+                return
             try:
-                self.chat.configure(state="disabled")
-                self.chat.see("end")
+                self.chat_canvas.update_idletasks()
+                bounds = self.chat_canvas.bbox("all")
+                if bounds:
+                    self.chat_canvas.configure(scrollregion=bounds)
+                self.chat_canvas.yview_moveto(1.0)
             except tk.TclError:
                 pass
+
+        # Do it now for normal appends, then once more after Tk has completed
+        # the new bubble's geometry. Without the idle pass, long transcripts
+        # could retain the old scrollregion and stay parked on the first turns.
+        try:
+            pending = getattr(self, "_chat_scroll_after", None)
+            if pending is not None:
+                self.root.after_cancel(pending)
+            apply()
+            self._chat_scroll_after = self.root.after_idle(apply)
+        except tk.TclError:
+            pass
+
+    def _chat_clear_view(self):
+        if not hasattr(self, "chat_inner"):
+            return
+        for child in list(self.chat_inner.winfo_children()):
+            try:
+                child.destroy()
+            except tk.TclError:
+                pass
+        self._chat_embeds = []
+        self._live_turn_col = None
+        self._live_tools_box = None
+        self.thinking_frame = None
+        self.thinking_canvas = None
+        self.thinking_label = None
+        self._stream_reply_frame = None
+        self._stream_reply_var = None
+        self._stream_reply_text = ""
+        self._stream_reply_meta = None
+
+    def _chat_bubble_width(self):
+        try:
+            width = int(self.chat_canvas.winfo_width()) - 28
+        except (tk.TclError, TypeError, ValueError):
+            width = 0
+        if width < 160:
+            try:
+                width = max(160, int(self.config.get("chat_width", 380)) - 56)
+            except (TypeError, ValueError):
+                width = 160
+        # Tk raises "bad screen distance" if wraplength is not a positive int.
+        return max(120, int(width * 0.82))
+
+    def _make_bubble(self, parent, text, *, user=False, meta=None, textvariable=None):
+        surface = self.c("surface")
+        if user:
+            bg = getattr(self, "_user_bubble_bg", self.blend_color(surface, self.c("accent"), 0.22))
+            fg = self.c("text")
+        else:
+            bg = getattr(self, "_assistant_bg", self.blend_color(surface, self.c("text"), 0.08))
+            fg = self.c("text")
+        wrap = self._chat_bubble_width()
+        bubble = tk.Frame(
+            parent,
+            bg=bg,
+            highlightthickness=1,
+            highlightbackground=self.blend_color(bg, self.c("text"), 0.08),
+        )
+        label_options = {
+            "bg": bg,
+            "fg": fg,
+            "font": self.font(9),
+            "justify": "left",
+            "anchor": "w",
+            "wraplength": max(120, int(wrap or 120)),
+            "padx": 10,
+            "pady": 8,
+        }
+        if textvariable is not None:
+            label_options["textvariable"] = textvariable
+        else:
+            label_options["text"] = str(text or "").strip()
+        tk.Label(bubble, **label_options).pack(anchor="w")
+        if meta:
+            meta_label = tk.Label(
+                bubble,
+                text=meta,
+                bg=bg,
+                fg=self.c("muted"),
+                font=self.font(7, "italic"),
+                anchor="e",
+                padx=10,
+                pady=0,
+            )
+            # A widget's ``pady`` is one Tk screen distance, while ``pack``
+            # accepts a (top, bottom) pair. Passing the pair to Label raised
+            # ``bad screen distance \"0 6\"`` after every timed agent reply.
+            meta_label.pack(anchor="e", pady=(0, 6))
+        return bubble
+
+    def _add_user_bubble(self, text):
+        if not hasattr(self, "chat_inner"):
+            return
+        row = tk.Frame(self.chat_inner, bg=self.c("surface"))
+        row.pack(fill="x", padx=10, pady=(8, 2))
+        bubble = self._make_bubble(row, text, user=True)
+        bubble.pack(side="right", anchor="e")
+        self._chat_embeds.append(row)
+        self._chat_scroll_end()
+
+    def _add_agent_column(self):
+        row = tk.Frame(self.chat_inner, bg=self.c("surface"))
+        row.pack(fill="x", padx=10, pady=(8, 2))
+        col = tk.Frame(row, bg=self.c("surface"))
+        col.pack(side="left", anchor="w", fill="x", expand=True)
+        tools = tk.Frame(col, bg=self.c("surface"))
+        tools.pack(fill="x", anchor="w")
+        self._chat_embeds.append(row)
+        return col, tools
+
+    def show_thinking(self, status="Thinking"):
+        if not hasattr(self, "chat_inner"):
+            return
+        self.hide_thinking()
+        self._live_tool_count = 0
+        self._agent_turn_active = True
+        self._stream_reply_frame = None
+        self._stream_reply_var = None
+        self._stream_reply_text = ""
+        self._stream_reply_meta = None
+        status = self._pretty_agent_status(status)
+        self.thinking_status_text = status
+        col, tools = self._add_agent_column()
+        self._live_turn_col = col
+        self._live_tools_box = tools
+        bg = getattr(self, "_assistant_bg", self.c("surface"))
+        frame = tk.Frame(
+            col,
+            bg=bg,
+            highlightthickness=1,
+            highlightbackground=self.blend_color(bg, self.c("text"), 0.08),
+        )
+        frame.pack(anchor="w", pady=(0, 2))
+        row = tk.Frame(frame, bg=bg)
+        row.pack(fill="x", padx=10, pady=8)
+        canvas = tk.Canvas(row, width=22, height=10, bg=bg, highlightthickness=0, bd=0)
+        canvas.pack(side="left")
+        label = tk.Label(
+            row,
+            text=status,
+            bg=bg,
+            fg=self.c("muted"),
+            font=self.font(8, "italic"),
+            anchor="w",
+        )
+        label.pack(side="left", padx=(8, 0))
+        self.thinking_frame = frame
+        self.thinking_canvas = canvas
+        self.thinking_label = label
+        self._chat_scroll_end()
         self.animate_thinking()
 
     def set_thinking_status(self, text):
-        self.thinking_status_text = text or "thinking"
+        status = self._pretty_agent_status(text)
+        self.thinking_status_text = status
+        label = getattr(self, "thinking_label", None)
+        if label is not None:
+            try:
+                if label.winfo_exists():
+                    label.configure(text=status)
+            except tk.TclError:
+                pass
+
+    def _pretty_agent_status(self, text):
+        raw = str(text or "").strip() or "Thinking"
+        lowered = raw.casefold()
+        if lowered in {"thinking", "thinking...", "thinking…"}:
+            return "Thinking…"
+        if lowered.endswith("..."):
+            raw = raw[:-3] + "…"
+        elif not raw.endswith("…"):
+            raw = raw[:1].upper() + raw[1:]
+            if not raw.endswith((".", "!", "?", "…")):
+                raw += "…"
+        return raw
 
     def hide_thinking(self):
         if self.thinking_after:
@@ -8522,25 +10756,109 @@ class HelperOverlay:
             except tk.TclError:
                 pass
         self.thinking_after = None
-        if hasattr(self, "chat"):
+        frame = getattr(self, "thinking_frame", None)
+        if frame is not None:
             try:
-                self.chat.configure(state="normal")
-                if "thinking_start" in self.chat.mark_names():
-                    self.chat.delete("thinking_start", "end")
-                    self.chat.mark_unset("thinking_start")
+                frame.destroy()
             except tk.TclError:
                 pass
-            finally:
-                try:
-                    self.chat.configure(state="disabled")
-                except tk.TclError:
-                    pass
         self.thinking_canvas = None
+        self.thinking_frame = None
+        self.thinking_label = None
+        self._agent_turn_active = False
+
+    def _start_stream_reply(self):
+        """Replace the spinner with one assistant bubble that grows per delta."""
+        if not hasattr(self, "chat_inner"):
+            return
+        frame = getattr(self, "_stream_reply_frame", None)
+        try:
+            if frame is not None and frame.winfo_exists():
+                return
+        except tk.TclError:
+            pass
+        self._ensure_agent_turn_ui("Writing")
+        parent = self._live_turn_col
+        if parent is None:
+            parent, tools = self._add_agent_column()
+            self._live_turn_col = parent
+            self._live_tools_box = tools
+        self.hide_thinking()
+        self._agent_turn_active = True
+        self._stream_reply_text = ""
+        self._stream_reply_var = tk.StringVar(master=self.root, value="")
+        self._stream_reply_frame = self._make_bubble(
+            parent,
+            "",
+            user=False,
+            textvariable=self._stream_reply_var,
+        )
+        self._stream_reply_frame.pack(anchor="w", pady=(0, 2))
+        self._stream_reply_meta = None
+        self._chat_scroll_end()
+
+    def _append_stream_reply(self, delta):
+        delta = str(delta or "")
+        if not delta:
+            return
+        self._start_stream_reply()
+        self._stream_reply_text += delta
+        try:
+            self._stream_reply_var.set(self._stream_reply_text)
+        except (AttributeError, tk.TclError):
+            return
+        self._chat_scroll_end()
+
+    def _set_stream_reply(self, text):
+        self._start_stream_reply()
+        self._stream_reply_text = str(text or "")
+        try:
+            self._stream_reply_var.set(self._stream_reply_text)
+        except (AttributeError, tk.TclError):
+            pass
+        self._chat_scroll_end()
+
+    def _finalize_stream_reply(self, text, meta=None):
+        frame = getattr(self, "_stream_reply_frame", None)
+        try:
+            if frame is None or not frame.winfo_exists():
+                return False
+        except tk.TclError:
+            return False
+        self._set_stream_reply(str(text or "").strip())
+        if meta and self._stream_reply_meta is None:
+            bg = str(frame.cget("bg"))
+            self._stream_reply_meta = tk.Label(
+                frame,
+                text=meta,
+                bg=bg,
+                fg=self.c("muted"),
+                font=self.font(7, "italic"),
+                anchor="e",
+                padx=10,
+                pady=0,
+            )
+            self._stream_reply_meta.pack(anchor="e", pady=(0, 6))
+        self._agent_turn_active = False
+        self._live_turn_col = None
+        self._live_tools_box = None
+        self._stream_reply_frame = None
+        self._stream_reply_var = None
+        self._stream_reply_text = ""
+        self._stream_reply_meta = None
+        self._chat_scroll_end()
+        return True
 
     def animate_thinking(self):
-        if not self.busy or not hasattr(self, "thinking_canvas"):
+        canvas = getattr(self, "thinking_canvas", None)
+        if not self.busy or canvas is None:
             return
-        self.thinking_canvas.delete("all")
+        try:
+            if not canvas.winfo_exists():
+                return
+            canvas.delete("all")
+        except tk.TclError:
+            return
         canvas_bg = getattr(self, "_assistant_bg", self.c("surface"))
         base = self.blend_color(canvas_bg, self.c("thinking_base"), int(self.c("thinking_base_opacity")) / 100)
         pulse = self.blend_color(canvas_bg, self.c("thinking_pulse"), int(self.c("thinking_pulse_opacity")) / 100)
@@ -8548,13 +10866,186 @@ class HelperOverlay:
         for col in range(3):
             phase = (step - col * 2) % 12
             strength = max(0, 1 - abs(phase - 3) / 3)
-            radius = 1 + strength * 1.2
+            radius = 1.2 + strength * 1.4
             x = 4 + col * 7
-            y = 4
+            y = 5
             color = self.blend_color(base, pulse, strength)
-            self.thinking_canvas.create_oval(x - radius, y - radius, x + radius, y + radius, fill=color, outline="")
+            canvas.create_oval(x - radius, y - radius, x + radius, y + radius, fill=color, outline="")
         self.thinking_step = (self.thinking_step + 1) % 12
         self.thinking_after = self.root.after(90, self.animate_thinking)
+
+    def _chat_card_width(self):
+        return max(140, self._chat_bubble_width())
+
+    def _embed_tool_card(self, detail, *, before_thinking=False):
+        """Insert an expandable tool-call card into the agent chat transcript."""
+        if not hasattr(self, "chat_inner") or not isinstance(detail, dict):
+            return
+        name = str(detail.get("name") or "tool")
+        label = str(detail.get("label") or name)
+        summary = str(detail.get("summary") or label)
+        ok = bool(detail.get("ok", True))
+        arguments = detail.get("arguments") if isinstance(detail.get("arguments"), dict) else {}
+        output = str(detail.get("output") or "")
+        bg = self.blend_color(self.c("surface"), self.c("text"), 0.07)
+        border = self.blend_color(bg, self.c("success") if ok else self.c("danger"), 0.45)
+        accent = self.c("success") if ok else self.c("danger")
+        width = self._chat_card_width()
+        parent = None
+        if before_thinking and getattr(self, "_live_tools_box", None) is not None:
+            parent = self._live_tools_box
+        elif getattr(self, "_live_turn_col", None) is not None:
+            parent = self._live_turn_col
+        else:
+            col, tools = self._add_agent_column()
+            parent = tools
+            self._live_turn_col = col
+            self._live_tools_box = tools
+
+        card = tk.Frame(
+            parent,
+            bg=bg,
+            highlightthickness=1,
+            highlightbackground=border,
+        )
+        card.pack(fill="x", anchor="w", pady=(0, 4))
+        header = tk.Frame(card, bg=bg, cursor="hand2")
+        header.pack(fill="x", padx=8, pady=6)
+        chevron = tk.Label(header, text="▸", bg=bg, fg=self.c("muted"), font=self.font(8, "bold"), cursor="hand2")
+        chevron.pack(side="left")
+        title = tk.Label(
+            header,
+            text=name.replace("_", " "),
+            bg=bg,
+            fg=self.c("text"),
+            font=self.font(8, "bold"),
+            anchor="w",
+            cursor="hand2",
+        )
+        title.pack(side="left", padx=(6, 8))
+        preview = label if label.casefold() != name.casefold() else summary
+        preview = preview if len(preview) <= 42 else preview[:41] + "…"
+        preview_label = tk.Label(
+            header,
+            text=preview,
+            bg=bg,
+            fg=self.c("muted"),
+            font=self.font(8),
+            anchor="w",
+            cursor="hand2",
+        )
+        preview_label.pack(side="left", fill="x", expand=True)
+        status = tk.Label(
+            header,
+            text="OK" if ok else "ERR",
+            bg=self.blend_color(bg, accent, 0.18),
+            fg=accent,
+            font=self.font(7, "bold"),
+            padx=6,
+            pady=1,
+            cursor="hand2",
+        )
+        status.pack(side="right")
+
+        body = tk.Frame(card, bg=bg)
+        body_inner = tk.Frame(body, bg=bg)
+        body_inner.pack(fill="x", padx=10, pady=(0, 8))
+
+        def detail_view(title_text, value, top_pad=0):
+            tk.Label(
+                body_inner,
+                text=title_text,
+                bg=bg,
+                fg=self.c("muted"),
+                font=self.font(7, "bold"),
+                anchor="w",
+            ).pack(fill="x", pady=(top_pad, 2))
+            text = str(value or "")
+            holder = tk.Frame(body_inner, bg=bg)
+            holder.pack(fill="x")
+            holder.grid_columnconfigure(0, weight=1)
+            holder.grid_rowconfigure(0, weight=1)
+            box = tk.Text(
+                holder,
+                height=min(14, max(3, text.count("\n") + 1)),
+                bg=self.blend_color(bg, "#000000", 0.28),
+                fg="#d6e2ff",
+                relief="flat",
+                bd=0,
+                padx=8,
+                pady=6,
+                wrap="none",
+                font=("Consolas", max(8, int(self.c("font_size")) - 1)),
+            )
+            y_scroll = tk.Scrollbar(holder, orient="vertical", command=box.yview, width=8)
+            x_scroll = tk.Scrollbar(holder, orient="horizontal", command=box.xview, width=8)
+            box.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
+            box.grid(row=0, column=0, sticky="nsew")
+            y_scroll.grid(row=0, column=1, sticky="ns")
+            x_scroll.grid(row=1, column=0, sticky="ew")
+            box.insert("1.0", text or "(none)")
+            box.configure(state="disabled")
+
+            def scroll_detail(event):
+                try:
+                    box.yview_scroll(int(-event.delta / 120), "units")
+                except tk.TclError:
+                    pass
+                return "break"
+
+            box.bind("<MouseWheel>", scroll_detail)
+            return box
+
+        metadata = {key: value for key, value in detail.items() if key not in {"arguments", "output"}}
+        detail_view(
+            "Call details",
+            json.dumps(metadata, ensure_ascii=False, indent=2, default=str),
+        )
+        detail_view(
+            "Input",
+            json.dumps(arguments, ensure_ascii=False, indent=2, default=str),
+            top_pad=8,
+        )
+        detail_view("Result", output or "(no output)", top_pad=8)
+
+        state = {"open": False}
+
+        def toggle(_event=None):
+            state["open"] = not state["open"]
+            if state["open"]:
+                body.pack(fill="x")
+                chevron.configure(text="▾")
+                preview_label.configure(text="")
+            else:
+                body.pack_forget()
+                chevron.configure(text="▸")
+                preview_label.configure(text=preview)
+            self._chat_scroll_end()
+
+        for widget in (header, chevron, title, preview_label, status):
+            widget.bind("<Button-1>", toggle)
+
+        self._chat_embeds.append(card)
+        self._live_tool_count += 1
+        self._chat_scroll_end()
+
+    def _finalize_agent_turn_ui(self):
+        self.hide_thinking()
+        self.busy = False
+        self.chat_busy_since = 0.0
+        self._agent_turn_active = False
+        self._live_turn_col = None
+        self._live_tools_box = None
+        self.set_thinking_status("Thinking")
+        if hasattr(self, "send_button"):
+            try:
+                self.send_button.configure(state="normal")
+            except tk.TclError:
+                pass
+        try:
+            self.subtitle.configure(text=self._status_subtitle())
+        except tk.TclError:
+            pass
 
     def blend_color(self, background, foreground, amount):
         amount = max(0.0, min(1.0, float(amount)))
@@ -8583,20 +11074,14 @@ class HelperOverlay:
     def refresh_chat_account(self):
         if not hasattr(self, "chat_account_label"):
             return
-        model_label = self.config.get("chat_model") or "gpt-5-mini"
+        voice_cfg = self.config.get("voice_dictation") or {}
+        model_label = voice_cfg.get("agent_model") or DEFAULT_VOICE_DICTATION.get("agent_model") or "gpt-5.6-luna"
         key_ok = bool(self.get_openai_api_key())
-        codex_ok, codex_label = codex_auth_info()
-        if key_ok:
-            auth_label = "API key ready"
-        elif codex_ok:
-            auth_label = f"Codex {codex_label}"
-        else:
-            auth_label = "No auth"
-        meta = f"{model_label} · {auth_label}"
+        auth_label = "API key ready" if key_ok else "No API key"
         try:
             self.chat_account_label.configure(
-                text=meta,
-                fg=self.c("success") if (key_ok or codex_ok) else self.c("danger"),
+                text=f"{model_label} · {auth_label}",
+                fg=self.c("success") if key_ok else self.c("danger"),
             )
         except tk.TclError:
             pass
@@ -8619,6 +11104,13 @@ class HelperOverlay:
         self.history = []
         self.config["chat_history"] = []
         save_config(self.config)
+        agent = getattr(self, "_gui_voice_agent", None)
+        if agent is not None:
+            try:
+                agent.clear()
+            except Exception:
+                pass
+        self._send_voice_reset_agent()
         if hasattr(self, "send_button"):
             self.send_button.configure(state="normal")
         self.render_chat_history()
@@ -8627,16 +11119,24 @@ class HelperOverlay:
         self.append("Codex", text, "muted")
 
     def append_stream_line(self, text):
-        if not hasattr(self, "chat"):
+        if not hasattr(self, "chat_inner"):
             return
         stripped = text.rstrip("\n")
         if not stripped:
             return
-        tag = "command" if stripped.startswith(("exec", "$", ">")) else "muted"
-        self.chat.configure(state="normal")
-        self.chat.insert("end", stripped + "\n", tag)
-        self.chat.configure(state="disabled")
-        self.chat.see("end")
+        row = tk.Frame(self.chat_inner, bg=self.c("surface"))
+        row.pack(fill="x", padx=10, pady=2)
+        tk.Label(
+            row,
+            text=stripped,
+            bg=self.c("surface"),
+            fg=self.c("muted"),
+            font=self.font(8),
+            anchor="w",
+            justify="left",
+            wraplength=self._chat_bubble_width(),
+        ).pack(anchor="w")
+        self._chat_scroll_end()
 
     def git_diff_summary(self, project_path):
         git = shutil.which("git")
@@ -8658,81 +11158,128 @@ class HelperOverlay:
             return ""
         return result.stdout.strip()
 
-    def add_history(self, role, text):
-        self.history.append((role, text))
+    def add_history(self, role, text, tools=None):
+        entry = {"role": role, "text": text}
+        if tools:
+            entry["tools"] = tools
+        self.history.append(entry)
         self.history = self.history[-40:]
-        self.config["chat_history"] = [{"role": item[0], "text": item[1]} for item in self.history]
+        self.config["chat_history"] = list(self.history)
         save_config(self.config)
 
     def load_chat_history(self):
         history = []
         for item in self.config.get("chat_history", [])[-40:]:
-            if isinstance(item, dict) and item.get("role") and item.get("text"):
+            if isinstance(item, (list, tuple)) and len(item) >= 2:
+                role, text = str(item[0]), str(item[1])
+                tools = None
+            elif isinstance(item, dict) and item.get("role") and item.get("text") is not None:
                 role = str(item["role"])
                 text = str(item["text"])
-                if role.casefold() != "user":
-                    text = self.sanitize_codex_output(text)
-                if text and len(text) < 5000:
-                    history.append((role, text))
-        self.config["chat_history"] = [{"role": item[0], "text": item[1]} for item in history]
+                tools = item.get("tools") if isinstance(item.get("tools"), list) else None
+            else:
+                continue
+            if role.casefold() != "user":
+                text = self.sanitize_codex_output(text)
+            if text and len(text) < 8000:
+                entry = {"role": role, "text": text}
+                if tools:
+                    entry["tools"] = tools
+                history.append(entry)
+        self.config["chat_history"] = list(history)
         save_config(self.config)
         return history
 
     def render_chat_history(self):
-        if not hasattr(self, "chat"):
+        if not hasattr(self, "chat_inner"):
             return
-        self.chat.configure(state="normal")
-        self.chat.delete("1.0", "end")
-        self.chat.configure(state="disabled")
-        for role, text in self.history[-16:]:
-            is_user = role.casefold() == "user"
-            self.append("You" if is_user else "aiOS", text, "user" if is_user else "assistant", trim=False)
+        self.hide_thinking()
+        self._chat_clear_view()
+        self._live_tool_count = 0
+        self._agent_turn_active = False
+        for item in self.history[-24:]:
+            if isinstance(item, (list, tuple)):
+                role, text, tools = item[0], item[1], None
+            else:
+                role = item.get("role", "")
+                text = item.get("text", "")
+                tools = item.get("tools") if isinstance(item.get("tools"), list) else None
+            is_user = str(role).casefold() == "user"
+            if is_user:
+                self.append("You", text, "user", trim=False)
+            else:
+                self.append_assistant_message(text, tools=tools, trim=False)
         self._trim_chat_display()
 
     def append(self, label, text, tag, meta=None, trim=True):
-        if not hasattr(self, "chat"):
+        if not hasattr(self, "chat_inner"):
             return
-        label_tag = f"{tag}_label" if f"{tag}_label" in self.chat.tag_names() else tag
-        self.chat.configure(state="normal")
-        self.chat.insert("end", f"{label}\n", label_tag)
-        self.insert_formatted_text(text.strip(), tag)
-        if meta and tag == "assistant":
-            self.chat.insert("end", meta + "\n", "assistant_meta")
-        elif meta:
-            self.chat.insert("end", "  " + meta + "\n", "muted")
-        self.chat.insert("end", "\n")
-        self.chat.configure(state="disabled")
-        self.chat.see("end")
+        body = str(text or "").strip()
+        if not body and tag != "muted":
+            return
+        if tag in {"user"}:
+            self._add_user_bubble(body)
+        elif tag in {"assistant"}:
+            self.append_assistant_message(body, meta=meta, trim=False)
+        else:
+            row = tk.Frame(self.chat_inner, bg=self.c("surface"))
+            row.pack(fill="x", padx=10, pady=2)
+            tk.Label(
+                row,
+                text=body or str(label or ""),
+                bg=self.c("surface"),
+                fg=self.c("muted"),
+                font=self.font(8),
+                anchor="w",
+                justify="left",
+                wraplength=self._chat_bubble_width(),
+            ).pack(anchor="w")
+            self._chat_scroll_end()
+        if trim:
+            self._trim_chat_display()
+
+    def append_assistant_message(self, text, tools=None, meta=None, trim=True):
+        if not hasattr(self, "chat_inner"):
+            return
+        col, tools_box = self._add_agent_column()
+        prev_col, prev_tools = self._live_turn_col, self._live_tools_box
+        self._live_turn_col = col
+        self._live_tools_box = tools_box
+        for detail in tools or []:
+            if isinstance(detail, dict):
+                self._embed_tool_card(detail, before_thinking=False)
+        body = str(text or "").strip()
+        if body or meta:
+            bubble = self._make_bubble(col, body or "", user=False, meta=meta)
+            bubble.pack(anchor="w", pady=(0, 2))
+        self._live_turn_col, self._live_tools_box = prev_col, prev_tools
+        self._chat_scroll_end()
+        if trim:
+            self._trim_chat_display()
+
+    def _append_assistant_body(self, text, meta=None, trim=True):
+        """Continue the open aiOS block after live tools (no second label)."""
+        if not hasattr(self, "chat_inner"):
+            return
+        body = str(text or "").strip()
+        parent = self._live_turn_col
+        if parent is None:
+            self.append_assistant_message(body, meta=meta, trim=trim)
+            return
+        if body or meta:
+            bubble = self._make_bubble(parent, body or "", user=False, meta=meta)
+            bubble.pack(anchor="w", pady=(0, 2))
+        self._live_turn_col = None
+        self._live_tools_box = None
+        self._chat_scroll_end()
         if trim:
             self._trim_chat_display()
 
     def insert_formatted_text(self, text, default_tag):
-        in_code = False
-        for line in text.splitlines():
-            stripped = line.strip()
-            if stripped.startswith("```"):
-                in_code = not in_code
-                continue
-            if in_code:
-                tag = "code"
-            elif stripped.startswith("### "):
-                line = stripped[4:]
-                tag = "heading"
-            elif stripped.startswith("## "):
-                line = stripped[3:]
-                tag = "heading"
-            elif stripped.startswith("# "):
-                line = stripped[2:]
-                tag = "heading"
-            elif line.startswith("+") and not line.startswith("+++"):
-                tag = "diff_add"
-            elif line.startswith("-") and not line.startswith("---"):
-                tag = "diff_del"
-            elif line.startswith((">", "$", "codex ", "git ", "python ", "npm ", "pnpm ")):
-                tag = "command"
-            else:
-                tag = default_tag
-            self.chat.insert("end", line + "\n", tag)
+        # Bubble UI renders plain text; keep helper for any legacy callers.
+        _ = default_tag
+        if str(text or "").strip():
+            self.append_assistant_message(text)
 
     def _error_message(self, exc):
         message = str(exc).strip() or exc.__class__.__name__
@@ -8750,12 +11297,48 @@ class HelperOverlay:
         self._voice_cfg()["hold_ms"] = int(float(value))
         self._save_voice_cfg()
 
-    def _capture_voice_hotkey(self):
-        """Modal that grabs the next key the user presses and saves it as
-        the new voice/dictation hotkey."""
-        from voice_settings import SAFE_HOTKEYS
+    def set_voice_separate_hotkeys(self, value):
+        voice = self._voice_cfg()
+        voice["separate_hotkeys"] = bool(value)
+        if voice["separate_hotkeys"] and voice_hotkey_to_ahk(voice.get("aios_hotkey")) == voice_hotkey_to_ahk(
+            voice.get("voice_hotkey")
+        ):
+            voice["aios_hotkey"] = "Insert" if voice_hotkey_to_ahk(voice.get("voice_hotkey")) != "Insert" else "Home"
+        self._save_voice_cfg()
+        if self.active_tab == "Settings":
+            self.render_tab("Settings")
+
+    def _apply_hotkey_setting(self, field, ahk_key, *, display_name=None):
+        if field not in ("voice_hotkey", "aios_hotkey"):
+            return
+        ahk = voice_hotkey_to_ahk(ahk_key)
+        label = display_name or voice_hotkey_label(ahk)
+        voice = self._voice_cfg()
+        voice[field] = ahk
+        if voice.get("separate_hotkeys"):
+            other = "aios_hotkey" if field == "voice_hotkey" else "voice_hotkey"
+            if voice_hotkey_to_ahk(voice.get(other)) == ahk:
+                voice[other] = "Insert" if ahk != "Insert" else "Home"
+        self._save_voice_cfg()
+        try:
+            if field == "voice_hotkey":
+                self.voice_hotkey_var.set(label)
+            elif hasattr(self, "aios_hotkey_var"):
+                self.aios_hotkey_var.set(label)
+        except Exception:
+            pass
+
+    def _on_hotkey_choice(self, field, display_name):
+        ahk = SAFE_HOTKEYS.get(display_name, voice_hotkey_to_ahk(display_name))
+        self._apply_hotkey_setting(field, ahk, display_name=display_name)
+        if self.active_tab == "Settings":
+            self.render_tab("Settings")
+
+    def _capture_hotkey(self, field="voice_hotkey"):
+        """Modal that grabs the next key and saves it as voice or open-aiOS hotkey."""
+        title = "Set dictation key" if field == "voice_hotkey" else "Set open aiOS key"
         top = tk.Toplevel(self.root)
-        top.title("Set voice hotkey")
+        top.title(title)
         top.configure(bg=self.c("panel"))
         top.transient(self.root)
         top.grab_set()
@@ -8763,7 +11346,6 @@ class HelperOverlay:
             top.attributes("-topmost", True)
         except tk.TclError:
             pass
-        # Center
         try:
             w, h = 420, 180
             x = self.root.winfo_rootx() + (self.root.winfo_width() - w) // 2
@@ -8775,67 +11357,144 @@ class HelperOverlay:
         tk.Label(top, text="Press the key you want to use",
                  bg=self.c("panel"), fg=self.c("text"),
                  font=self.font(11, "bold")).pack(pady=(22, 6))
-        info = tk.StringVar(value="Insert · Home · End · PgUp/PgDn · F1-F24 · "
-                                   "Delete · Pause · ScrollLock")
+        info = tk.StringVar(value="F13–F24 = Macro Deck · side mouse buttons · Insert · F1–F12")
         tk.Label(top, textvariable=info, bg=self.c("panel"),
                  fg=self.c("muted"), font=self.font(8),
                  wraplength=380, justify="center").pack(pady=(0, 14))
         result = tk.StringVar(value="(waiting…)")
-        result_lbl = tk.Label(top, textvariable=result,
-                               bg="#080d14", fg=self.c("text"),
-                               font=self.font(10, "bold"),
-                               padx=18, pady=6)
-        result_lbl.pack(pady=(0, 6))
+        tk.Label(top, textvariable=result,
+                 bg="#080d14", fg=self.c("text"),
+                 font=self.font(10, "bold"),
+                 padx=18, pady=6).pack(pady=(0, 6))
 
         actions = tk.Frame(top, bg=self.c("panel"))
         actions.pack(pady=(8, 0))
 
-        # Map common tk keysyms to AHK names.
         keysym_to_ahk = {
             "Insert": "Insert", "Delete": "Delete", "Home": "Home", "End": "End",
-            "Prior": "PageUp", "Next": "PageDown", "Pause": "Pause",
+            "Prior": "PgUp", "Next": "PgDn", "Pause": "Pause",
             "Scroll_Lock": "ScrollLock", "Menu": "AppsKey",
         }
         for i in range(1, 25):
             keysym_to_ahk[f"F{i}"] = f"F{i}"
+        mouse_button_to_ahk = {8: "XButton1", 9: "XButton2"}
 
         chosen = {"key": None}
+        bindings = []
+
+        def resolve_key(event):
+            ahk = keysym_to_ahk.get(event.keysym)
+            if not ahk and event.keycode:
+                if 112 <= event.keycode <= 135:
+                    ahk = f"F{event.keycode - 111}"
+            return voice_hotkey_to_ahk(ahk) if ahk else ""
 
         def on_key(event):
-            ahk = keysym_to_ahk.get(event.keysym)
-            if not ahk:
-                info.set(f"'{event.keysym}' is not safe to use as a hotkey — "
-                          "pick a function key, Insert, PageUp/Down, etc.")
+            ahk = resolve_key(event)
+            unknown_fell_back = (
+                ahk == "Insert"
+                and event.keysym not in keysym_to_ahk
+                and not (event.keycode and 112 <= event.keycode <= 135)
+            )
+            if not ahk or unknown_fell_back:
+                info.set(f"'{event.keysym or event.keycode}' is not safe — "
+                          "pick a function key, Insert, side mouse button, etc.")
                 result.set("(waiting…)")
                 return "break"
+            label = voice_hotkey_label(ahk)
             chosen["key"] = ahk
-            result.set(ahk)
+            result.set(label)
             info.set("Press OK to save, or pick another key.")
             return "break"
 
-        top.bind("<KeyPress>", on_key)
+        def on_button(event):
+            ahk = mouse_button_to_ahk.get(event.num)
+            if not ahk:
+                info.set("Use Mouse 4 / Mouse 5 (side buttons) or a keyboard key.")
+                return "break"
+            label = voice_hotkey_label(ahk)
+            chosen["key"] = ahk
+            result.set(label)
+            info.set("Press OK to save, or pick another key.")
+            return "break"
+
+        for sequence, handler in (("<KeyPress>", on_key), ("<ButtonPress>", on_button)):
+            top.bind_all(sequence, handler, add="+")
+            bindings.append(sequence)
+
+        def cleanup_bindings():
+            for sequence in bindings:
+                try:
+                    top.unbind_all(sequence)
+                except tk.TclError:
+                    pass
+
         top.focus_set()
 
         def commit():
             if not chosen["key"]:
                 return
-            self._voice_cfg()["voice_hotkey"] = chosen["key"]
-            self._save_voice_cfg()
-            try:
-                self.voice_hotkey_var.set(chosen["key"])
-            except Exception:
-                pass
+            self._apply_hotkey_setting(field, chosen["key"])
+            cleanup_bindings()
             top.destroy()
-            # Re-render Settings so the hint above reflects the new key.
             if self.active_tab == "Settings":
                 self.render_tab("Settings")
 
+        def cancel():
+            cleanup_bindings()
+            top.destroy()
+
+        top.protocol("WM_DELETE_WINDOW", cancel)
         self.button(actions, "OK", commit, compact=True).pack(side="left", padx=(0, 8))
-        self.button(actions, "Cancel", top.destroy, compact=True).pack(side="left")
+        self.button(actions, "Cancel", cancel, compact=True).pack(side="left")
 
     def set_voice_mic_sensitivity(self, value):
         self._voice_cfg()["silence_rms"] = round(max(1, min(50, int(float(value)))) / 10000.0, 4)
         self._save_voice_cfg()
+
+    def set_voice_overlay_opacity(self, value):
+        self._voice_cfg()["overlay_opacity"] = max(20, min(100, int(float(value))))
+        self._save_voice_cfg()
+        # Live-apply on the running dictation HUD (no full restart needed).
+        try:
+            with socket.create_connection(("127.0.0.1", 48737), timeout=0.3) as client:
+                client.sendall(b"reload")
+        except OSError:
+            pass
+
+    def _reload_voice_dictation(self):
+        """Nudge the running dictation process to re-read helper_config.json."""
+        try:
+            with socket.create_connection(("127.0.0.1", 48737), timeout=0.3) as client:
+                client.sendall(b"reload")
+        except OSError:
+            pass
+
+    def set_voice_agent_tts(self, value):
+        self._voice_cfg()["agent_tts_enabled"] = bool(value)
+        self._save_voice_cfg()
+        self._reload_voice_dictation()
+
+    def set_voice_barge_in(self, value):
+        self._voice_cfg()["barge_in"] = bool(value)
+        self._save_voice_cfg()
+        self._reload_voice_dictation()
+
+    def set_voice_hallucination_filter(self, value):
+        self._voice_cfg()["hallucination_filter"] = bool(value)
+        self._save_voice_cfg()
+        self._reload_voice_dictation()
+
+    def set_voice_transcript_history(self, value):
+        self._voice_cfg()["transcript_history"] = bool(value)
+        self._save_voice_cfg()
+        self._reload_voice_dictation()
+
+    def set_voice_agent_tool(self, name, value):
+        """Toggle one agent capability. Read fresh on the agent's next turn."""
+        self._voice_cfg()[name] = bool(value)
+        self._save_voice_cfg()
+        self._reload_voice_dictation()
 
     def set_voice_typing_delay_ms(self, value):
         self._voice_cfg()["typing_delay_ms"] = int(float(value))
@@ -8844,21 +11503,6 @@ class HelperOverlay:
     def set_voice_discord_mute_enabled(self, value):
         self._voice_cfg()["discord_mute_enabled"] = bool(value)
         self._save_voice_cfg()
-
-    def save_voice_settings(self):
-        voice = self._voice_cfg()
-        voice["whisper_model"] = self.voice_model_settings_entry.get("1.0", "end").strip() or "small"
-        voice["language"] = self.voice_language_var.get() or "auto"
-        voice["compute_type"] = self.voice_compute_var.get() or "int8"
-        voice["discord_mute_hotkey"] = self.voice_discord_hotkey_entry.get("1.0", "end").strip()
-        self.config["voice_dictation"] = merge_voice_dictation(voice)
-        save_config(self.config)
-        merged = self.config["voice_dictation"]
-        self.local_reply(
-            f"Voice settings saved ({LANGUAGE_LABELS.get(merged['language'], merged['language'])}, "
-            f"{merged['whisper_model']}). "
-            "Restart voice dictation to load a new model. Discord mute applies after reloading AHK."
-        )
 
     def _render_update_card(self, parent):
         try:
@@ -9076,29 +11720,6 @@ class HelperOverlay:
             pass
         self.root.after(900, lambda: aios_updater.restart_aios())
 
-    def save_project_root(self):
-        raw = self.root_entry.get("1.0", "end").strip()
-        if not raw:
-            return
-        self.project_root = Path(raw)
-        self.project_root.mkdir(parents=True, exist_ok=True)
-        self.config["project_root"] = str(self.project_root)
-        save_config(self.config)
-        self.refresh_all()
-
-    def save_model_settings(self):
-        self.config["codex_model"] = self.codex_model_settings_entry.get("1.0", "end").strip() or "gpt-4.1-nano"
-        self.config["codex_reasoning"] = self.settings_reasoning_var.get() or "none"
-        self.config["quick_codex_model"] = self.quick_model_settings_entry.get("1.0", "end").strip() or "gpt-5-mini"
-        self.config["quick_codex_reasoning"] = self.quick_reasoning_var.get() or "none"
-        self.config["chat_model"] = self.chat_model_settings_entry.get("1.0", "end").strip() or "gpt-5-mini"
-        raw_key = self.openai_key_settings_entry.get("1.0", "end").strip()
-        if raw_key and not raw_key.startswith("(using OPENAI_API_KEY"):
-            self.config["openai_api_key"] = raw_key
-        save_config(self.config)
-        self.refresh_chat_account()
-        self.rebuild_shell()
-
     def pick_color(self, key):
         color = colorchooser.askcolor(color=self.c(key))[1]
         if color:
@@ -9189,6 +11810,7 @@ class HelperOverlay:
         self.hide_thinking()
 
     def restart_application(self):
+        self._dash_flush_notes()
         self._stop_background_work()
         self._stop_voice_server()
         self.config["window"] = self.root.geometry()
@@ -9254,6 +11876,7 @@ class HelperOverlay:
             pass
 
     def rebuild_shell(self):
+        self._dash_flush_notes()
         if self.quick_process and self.quick_process.poll() is None:
             try:
                 self.quick_process.terminate()
@@ -9290,8 +11913,8 @@ class HelperOverlay:
 
     def _chat_watchdog(self):
         if self.busy and self.chat_busy_since:
-            if time.perf_counter() - self.chat_busy_since > 300:
-                self._recover_stuck_chat("The assistant took too long and was reset. Try again or click Reset.")
+            if time.perf_counter() - self.chat_busy_since > 1900:
+                self._recover_stuck_chat("The agent took too long and was reset. Try again or click Reset.")
                 return
         if hasattr(self, "send_button"):
             try:
@@ -9323,21 +11946,18 @@ class HelperOverlay:
         if message:
             self.local_reply(message)
 
-    def _trim_chat_display(self, max_lines=320):
-        if not hasattr(self, "chat"):
+    def _trim_chat_display(self, max_rows=40):
+        if not hasattr(self, "chat_inner"):
             return
-        try:
-            line_count = int(self.chat.index("end-1c").split(".")[0])
-        except (tk.TclError, ValueError):
+        children = list(self.chat_inner.winfo_children())
+        overflow = len(children) - max_rows
+        if overflow <= 0:
             return
-        if line_count <= max_lines:
-            return
-        try:
-            self.chat.configure(state="normal")
-            self.chat.delete("1.0", f"{line_count - max_lines}.0")
-            self.chat.configure(state="disabled")
-        except tk.TclError:
-            pass
+        for child in children[:overflow]:
+            try:
+                child.destroy()
+            except tk.TclError:
+                pass
 
     def update_usage_badges(self):
         if not hasattr(self, "usage_account_labels"):
@@ -9458,6 +12078,7 @@ class HelperOverlay:
             user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
             user32.AppendMenuW(menu, MF_STRING, TRAY_START_VOICE, "Start Voice")
             user32.AppendMenuW(menu, MF_STRING, TRAY_RESTART_VOICE, "Restart Voice")
+            user32.AppendMenuW(menu, MF_STRING, TRAY_RESTART_MACROS, "Restart Macros")
             user32.AppendMenuW(menu, MF_STRING, TRAY_RESTART_APP, "Restart aiOS")
             user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
             user32.AppendMenuW(menu, MF_STRING, TRAY_QUIT, "Quit")
@@ -9483,6 +12104,8 @@ class HelperOverlay:
         elif command == TRAY_RESTART_VOICE:
             self._stop_voice_server()
             self.root.after(150, self._ensure_voice_server)
+        elif command == TRAY_RESTART_MACROS:
+            self._restart_hotkeys()
         elif command == TRAY_RESTART_APP:
             self.restart_application()
         elif command == TRAY_QUIT:
@@ -9529,33 +12152,6 @@ class HelperOverlay:
             subprocess.Popen(
                 [pythonw, str(script)],
                 cwd=str(BASE_DIR),
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                stdin=subprocess.DEVNULL,
-                creationflags=CREATE_NO_WINDOW,
-            )
-        except OSError:
-            pass
-
-    def _play_operator_sound(self):
-        now = time.perf_counter()
-        if now - self._operator_sound_last_at < 1.5:
-            return
-        self._operator_sound_last_at = now
-        self._play_wav_async(OPERATOR_SOUND_PATH)
-
-    def _play_wav_async(self, path):
-        if not path.exists() or not sys.platform.startswith("win"):
-            return
-        try:
-            escaped = str(path).replace("'", "''")
-            command = (
-                f"$p = New-Object System.Media.SoundPlayer -ArgumentList '{escaped}'; "
-                "$p.PlaySync()"
-            )
-            encoded = base64.b64encode(command.encode("utf-16le")).decode("ascii")
-            subprocess.Popen(
-                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 stdin=subprocess.DEVNULL,
@@ -9721,6 +12317,7 @@ class HelperOverlay:
             user32.ReleaseDC(0, screen_dc)
 
     def hide(self):
+        self._dash_flush_notes()
         self.config["window"] = self.root.geometry()
         save_config(self.config)
         self.root.withdraw()
@@ -9757,6 +12354,146 @@ class HelperOverlay:
 
     def _start_command_server(self):
         threading.Thread(target=self._command_server, daemon=True).start()
+
+    def _find_autohotkey(self):
+        local = Path(os.environ.get("LOCALAPPDATA", ""))
+        candidates = [
+            Path(r"C:\Program Files\AutoHotkey\v2\AutoHotkey64.exe"),
+            local / "Programs" / "AutoHotkey" / "v2" / "AutoHotkey64.exe",
+            local / "Programs" / "AutoHotkey" / "v2" / "AutoHotkey32.exe",
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                return str(candidate)
+        return shutil.which("AutoHotkey64.exe") or shutil.which("AutoHotkey.exe") or ""
+
+    def _hotkeys_script(self):
+        return Path(__file__).resolve().parent / "autocorrect.ahk"
+
+    def _hotkeys_heartbeat_path(self):
+        return Path(__file__).resolve().parent / ".aios-ahk-heartbeat"
+
+    def _hotkeys_running(self):
+        if not sys.platform.startswith("win"):
+            return False
+        script = str(self._hotkeys_script())
+        needle = script.replace("'", "''")
+        try:
+            completed = subprocess.run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-Command",
+                    (
+                        f"$needle = '{needle}'; "
+                        "(Get-CimInstance Win32_Process | Where-Object { "
+                        "$_.Name -like 'AutoHotkey*.exe' -and $_.CommandLine -like ('*' + $needle + '*') "
+                        "} | Measure-Object).Count"
+                    ),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=3,
+                creationflags=CREATE_NO_WINDOW,
+            )
+            return int((completed.stdout or "0").strip() or "0") > 0
+        except (OSError, subprocess.TimeoutExpired, ValueError):
+            return False
+
+    def _hotkeys_healthy(self, max_age_sec=20):
+        """True when the AHK process is up and still writing its heartbeat."""
+        if not self._hotkeys_running():
+            return False
+        path = self._hotkeys_heartbeat_path()
+        try:
+            age = time.time() - path.stat().st_mtime
+            return age <= float(max_age_sec)
+        except OSError:
+            return False
+
+    def _stop_hotkeys(self):
+        if not sys.platform.startswith("win"):
+            return
+        script = str(self._hotkeys_script()).replace("'", "''")
+        try:
+            subprocess.run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-Command",
+                    (
+                        f"$needle = '{script}'; "
+                        "Get-CimInstance Win32_Process | Where-Object { "
+                        "$_.Name -like 'AutoHotkey*.exe' -and $_.CommandLine -like ('*' + $needle + '*') "
+                        "} | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+                    ),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                creationflags=CREATE_NO_WINDOW,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+    def _ensure_hotkeys(self):
+        """Spawn autocorrect.ahk (macro / dictate hotkeys) if it is not healthy."""
+        if not self._hotkeys_script().exists():
+            return False
+        if self._hotkeys_healthy():
+            return True
+        if self._hotkeys_running():
+            # Process exists but heartbeat is stale — hard restart.
+            self._stop_hotkeys()
+            time.sleep(0.25)
+        return self._start_hotkeys(wait_healthy=True)
+
+    def _start_hotkeys(self, wait_healthy=False):
+        script = self._hotkeys_script()
+        ahk = self._find_autohotkey()
+        if not ahk or not script.exists():
+            return False
+        try:
+            # Never CREATE_NO_WINDOW for AutoHotkey — that breaks its message loop /
+            # tray / hotkeys. Detach only so it outlives the launcher.
+            creationflags = 0x00000008 if sys.platform.startswith("win") else 0  # DETACHED_PROCESS
+            subprocess.Popen(
+                [ahk, str(script)],
+                cwd=str(script.parent),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+                creationflags=creationflags,
+            )
+        except OSError:
+            return False
+        if not wait_healthy:
+            return True
+        deadline = time.perf_counter() + 4.0
+        while time.perf_counter() < deadline:
+            if self._hotkeys_healthy(max_age_sec=30):
+                return True
+            time.sleep(0.2)
+        return self._hotkeys_running()
+
+    def _restart_hotkeys(self):
+        """Reload AutoHotkey macros (tray / dashboard Pad)."""
+        script = self._hotkeys_script()
+        ahk = self._find_autohotkey()
+        if not ahk or not script.exists():
+            try:
+                self.local_reply("AutoHotkey v2 / autocorrect.ahk not found.")
+            except Exception:
+                pass
+            return False
+        self._stop_hotkeys()
+        time.sleep(0.2)
+        ok = self._start_hotkeys(wait_healthy=True)
+        try:
+            self.local_reply("Macropad running." if ok else "Macropad failed to start.")
+        except Exception:
+            pass
+        return ok
 
     def _ensure_voice_server(self):
         """Spawn voice_dictation.py if it's not already listening on port 48737."""
@@ -9832,7 +12569,7 @@ class HelperOverlay:
                         if not chunk:
                             break
                         chunks.append(chunk)
-                        if sum(len(part) for part in chunks) > 65536:
+                        if sum(len(part) for part in chunks) > MAX_COMMAND_BYTES:
                             break
                     command = b"".join(chunks).decode("utf-8", "ignore").strip()
                 self._handle_remote_command(command)
@@ -9862,7 +12599,7 @@ class HelperOverlay:
         if not text and action not in {
             "phone_start", "phone_stop", "reload_operator_settings",
             "operator_stop", "operator_clear", "operator_clear_attachments",
-            "operator_followup",
+            "operator_followup", "voice_event", "voice_log",
         }:
             return
         if action == "chat":
@@ -9885,6 +12622,205 @@ class HelperOverlay:
             self.root.after(0, lambda value=text: self._remote_operator_attach(value))
         elif action == "operator_clear_attachments":
             self.root.after(0, self._remote_operator_clear_attachments)
+        elif action == "voice_event":
+            self.root.after(0, lambda value=text, opts=options: self._remote_voice_event(value, opts or {}))
+        elif action == "voice_log":
+            self.root.after(0, lambda value=text, opts=options: self._remote_voice_log(value, opts or {}))
+
+    def _ensure_agent_turn_ui(self, status="Thinking"):
+        if self._agent_turn_active:
+            self.set_thinking_status(status)
+            return
+        self.busy = True
+        if not self.chat_busy_since:
+            self.chat_busy_since = time.perf_counter()
+        if hasattr(self, "send_button"):
+            try:
+                self.send_button.configure(state="disabled")
+            except tk.TclError:
+                pass
+        try:
+            self.subtitle.configure(text="thinking")
+        except tk.TclError:
+            pass
+        self.show_thinking(status)
+
+    def _remote_voice_event(self, text, options):
+        """Live agent progress: thinking status + expandable tool cards."""
+        kind = str(options.get("kind") or "").strip().lower()
+        echo_user = bool(options.get("echo_user", True))
+        if kind == "turn_start":
+            if echo_user and text:
+                # Avoid duplicating a user bubble if the event is replayed.
+                last = self.history[-1] if self.history else None
+                last_text = ""
+                if isinstance(last, dict):
+                    last_text = str(last.get("text") or "")
+                elif isinstance(last, (list, tuple)) and len(last) >= 2:
+                    last_text = str(last[1])
+                if last_text.strip() != str(text).strip():
+                    self.append("You", text, "user")
+                    self.add_history("User", text)
+            self._ensure_agent_turn_ui("Thinking")
+            return
+        if kind == "status":
+            self._ensure_agent_turn_ui(options.get("status") or text or "Thinking")
+            return
+        if kind == "tool_start":
+            tool = options.get("tool") if isinstance(options.get("tool"), dict) else {}
+            label = tool.get("label") or tool.get("name") or text or "Running tool"
+            self._ensure_agent_turn_ui(label)
+            return
+        if kind == "tool_done":
+            tool = options.get("tool") if isinstance(options.get("tool"), dict) else {}
+            if not tool and text:
+                tool = {"name": text, "label": text, "summary": text, "output": "", "ok": True}
+            label = tool.get("label") or tool.get("name") or "Tool"
+            self._ensure_agent_turn_ui(label)
+            if tool:
+                self._embed_tool_card(tool, before_thinking=True)
+            self.set_thinking_status("Thinking")
+            return
+        if kind == "reply_start":
+            self._start_stream_reply()
+            return
+        if kind == "reply_delta":
+            self._append_stream_reply(text)
+            return
+        if kind == "reply_done":
+            self._set_stream_reply(text)
+            return
+
+    def _remote_voice_log(self, text, options):
+        """Mirror a voice-agent turn into the chat panel. The answer already
+        exists — this only records it, it must not re-run the model."""
+        try:
+            options = options or {}
+            reply = str(options.get("reply") or "").strip()
+            error = str(options.get("error") or "").strip()
+            tools = [str(name) for name in (options.get("tools") or [])]
+            details = [item for item in (options.get("tool_details") or []) if isinstance(item, dict)]
+            if not details and tools:
+                details = [
+                    {
+                        "name": name,
+                        "label": name,
+                        "summary": name,
+                        "arguments": {},
+                        "output": "",
+                        "ok": True,
+                    }
+                    for name in dict.fromkeys(tools)
+                ]
+            echo_user = bool(options.get("echo_user", True))
+            elapsed = options.get("elapsed")
+            meta = None
+            try:
+                if elapsed is not None:
+                    meta = self.format_elapsed(float(elapsed))
+            except (TypeError, ValueError):
+                meta = None
+            body = (error or reply).strip() or "(no reply)"
+
+            # Spoken turns: add the user bubble if turn_start didn't already.
+            append_user = False
+            if echo_user and text:
+                last = self.history[-1] if self.history else None
+                last_text = ""
+                last_role = ""
+                if isinstance(last, dict):
+                    last_text = str(last.get("text") or "")
+                    last_role = str(last.get("role") or "")
+                elif isinstance(last, (list, tuple)) and len(last) >= 2:
+                    last_role, last_text = str(last[0]), str(last[1])
+                if last_role.casefold() != "user" or last_text.strip() != str(text).strip():
+                    self.add_history("User", text)
+                    append_user = True
+
+            # Save the completed answer before touching presentation widgets.
+            # A Tk rendering failure must never discard a reply the agent has
+            # already produced.
+            self.add_history("Assistant", body, tools=details or None)
+            if append_user:
+                self.append("You", text, "user")
+
+            # Close the spinner. If live tool cards were already embedded during
+            # tool_done events, keep that column and only append the reply —
+            # re-embedding tool_details here was duplicating operator cards.
+            live_col = getattr(self, "_live_turn_col", None)
+            live_tools = getattr(self, "_live_tools_box", None)
+            live_count = int(getattr(self, "_live_tool_count", 0) or 0)
+            stream_frame = getattr(self, "_stream_reply_frame", None)
+            try:
+                live_ok = live_col is not None and live_col.winfo_exists()
+            except tk.TclError:
+                live_ok = False
+            try:
+                stream_ok = stream_frame is not None and stream_frame.winfo_exists()
+            except tk.TclError:
+                stream_ok = False
+            self.hide_thinking()
+            self._agent_turn_active = False
+
+            if not hasattr(self, "chat_inner"):
+                self._live_turn_col = None
+                self._live_tools_box = None
+                self._live_tool_count = 0
+            elif stream_ok:
+                self._live_turn_col = live_col
+                self._live_tools_box = live_tools
+                if details and live_count <= 0:
+                    for detail in details:
+                        if isinstance(detail, dict):
+                            self._embed_tool_card(detail, before_thinking=False)
+                self._finalize_stream_reply(body, meta=meta)
+            elif live_ok:
+                self._live_turn_col = live_col
+                self._live_tools_box = live_tools
+                if details and live_count <= 0:
+                    for detail in details:
+                        if isinstance(detail, dict):
+                            self._embed_tool_card(detail, before_thinking=False)
+                self._append_assistant_body(body, meta=meta, trim=False)
+            else:
+                self._live_turn_col = None
+                self._live_tools_box = None
+                self._live_tool_count = 0
+                self._stream_reply_frame = None
+                self._stream_reply_var = None
+                self._stream_reply_text = ""
+                self._stream_reply_meta = None
+                self.append_assistant_message(body, tools=details or None, meta=meta, trim=False)
+
+            self.busy = False
+            self.chat_busy_since = 0.0
+            if hasattr(self, "send_button"):
+                try:
+                    self.send_button.configure(state="normal")
+                except tk.TclError:
+                    pass
+            try:
+                self.subtitle.configure(text=self._status_subtitle())
+            except tk.TclError:
+                pass
+            try:
+                self._chat_scroll_end()
+            except tk.TclError:
+                pass
+        except Exception:
+            try:
+                self.hide_thinking()
+                self.busy = False
+                self._agent_turn_active = False
+                self._live_turn_col = None
+                self._live_tools_box = None
+                self._live_tool_count = 0
+                # Rebuild from durable history without the ephemeral timing
+                # footer. This keeps the real response visible even if another
+                # presentation-only regression slips through.
+                self.render_chat_history()
+            except Exception:
+                pass
 
     def _remote_submit_chat(self, text):
         self._phone_control_show("AIOS")
@@ -10514,6 +13450,136 @@ class HelperOverlay:
         if hint:
             self._bind_header_hint(btn, hint)
         return btn
+
+    def quick_tools_category(self, parent, title, description, accent_color):
+        bg = self.blend_color(self.c("surface"), self.c("panel"), 0.42)
+        border = self.blend_color(self._header_border_color(), accent_color, 0.18)
+        group = tk.Frame(
+            parent,
+            bg=bg,
+            highlightthickness=1,
+            highlightbackground=border,
+            padx=10,
+            pady=9,
+        )
+        header = tk.Frame(group, bg=bg)
+        header.pack(fill="x", pady=(0, 8))
+        marker = tk.Frame(header, bg=accent_color, width=3, height=24)
+        marker.pack(side="left", fill="y", padx=(0, 8))
+        marker.pack_propagate(False)
+        heading = tk.Frame(header, bg=bg)
+        heading.pack(side="left", fill="x", expand=True)
+        tk.Label(
+            heading,
+            text=title,
+            bg=bg,
+            fg=self.c("text"),
+            anchor="w",
+            font=self.font(8, "bold"),
+        ).pack(fill="x")
+        tk.Label(
+            heading,
+            text=description,
+            bg=bg,
+            fg=self.blend_color(self.c("muted"), self.c("text"), 0.28),
+            anchor="w",
+            font=self.font(8),
+        ).pack(fill="x")
+        cards = tk.Frame(group, bg=bg)
+        cards.pack(fill="both", expand=True)
+        return group, cards
+
+    def quick_tool_card(
+        self,
+        parent,
+        icon,
+        title,
+        description,
+        command,
+        *,
+        accent_color=None,
+        featured=False,
+    ):
+        accent_color = accent_color or self.c("accent")
+        base_bg = self.blend_color(self.c("surface2"), self.c("panel"), 0.22)
+        hover_bg = self.blend_color(base_bg, accent_color, 0.10 if not featured else 0.16)
+        border = self.blend_color(
+            self._header_border_color(),
+            accent_color,
+            0.34 if featured else 0.20,
+        )
+        card = tk.Frame(
+            parent,
+            bg=base_bg,
+            highlightthickness=1,
+            highlightbackground=border,
+            highlightcolor=accent_color,
+            padx=10,
+            pady=9,
+            cursor="hand2",
+        )
+        icon_bg = self.blend_color(
+            self.c("surface2"),
+            accent_color,
+            0.38 if featured else 0.28,
+        )
+        icon_box = tk.Frame(card, bg=icon_bg, width=40, height=40, cursor="hand2")
+        icon_box.pack(anchor="w")
+        icon_box.pack_propagate(False)
+        icon_label = tk.Label(
+            icon_box,
+            text=icon,
+            bg=icon_bg,
+            fg=accent_color,
+            font=self.font(15, "bold"),
+            cursor="hand2",
+        )
+        icon_label.place(relx=0.5, rely=0.5, anchor="center")
+        title_label = tk.Label(
+            card,
+            text=title,
+            bg=base_bg,
+            fg=self.c("text"),
+            anchor="w",
+            font=self.font(9, "bold"),
+            cursor="hand2",
+        )
+        title_label.pack(fill="x", pady=(8, 2))
+        description_label = tk.Label(
+            card,
+            text=description,
+            bg=base_bg,
+            fg=self.blend_color(self.c("muted"), self.c("text"), 0.18),
+            anchor="nw",
+            justify="left",
+            wraplength=140,
+            font=self.font(8),
+            cursor="hand2",
+        )
+        description_label.pack(fill="both", expand=True)
+
+        card._quick_card_title = title_label
+        card._quick_card_icon_box = icon_box
+        card._quick_card_icon = icon_label
+        card._quick_card_description = description_label
+        card._quick_card_accent = accent_color
+
+        widgets = (card, icon_box, icon_label, title_label, description_label)
+
+        def set_hover(active):
+            background = hover_bg if active else base_bg
+            card.configure(
+                bg=background,
+                highlightbackground=accent_color if active else border,
+            )
+            title_label.configure(bg=background)
+            description_label.configure(bg=background)
+
+        for widget in widgets:
+            widget.bind("<Button-1>", lambda _event, action=command: action(), add="+")
+            widget.bind("<Enter>", lambda _event: set_hover(True), add="+")
+            widget.bind("<Leave>", lambda _event: set_hover(False), add="+")
+        return card
 
     def record_stop_chip(self, parent, text, command, hint=""):
         btn = tk.Button(

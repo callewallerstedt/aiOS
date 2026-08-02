@@ -17,13 +17,14 @@
 aiOS is a Windows desktop overlay that gives you:
 
 - **OPERATOR** — a computer-use agent that drives your mouse + keyboard from natural language, with an installable aiOS Remote PWA for controlling multiple paired PCs, sending follow-ups, and watching live activity and screenshots.
-- **Voice dictation** — hold a hotkey, speak, release; Whisper transcribes locally.
+- **Voice dictation** — hold a hotkey, speak, release; Whisper transcribes locally. What you said lands in a composer panel above the mic pill instead of being typed blind, and on release it goes wherever you aimed it. Your own vocabulary is biased into the decoder, word fixes are applied to every transcript, and the stock phrases Whisper invents on silence are dropped instead of typed.
+- **Voice agent** — tap a macro-keyboard button while holding the dictate key and the same sentence goes to a tool-calling agent instead of your cursor. It can search the web, open apps, run PowerShell, read your screen and clipboard, read and write files, control volume and media, set spoken reminders, manage windows, remember facts about you, and hand full computer-control jobs to OPERATOR. The answer shows in the overlay and in the aiOS chat. See `voice_agent.py` and the `voice_target_*.bat` files.
 - **Quick chat** — overlay chat hooked to OpenAI / Codex.
-- **Project + todo dashboard** — a personal layer over a folder of markdown files.
+- **Dashboard** — clock, weather, markets, live machine stats and autosaving notes, over a folder of markdown projects.
 
 The two surfaces talk to each other on `127.0.0.1:48736`, plus a Flask server in `agent_clicker/` for the phone.
 
-Press **Ctrl+Space** to open or hide aiOS. The recommended startup watchdog keeps aiOS, its hotkeys, and a paired phone remote running in the background after sign-in.
+Open or hide aiOS with your configured hotkey (Settings → Voice Dictation; default is a short press of the dictate key). The recommended startup watchdog keeps aiOS, its hotkeys, and a paired phone remote running in the background after sign-in.
 
 ## Quick start
 
