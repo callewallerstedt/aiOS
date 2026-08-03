@@ -11,7 +11,17 @@ const serverDir = path.join(distDir, 'server');
 fs.rmSync(publicDir, { recursive: true, force: true });
 fs.mkdirSync(publicDir, { recursive: true });
 
-for (const name of ['index.html', 'phone.css', 'phone.js', 'manifest.webmanifest', 'sw.js', 'og-aios-remote.png']) {
+for (const name of [
+  'index.html',
+  'phone.css',
+  'phone.js',
+  'coding.html',
+  'coding.css',
+  'coding.js',
+  'manifest.webmanifest',
+  'sw.js',
+  'og-aios-remote.png',
+]) {
   fs.copyFileSync(path.join(root, name), path.join(publicDir, name));
 }
 
