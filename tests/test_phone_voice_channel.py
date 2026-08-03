@@ -20,6 +20,8 @@ sys.path.insert(0, str(REPO / "agent_clicker" / "app"))
 
 import voice_dictation
 
+PHONE_JS = REPO / "phone_site" / "phone.js"
+
 
 @pytest.fixture
 def mirror(monkeypatch, tmp_path):
@@ -119,6 +121,19 @@ def test_the_log_is_empty_and_calm_before_any_turn(client):
     assert payload["size"] == 0
 
 
+def test_the_relay_can_resume_the_full_voice_stream_by_byte_cursor(client):
+    http, events, _server = client
+    first = json.dumps({"ts": 1, "type": "turn_start", "text": "hello"}) + "\n"
+    second = json.dumps({"ts": 2, "type": "reply_delta", "text": "hi"}) + "\n"
+    events.write_bytes((first + second).encode("utf-8"))
+
+    payload = http.get(f"/api/phone/voice/log?since={len(first.encode('utf-8'))}").get_json()
+
+    assert [event["type"] for event in payload["events"]] == ["reply_delta"]
+    assert payload["reset"] is False
+    assert payload["size"] == len((first + second).encode("utf-8"))
+
+
 def test_send_routes_the_voice_target_to_the_agent_port(client, monkeypatch):
     http, _events, server = client
     sent = {}
@@ -130,7 +145,28 @@ def test_send_routes_the_voice_target_to_the_agent_port(client, monkeypatch):
     monkeypatch.setattr(server, "forward_voice", fake_forward)
     response = http.post("/api/phone/send", json={"target": "voice", "text": "set a timer for ten minutes"})
     assert response.status_code == 200
-    assert sent == {"cmd": "ask", "text": "set a timer for ten minutes", "echo_user": True}
+    assert sent == {
+        "cmd": "ask",
+        "text": "set a timer for ten minutes",
+        "echo_user": True,
+        "speak_reply": False,
+    }
+
+
+def test_phone_fast_or_think_is_a_one_turn_agent_override(client, monkeypatch):
+    http, _events, server = client
+    sent = {}
+    monkeypatch.setattr(server, "forward_voice", lambda payload: sent.update(payload) or {"ok": True})
+
+    response = http.post("/api/phone/send", json={
+        "target": "agent",
+        "text": "compare these options",
+        "options": {"reasoning": "high", "speak_reply": False},
+    })
+
+    assert response.status_code == 200
+    assert sent["reasoning"] == "high"
+    assert sent["speak_reply"] is False
 
 
 def test_send_reports_when_the_agent_is_not_running(client, monkeypatch):
@@ -190,3 +226,14 @@ def test_stop_reports_cleanly_when_nothing_is_listening(client, monkeypatch):
     response = http.post("/api/phone/voice/stop")
     assert response.status_code == 503
     assert response.get_json()["ok"] is False
+
+
+def test_hosted_pwa_streams_agent_fragments_into_one_reply_row():
+    source = PHONE_JS.read_text(encoding="utf-8")
+    describe = source[source.index("function describe(event)"):source.index("function bubbleText(")]
+    add_event = source[source.index("function addEvent(event)"):source.index("function currentThread(")]
+
+    assert 'type === "agent_reply_delta"' in describe
+    assert 'kind: "agent-stream"' in describe
+    assert 'info.kind === "agent-stream"' in add_event
+    assert '.entry.agent-reply.streaming' in add_event

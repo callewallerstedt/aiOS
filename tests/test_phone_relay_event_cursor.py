@@ -11,6 +11,7 @@ import phone_relay
 def bridge_events(tmp_path, monkeypatch):
     monkeypatch.setattr(phone_relay, "STATE_PATH", tmp_path / "phone-relay-state.json")
     monkeypatch.setattr(phone_relay, "LOCAL_EVENTS_PATH", tmp_path / "events.jsonl")
+    monkeypatch.setattr(phone_relay, "LOCAL_VOICE_EVENTS_PATH", tmp_path / "voice-events.jsonl")
     bridge = phone_relay.Bridge({
         "url": "https://relay.example",
         "machine_id": "machine-1",

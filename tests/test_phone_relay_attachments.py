@@ -22,6 +22,7 @@ class FakeResponse:
 def bridge(tmp_path, monkeypatch):
     monkeypatch.setattr(phone_relay, "STATE_PATH", tmp_path / "phone-relay-state.json")
     monkeypatch.setattr(phone_relay, "LOCAL_EVENTS_PATH", tmp_path / "events.jsonl")
+    monkeypatch.setattr(phone_relay, "LOCAL_VOICE_EVENTS_PATH", tmp_path / "voice-events.jsonl")
     return phone_relay.Bridge({
         "url": "https://relay.example",
         "machine_id": "machine-1",
@@ -141,3 +142,39 @@ def test_a_follow_up_keeps_its_files(wired):
     _, payload = wired.calls["sent"][0]
     assert payload["intent"] == "followup"
     assert payload["attachments"] == ["local0"]
+
+
+def test_agent_command_reaches_the_resident_agent_with_one_turn_reasoning(wired):
+    wired.execute({"type": "config", "payload": {
+        "_aios_command": "agent",
+        "prompt": "what is using my CPU",
+        "reasoning": "high",
+        "speak_reply": False,
+    }})
+
+    path, payload = wired.calls["sent"][0]
+    assert path == "/api/phone/send"
+    assert payload == {
+        "text": "what is using my CPU",
+        "target": "agent",
+        "options": {"reasoning": "high", "speak_reply": False},
+    }
+
+
+def test_transcription_command_keeps_its_request_id(bridge, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(
+        bridge,
+        "transcribe_attachment",
+        lambda item, request_id="": seen.update({"item": item, "request_id": request_id})
+        or {"ok": True, "request_id": request_id, "text": "hello computer"},
+    )
+
+    result = bridge.execute({"type": "config", "payload": {
+        "_aios_command": "transcribe",
+        "request_id": "voice-42",
+        "audio": {"key": "abc", "name": "voice.webm"},
+    }})
+
+    assert result["text"] == "hello computer"
+    assert seen["request_id"] == "voice-42"

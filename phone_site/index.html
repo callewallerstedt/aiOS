@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
   <meta name="theme-color" content="#08080a">
-  <meta name="description" content="Ask your computer to do things. OPERATOR remote control from your phone.">
+  <meta name="description" content="Talk to your aiOS agent or control your PC from anywhere.">
   <meta property="og:title" content="aiOS Remote">
   <meta property="og:description" content="Ask your computer to do things — from anywhere.">
   <meta property="og:type" content="website">
@@ -61,7 +61,7 @@
 
     <div id="welcomePane" class="pane">
       <h1>Ask your computer<br>to do things.</h1>
-      <p class="lede">Send a task to OPERATOR, watch it work live, and take over whenever you want.</p>
+      <p class="lede">Talk to your resident agent, or send a full task to OPERATOR and watch it work live.</p>
       <div class="auth-actions">
         <button id="createAccountBtn" class="btn btn-primary btn-block">Create my remote</button>
         <button id="showLoginBtn" class="btn btn-quiet btn-block">I have a private code</button>
@@ -210,12 +210,18 @@
     </section>
     <div class="composer">
       <div id="attachTray" class="attach-tray hidden" aria-label="Attachments"></div>
+      <div class="remote-modes" role="group" aria-label="Choose how aiOS should respond">
+        <button class="remote-mode on" type="button" data-remote-mode="fast"><strong>Fast</strong><span>Agent</span></button>
+        <button class="remote-mode" type="button" data-remote-mode="think"><strong>Think</strong><span>Agent</span></button>
+        <button class="remote-mode" type="button" data-remote-mode="operator"><strong>Control</strong><span>PC</span></button>
+      </div>
       <textarea id="promptInput" rows="1" maxlength="8000" placeholder="Ask your computer…"></textarea>
       <div class="composer-bar">
         <button id="attachBtn" class="roundbtn attach" type="button" aria-label="Add photos or files"><svg class="ic"><use href="#i-plus"/></svg></button>
         <button id="runSettingsBtn" class="pill run-settings-pill" type="button" aria-label="Choose run models"><svg class="ic"><use href="#i-sliders"/></svg><span id="runSettingsLabel">Luna · Plan Sol</span></button>
+        <button id="voiceReplyBtn" class="pill voice-reply" type="button" aria-pressed="true" aria-label="Toggle spoken agent replies"><span>Speak</span></button>
         <div class="composer-spacer"></div>
-        <button id="micBtn" class="roundbtn" type="button" aria-label="Dictate"><svg class="ic"><use href="#i-mic"/></svg></button>
+        <button id="micBtn" class="roundbtn" type="button" aria-label="Record and transcribe on this PC"><svg class="ic"><use href="#i-mic"/></svg></button>
         <button id="sendBtn" class="roundbtn send" type="submit" aria-label="Send"><svg class="ic"><use href="#i-send"/></svg></button>
       </div>
       <input id="fileInput" class="file-input" type="file" multiple tabindex="-1" aria-hidden="true"

@@ -747,6 +747,22 @@ h3 { font-size: 17px; letter-spacing: -.02em; font-weight: 700; margin: 0 0 16px
 }
 .composer:focus-within { border-color: var(--line-2); }
 .composer.rec { border-color: var(--red); }
+.remote-modes {
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px;
+  margin: 6px 6px 0; padding: 3px;
+  border-radius: 13px; background: rgba(0, 0, 0, .18);
+}
+.remote-mode {
+  min-width: 0; height: 36px; display: flex; align-items: baseline; justify-content: center; gap: 5px;
+  border-radius: 10px; color: var(--text-3);
+  transition: color .15s ease, background .15s ease, transform .12s ease;
+}
+.remote-mode strong { font-size: 12.5px; font-weight: 760; }
+.remote-mode span { font-size: 9.5px; font-weight: 650; text-transform: uppercase; letter-spacing: .04em; }
+.remote-mode.on { background: var(--surface-3); color: var(--text); box-shadow: 0 1px 0 rgba(255,255,255,.05) inset; }
+.remote-mode[data-remote-mode="fast"].on,
+.remote-mode[data-remote-mode="think"].on { background: var(--red-soft); color: var(--text); }
+.remote-mode:active { transform: scale(.97); }
 .composer textarea {
   display: block; width: 100%;
   min-height: 42px; max-height: 34dvh;
@@ -836,6 +852,9 @@ h3 { font-size: 17px; letter-spacing: -.02em; font-weight: 700; margin: 0 0 16px
 .pill:active { background: var(--surface-3); }
 .run-settings-pill { max-width: min(230px, 62vw); gap: 6px; padding-right: 9px; }
 .run-settings-pill span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.voice-reply { padding: 0 9px; }
+.voice-reply.on { background: var(--red-soft); color: var(--text); }
+.voice-reply.hidden, .run-settings-pill.hidden, .roundbtn.attach.hidden { display: none; }
 
 .roundbtn {
   width: 38px; height: 38px; flex: 0 0 auto;

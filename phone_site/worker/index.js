@@ -297,7 +297,7 @@ async function handleApi(request, env, url, context) {
     return json({
       ok: true,
       service: "aiOS Remote",
-      features: ["uploads", "push", "event-latest"]
+      features: ["uploads", "push", "event-latest", "agent-voice", "pc-transcription"]
     });
   }
 
@@ -450,7 +450,10 @@ async function handleApi(request, env, url, context) {
     const machine = await env.DB.prepare("SELECT id FROM machines WHERE id = ? AND account_id = ?").bind(machineId, accountId).first();
     if (!machine) return json({ error: "Computer not found." }, 404);
     const input = await body(request);
-    const allowed = new Set(["prompt", "followup", "stop", "config", "clarify", "stream", "update", "codex_switch", "ai_settings"]);
+    const allowed = new Set([
+      "prompt", "followup", "stop", "config", "clarify", "stream", "update",
+      "codex_switch", "ai_settings", "agent", "agent_stop", "transcribe"
+    ]);
     if (!allowed.has(input.type)) return json({ error: "Unsupported command." }, 400);
     const payload = input.payload && typeof input.payload === "object" ? input.payload : {};
     const effectiveType = input.type === "config" ? String(payload._aios_command || "config") : input.type;

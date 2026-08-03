@@ -2388,7 +2388,7 @@ class Dictation:
                 {"kind": "tool_done", "tool": detail, "echo_user": echo_user},
             )
         elif kind == "reply_start":
-            player = self._configure_agent_tts()
+            player = self._configure_agent_tts() if getattr(self, "_agent_speak_reply", True) else None
             if player is not None:
                 try:
                     player.begin_stream()
@@ -2411,7 +2411,7 @@ class Dictation:
                 )
         elif kind == "reply_done":
             reply = str(payload or "")
-            player = self._configure_agent_tts()
+            player = self._configure_agent_tts() if getattr(self, "_agent_speak_reply", True) else None
             if player is not None:
                 try:
                     player.end_stream(clean_reply(reply))
@@ -2425,7 +2425,7 @@ class Dictation:
                 {"kind": "reply_done", "echo_user": echo_user},
             )
 
-    def ask_text(self, text, echo_user=True):
+    def ask_text(self, text, echo_user=True, *, reasoning="", speak_reply=True):
         """Typed (or otherwise finished) text → same agent path as a spoken turn."""
         text = str(text or "").strip()
         if not text:
@@ -2446,6 +2446,7 @@ class Dictation:
         self._turn_id += 1
         turn = self._turn_id
         self._agent_echo_user = bool(echo_user)
+        self._agent_speak_reply = bool(speak_reply)
         self.overlay.set_mode("dictation")
         self.overlay.set_history(self._agent_history())
         self.overlay.set_target("agent")
@@ -2462,7 +2463,10 @@ class Dictation:
         threading.Thread(
             target=self._send_to_agent,
             args=(text, turn),
-            kwargs={"echo_user": bool(echo_user)},
+            kwargs={
+                "echo_user": bool(echo_user),
+                "reasoning": str(reasoning or "").strip().lower(),
+            },
             daemon=True,
         ).start()
 
@@ -2490,7 +2494,7 @@ class Dictation:
             transported.append(json.loads(json.dumps(item, ensure_ascii=False, default=str)))
         return transported
 
-    def _send_to_agent(self, text, turn, echo_user=True):
+    def _send_to_agent(self, text, turn, echo_user=True, reasoning=""):
         started = time.monotonic()
         self._agent_echo_user = bool(echo_user)
         reply = ""
@@ -2498,7 +2502,8 @@ class Dictation:
         details = []
         tools = []
         try:
-            result = self._ensure_agent().run(text)
+            overrides = {"agent_reasoning": reasoning} if reasoning else None
+            result = self._ensure_agent().run(text, overrides=overrides)
         except Exception as exc:
             log_event(f"agent failed to start: {exc}")
             result = None
@@ -2977,10 +2982,17 @@ def run_command_server(dictation):
                     if cmd == "ask":
                         text = str(payload.get("text") or "")
                         echo_user = bool(payload.get("echo_user", True))
+                        reasoning = str(payload.get("reasoning") or "").strip().lower()
+                        speak_reply = bool(payload.get("speak_reply", True))
                         log_event(f"voice command: ask ({len(text)} chars)")
                         dictation.overlay.root.after(
                             0,
-                            lambda value=text, echo=echo_user: dictation.ask_text(value, echo_user=echo),
+                            lambda value=text, echo=echo_user, effort=reasoning, speak=speak_reply: dictation.ask_text(
+                                value,
+                                echo_user=echo,
+                                reasoning=effort,
+                                speak_reply=speak,
+                            ),
                         )
                         continue
                     if cmd == "reset_agent":

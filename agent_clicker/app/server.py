@@ -607,7 +607,20 @@ def api_phone_send():
     if target in {"voice", "agent"}:
         # Straight to the voice agent, which answers with the same tools and
         # the same conversation it uses when you talk to the PC directly.
-        result = forward_voice({"cmd": "ask", "text": text, "echo_user": True})
+        voice_options = options or {}
+        reasoning = str(voice_options.get("reasoning") or "").strip().lower()
+        if reasoning not in {"minimal", "low", "medium", "high", "xhigh"}:
+            reasoning = ""
+        payload = {
+            "cmd": "ask",
+            "text": text,
+            "echo_user": True,
+            # A remote turn should speak on the phone, not from an unattended PC.
+            "speak_reply": bool(voice_options.get("speak_reply", False)),
+        }
+        if reasoning:
+            payload["reasoning"] = reasoning
+        result = forward_voice(payload)
         return jsonify(result), 200 if result.get("ok") else 503
     result = forward_helper(target, text)
     return jsonify(result), 200 if result.get("ok") else 503
@@ -657,7 +670,36 @@ def _read_voice_events(limit=80):
 
 @app.route("/api/phone/voice/log")
 def api_phone_voice_log():
-    """Recent turns, so the phone shows the conversation already in progress."""
+    """Recent turns, or the raw byte-cursor feed used by the public relay."""
+    since_raw = request.args.get("since")
+    if since_raw is not None:
+        try:
+            since = max(0, int(since_raw))
+        except (TypeError, ValueError):
+            since = 0
+        try:
+            size = VOICE_EVENTS_FILE.stat().st_size
+        except OSError:
+            return jsonify({"events": [], "size": 0, "reset": bool(since)})
+        reset = size < since
+        if reset:
+            since = 0
+        events = []
+        try:
+            with VOICE_EVENTS_FILE.open("rb") as file:
+                file.seek(since)
+                chunk = file.read(max(0, size - since))
+        except OSError:
+            chunk = b""
+        for raw_line in chunk.splitlines():
+            try:
+                event = json.loads(raw_line.decode("utf-8", "replace"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            if isinstance(event, dict):
+                events.append(event)
+        return jsonify({"events": events, "size": size, "reset": reset})
+
     events = [
         event
         for event in _read_voice_events(limit=200)

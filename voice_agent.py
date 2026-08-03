@@ -2240,7 +2240,7 @@ class VoiceAgent:
             return False
         return any(word in folded for word in cls.STOP_WORDS)
 
-    def run(self, transcript):
+    def run(self, transcript, overrides=None):
         transcript = str(transcript or "").strip()
         if not transcript:
             return AgentResult(error="nothing to send")
@@ -2251,7 +2251,7 @@ class VoiceAgent:
             return self._interject(transcript)
         try:
             self._cancelled.clear()
-            return self._run_locked(transcript)
+            return self._run_locked(transcript, overrides=overrides)
         finally:
             self._lock.release()
 
@@ -2370,9 +2370,16 @@ class VoiceAgent:
             response = stream.get_final_response()
         return response, "".join(chunks), started
 
-    def _run_locked(self, transcript):
+    def _run_locked(self, transcript, overrides=None):
         started = time.monotonic()
         settings = agent_settings()
+        # The phone can choose Fast or Think for one turn without rewriting the
+        # desktop user's saved defaults. Only deliberately safe tuning knobs
+        # are accepted here; capabilities and permissions remain PC-owned.
+        if isinstance(overrides, dict):
+            reasoning = str(overrides.get("agent_reasoning") or "").strip().lower()
+            if reasoning in {"minimal", "low", "medium", "high", "xhigh"}:
+                settings["agent_reasoning"] = reasoning
         used_tools = []
         tool_trace = []
         tool_details = []

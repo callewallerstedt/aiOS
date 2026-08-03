@@ -85,6 +85,8 @@ const state = {
   plannerModel: prefs.get("aios_planner_model", "sol"),
   lastPlannerModel: prefs.get("aios_planner_last_model", "sol"),
   effort: prefs.get("aios_effort", "low"),
+  remoteMode: prefs.get("aios_remote_mode", "fast"),
+  voiceReplies: prefs.bool("aios_voice_replies", true),
   steps: Number(prefs.get("aios_steps", 30)),
   shell: prefs.bool("aios_shell", true),
   detailed: prefs.bool("aios_detailed", true),
@@ -107,6 +109,8 @@ const state = {
   busy: false,
   loading: false,
   running: false,
+  operatorRunning: false,
+  agentRunning: false,
   forceNewPrompt: false,
   frameUrl: "",
   frameStamp: "",
@@ -136,8 +140,44 @@ const state = {
   threadSeq: 0,
   seenEvents: new Set(),
   relayLatest: 0,
-  resyncing: false
+  resyncing: false,
+  transcriptionRequestId: "",
+  transcriptionAutoSend: false
 };
+
+if (!["fast", "think", "operator"].includes(state.remoteMode)) state.remoteMode = "fast";
+
+function agentMode() {
+  return state.remoteMode === "fast" || state.remoteMode === "think";
+}
+
+function agentReasoning() {
+  return state.remoteMode === "think" ? "high" : "low";
+}
+
+function renderRemoteMode() {
+  $$(".remote-mode").forEach((button) => {
+    const active = button.dataset.remoteMode === state.remoteMode;
+    button.classList.toggle("on", active);
+    button.setAttribute("aria-pressed", active ? "true" : "false");
+  });
+  const conversational = agentMode();
+  $("#runSettingsBtn")?.classList.toggle("hidden", conversational);
+  $("#attachBtn")?.classList.toggle("hidden", conversational);
+  $("#voiceReplyBtn")?.classList.toggle("hidden", !conversational);
+  $("#voiceReplyBtn")?.classList.toggle("on", state.voiceReplies);
+  $("#voiceReplyBtn")?.setAttribute("aria-pressed", state.voiceReplies ? "true" : "false");
+  const input = $("#promptInput");
+  if (input) {
+    input.placeholder = conversational
+      ? (state.remoteMode === "think" ? "Ask the agent to think it throughâ€¦" : "Message your agentâ€¦")
+      : (treatAsFollowUp() ? "Add a follow-upâ€¦" : "Tell OPERATOR what to doâ€¦");
+  }
+  const mic = $("#micBtn");
+  if (mic) mic.setAttribute("aria-label", conversational && state.voiceReplies
+    ? "Talk to the agent"
+    : "Transcribe on this PC");
+}
 
 function applyAppearance(background = state.background) {
   state.background = background === "red" ? "red" : "black";
@@ -785,10 +825,11 @@ function renderMachine() {
   const runState = String(operator.state || status.state || "idle").toLowerCase();
   const running = machine.online && RUNNING_STATES.has(runState);
   const asking = Boolean(operator.asking);
-  state.running = running;
+  state.operatorRunning = running;
+  state.running = agentMode() ? state.agentRunning : running;
 
   $("#machineName").textContent = machine.name;
-  $("#machineDot").className = `dot${machine.online ? (running ? " busy" : " online") : ""}`;
+  $("#machineDot").className = `dot${machine.online ? (state.running ? " busy" : " online") : ""}`;
   $("#machineMeta").textContent = machine.online
     ? (running ? (asking ? "Needs your answer" : "OPERATOR is working") : `${machine.platform || "Windows"} · ready`)
     : `Offline · last seen ${ago(machine.last_seen)}`;
@@ -797,9 +838,19 @@ function renderMachine() {
     ? "Waiting for your answer"
     : running ? (operator.task || "Working on your task") : "Ready for a task";
   $("#runMeta").textContent = `${labelOf(MODELS, state.model)} · ${running ? "working" : "idle"}`;
-  $("#runDot").classList.toggle("on", running);
-  $("#stopBtn").classList.toggle("hidden", !running);
+  $("#runDot").classList.toggle("on", state.running);
+  $("#stopBtn").classList.toggle("hidden", !state.running);
+  renderRemoteMode();
+  if (agentMode()) {
+    $("#machineMeta").textContent = machine.online
+      ? (state.agentRunning ? "Agent is answering" : `${machine.platform || "Windows"} - agent ready`)
+      : $("#machineMeta").textContent;
+    $("#runTitle").textContent = state.agentRunning ? "Your agent is answering" : "Agent ready";
+    $("#runMeta").textContent = `${state.remoteMode === "think" ? "Think" : "Fast"} - ${state.agentRunning ? "working" : "ready"}`;
+  }
   $("#promptInput").placeholder = treatAsFollowUp() ? "Add a follow-up…" : "Ask your computer…";
+
+  renderRemoteMode();
 
   const monitors = monitorsOf(machine);
   if (!monitors.some((monitor) => String(monitor.id) === String(state.monitorId))) {
@@ -1077,6 +1128,22 @@ function cinemaEvent(type, payload) {
   if (!cinema.on) return;
   if (type === "prompt" || /follow.?up/.test(type)) {
     return cinemaPush("me", "You", say(payload.message || payload.text || payload.prompt));
+  }
+  if (type === "agent_turn_start") {
+    return cinemaPush("me", "You", say(payload.message || payload.text));
+  }
+  if (type === "agent_status") {
+    return cinemaStatus("thinking", say(payload.message || payload.text) || "Thinking");
+  }
+  if (type === "agent_tool") {
+    return cinemaPush("", "Agent", say(payload.message || payload.text));
+  }
+  if (type === "agent_reply_delta") {
+    return;
+  }
+  if (type === "agent_turn_done") {
+    cinemaStatus(payload.error ? "failed" : "done");
+    return cinemaPush(payload.error ? "err" : "ok", payload.error ? "Agent error" : "Agent", say(payload.message || payload.text));
   }
   if (type === "run_start" || type === "command") {
     cinema.lines = [];
@@ -1621,6 +1688,30 @@ function describe(event) {
   const type = String(event.type || "log").toLowerCase();
   const text = (value) => String(value || "").trim();
 
+  if (type === "agent_turn_start") {
+    return { kind: "user", body: text(payload.message || payload.text) };
+  }
+  if (type === "agent_status") {
+    return { kind: "entry", tone: "think muted agent-status", glyph: "spark", title: "Agent", body: text(payload.message || payload.text) || "Thinking" };
+  }
+  if (type === "agent_tool") {
+    return { kind: "entry", tone: "act", glyph: "bolt", title: "Agent used a tool", body: text(payload.message || payload.text) };
+  }
+  if (type === "agent_reply_delta") {
+    return { kind: "agent-stream", body: text(payload.message || payload.text) };
+  }
+  if (type === "agent_turn_done") {
+    const failed = Boolean(payload.error);
+    return {
+      kind: "agent-done",
+      tone: failed ? "err" : "say",
+      glyph: failed ? "warn" : "spark",
+      title: failed ? "Agent error" : "Agent",
+      body: text(payload.message || payload.text),
+      hint: payload.elapsed ? `${Number(payload.elapsed).toFixed(1)}s` : ""
+    };
+  }
+
   if (type === "prompt" || /follow.?up/.test(type)) {
     return {
       kind: "user",
@@ -1780,6 +1871,18 @@ function clearThinkingPlaceholder() {
   $("#timeline")?.querySelectorAll(".entry.optimistic-think").forEach((node) => node.remove());
 }
 
+function speakAgentReply(message) {
+  const text = String(message || "").trim();
+  if (!text || !state.voiceReplies || !window.speechSynthesis) return;
+  try {
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(text.slice(0, 4000));
+    utterance.lang = navigator.language || "en-US";
+    utterance.rate = 1.04;
+    window.speechSynthesis.speak(utterance);
+  } catch { /* speech output is optional; the transcript remains visible */ }
+}
+
 /** Instant feedback after you hit send — full-colour bubble + Thinking, no "sending". */
 function showThinkingSoon() {
   clearThinkingPlaceholder();
@@ -1796,7 +1899,7 @@ function showThinkingSoon() {
   const head = document.createElement("div");
   head.className = "entry-title";
   const title = document.createElement("strong");
-  title.textContent = "Thinking";
+  title.textContent = agentMode() ? (state.remoteMode === "think" ? "Agent is thinking" : "Agent is answering") : "Thinking";
   const time = document.createElement("time");
   time.textContent = clockTime(Date.now());
   head.append(title, time);
@@ -1805,8 +1908,10 @@ function showThinkingSoon() {
   feed.appendChild(entry);
   state.stickBottom = true;
   scrollFeed();
-  $("#runTitle").textContent = "OPERATOR is thinking";
-  $("#runMeta").textContent = `${labelOf(MODELS, state.model)} · thinking`;
+  $("#runTitle").textContent = agentMode() ? "Your agent is answering" : "OPERATOR is thinking";
+  $("#runMeta").textContent = agentMode()
+    ? `${state.remoteMode === "think" ? "Think" : "Fast"} - thinking`
+    : `${labelOf(MODELS, state.model)} · thinking`;
   $("#runDot").classList.add("on");
   if (cinema.on) cinemaStatus("thinking");
 }
@@ -1864,6 +1969,60 @@ function addEvent(event) {
 
   // Real agent activity replaces the optimistic Thinking row.
   if (!state.replaying && info.kind !== "user") clearThinkingPlaceholder();
+
+  if (info.kind === "agent-stream") {
+    if (!info.body) return;
+    let entry = [...feed.querySelectorAll(".entry.agent-reply.streaming")].at(-1);
+    if (!entry) {
+      entry = document.createElement("article");
+      entry.className = "entry say agent-reply streaming";
+      const badge = document.createElement("div");
+      badge.className = "entry-icon";
+      badge.appendChild(icon("spark"));
+      const body = document.createElement("div");
+      body.className = "entry-body";
+      const head = document.createElement("div");
+      head.className = "entry-title";
+      const title = document.createElement("strong");
+      title.textContent = "Agent";
+      const time = document.createElement("time");
+      time.textContent = clockTime(stamp);
+      head.append(title, time);
+      const paragraph = document.createElement("p");
+      paragraph.className = "agent-reply-text";
+      body.append(head, paragraph);
+      entry.append(badge, body);
+      feed.appendChild(entry);
+    }
+    const paragraph = entry.querySelector(".agent-reply-text");
+    paragraph.textContent += info.body;
+    state.agentRunning = true;
+    state.running = agentMode();
+    renderMachine();
+    trimFeed();
+    scrollFeed();
+    return;
+  }
+  if (info.kind === "agent-done") {
+    state.agentRunning = false;
+    state.running = agentMode() ? false : state.operatorRunning;
+    const streamed = [...feed.querySelectorAll(".entry.agent-reply.streaming")].at(-1);
+    if (streamed) {
+      streamed.classList.remove("streaming");
+      streamed.classList.toggle("err", Boolean((event.payload || {}).error));
+      const paragraph = streamed.querySelector(".agent-reply-text");
+      if (paragraph && info.body) paragraph.textContent = info.body;
+      const time = streamed.querySelector("time");
+      if (time) time.textContent = info.hint ? `${clockTime(stamp)} Â· ${info.hint}` : clockTime(stamp);
+      if (!state.replaying && !(event.payload || {}).error) speakAgentReply(info.body);
+      renderMachine();
+      trimFeed();
+      scrollFeed();
+      return;
+    }
+    if (!state.replaying && !(event.payload || {}).error) speakAgentReply(info.body);
+    renderMachine();
+  }
 
   if (info.kind === "step") {
     if (state.lastStep === info.step) return;
@@ -2245,6 +2404,13 @@ function recordEvent(event) {
   if (key) state.seenEvents.add(key);
   const payload = event.payload || {};
   const stamp = Number(event.created_at || Date.now());
+  if (type === "agent_turn_start") {
+    state.agentRunning = true;
+    const echoed = String(payload.message || payload.text || "").trim();
+    const lastPrompt = [...(state.liveRun?.events || [])].reverse()
+      .find((item) => String(item.type || "").toLowerCase() === "prompt");
+    if (echoed && echoed === String(lastPrompt?.payload?.message || "").trim()) return false;
+  }
   if (type === "run_start") {
     // The task you typed already opened a run here. Let the PC's run_start
     // adopt it instead of splitting one task across two history rows.
@@ -2261,6 +2427,11 @@ function recordEvent(event) {
   let run = state.liveRun;
   if (!run || run.status !== "open") run = openRun(payload.task || "", stamp);
   if (type === "run_start" && payload.task) run.task = String(payload.task).slice(0, 400);
+  if (type === "agent_turn_done") {
+    // The durable history keeps the final answer, not hundreds of streaming
+    // fragments. Live rendering has already assembled those fragments.
+    run.events = run.events.filter((item) => item.type !== "agent_reply_delta");
+  }
   run.events.push({ type, payload, created_at: stamp, id: event.id });
   // Long runs shed their middle, not their beginning: dropping the oldest
   // events first is what quietly deleted the message that started the task.
@@ -2270,6 +2441,11 @@ function recordEvent(event) {
     run.steps = Number(payload.steps) || run.steps;
     run.cost = costLine(payload.cost);
     closeRun(payload.ok ? "done" : /stop/i.test(String(payload.message || "")) ? "stopped" : "failed", stamp);
+    return true;
+  }
+  if (type === "agent_turn_done") {
+    state.agentRunning = false;
+    closeRun(payload.error ? "failed" : "done", stamp);
     return true;
   }
   saveHistory();
@@ -2393,6 +2569,10 @@ async function drainEvents(silent = false) {
         try {
           if (String(event.type || "").toLowerCase() === "clarification") {
             if (!silent) applyClarification(event.payload || {});
+            continue;
+          }
+          if (String(event.type || "").toLowerCase() === "transcription") {
+            if (!silent) applyRemoteTranscription(event.payload || {});
             continue;
           }
           // A recovery re-reads rows we already have; only paint the new ones.
@@ -2623,7 +2803,10 @@ async function sendCommand(type, payload = {}) {
   // The production relay can lag behind the PWA. Tunnel newer command types
   // through its long-supported config envelope so intent questions keep
   // working while the PC and static client update independently.
-  const tunneled = ["clarify", "stream", "update", "codex_switch", "ai_settings"].includes(type);
+  const tunneled = [
+    "clarify", "stream", "update", "codex_switch", "ai_settings",
+    "agent", "agent_stop", "transcribe"
+  ].includes(type) && !state.relayFeatures.includes("agent-voice");
   return api(`/api/machines/${encodeURIComponent(machine.id)}/commands`, {
     method: "POST",
     body: JSON.stringify({
@@ -3068,8 +3251,112 @@ function toggleImmersive(on) {
 const SpeechRecognitionClass = window.SpeechRecognition || window.webkitSpeechRecognition;
 let recognition = null;
 let recognitionBase = "";
+let remoteRecorder = null;
+let remoteStream = null;
+let remoteChunks = [];
+
+function recordingMimeType() {
+  const choices = ["audio/webm;codecs=opus", "audio/mp4", "audio/webm", "audio/ogg;codecs=opus"];
+  return choices.find((type) => window.MediaRecorder?.isTypeSupported?.(type)) || "";
+}
+
+function recordingName(type) {
+  if (type.includes("mp4")) return "voice.m4a";
+  if (type.includes("ogg")) return "voice.ogg";
+  return "voice.webm";
+}
+
+async function finishRemoteRecording(blob, autoSend) {
+  if (!blob || blob.size < 300) {
+    stopDictation();
+    toast("I did not catch any audio.");
+    return;
+  }
+  const requestId = `${state.machineId}:${Date.now()}:${++state.clarifierSequence}`;
+  state.transcriptionRequestId = requestId;
+  state.transcriptionAutoSend = Boolean(autoSend);
+  $("#listeningText").textContent = "Transcribing on this PCâ€¦";
+  $("#listening").classList.remove("hidden");
+  try {
+    const audio = await uploadAttachment({
+      blob,
+      name: recordingName(blob.type || "audio/webm"),
+      type: blob.type || "audio/webm",
+      kind: "audio",
+      size: blob.size
+    });
+    await sendCommand("transcribe", { audio, request_id: requestId });
+    pollEvents().catch(() => {});
+  } catch (error) {
+    state.transcriptionRequestId = "";
+    $("#listening").classList.add("hidden");
+    toast(error.message || "Voice transcription failed.");
+  }
+}
+
+async function startRemoteRecording() {
+  try {
+    remoteStream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+    });
+    const mimeType = recordingMimeType();
+    remoteRecorder = new MediaRecorder(remoteStream, mimeType ? { mimeType, audioBitsPerSecond: 32000 } : undefined);
+    remoteChunks = [];
+    const autoSend = agentMode() && state.voiceReplies;
+    remoteRecorder.ondataavailable = (event) => { if (event.data?.size) remoteChunks.push(event.data); };
+    remoteRecorder.onstop = () => {
+      const type = remoteRecorder?.mimeType || mimeType || "audio/webm";
+      const blob = new Blob(remoteChunks, { type });
+      remoteChunks = [];
+      remoteStream?.getTracks().forEach((track) => track.stop());
+      remoteStream = null;
+      remoteRecorder = null;
+      $("#micBtn").classList.remove("rec");
+      $(".composer").classList.remove("rec");
+      finishRemoteRecording(blob, autoSend);
+    };
+    remoteRecorder.start(250);
+    buzz(12);
+    $("#micBtn").classList.add("rec");
+    $(".composer").classList.add("rec");
+    $("#listeningText").textContent = autoSend ? "Talk now â€” tap the mic to send" : "Talk now â€” tap the mic to transcribe";
+    $("#listening").classList.remove("hidden");
+  } catch (error) {
+    remoteStream?.getTracks().forEach((track) => track.stop());
+    remoteStream = null;
+    remoteRecorder = null;
+    if (error?.name === "NotAllowedError") toast("Microphone access was blocked.");
+    else toast("The phone microphone could not start.");
+  }
+}
+
+function applyRemoteTranscription(payload) {
+  if (!payload || payload.request_id !== state.transcriptionRequestId) return;
+  state.transcriptionRequestId = "";
+  $("#listening").classList.add("hidden");
+  const transcript = String(payload.text || "").trim();
+  if (!transcript) {
+    toast("I could not hear any words.");
+    return;
+  }
+  const input = $("#promptInput");
+  input.value = [input.value.trim(), transcript].filter(Boolean).join(" ");
+  autoGrow();
+  scheduleClarification();
+  const autoSend = state.transcriptionAutoSend;
+  state.transcriptionAutoSend = false;
+  if (autoSend) $("#promptForm").requestSubmit();
+  else {
+    input.focus();
+    toast("Transcribed â€” edit it or tap send.");
+  }
+}
 
 function stopDictation() {
+  if (remoteRecorder && remoteRecorder.state !== "inactive") {
+    remoteRecorder.stop();
+    return;
+  }
   if (recognition) {
     recognition.onend = null;
     recognition.stop();
@@ -3081,6 +3368,10 @@ function stopDictation() {
 }
 
 function startDictation() {
+  if (window.MediaRecorder && navigator.mediaDevices?.getUserMedia) {
+    startRemoteRecording();
+    return;
+  }
   if (!SpeechRecognitionClass) {
     toast("Dictation needs Chrome or Safari — try the mic on your keyboard.");
     return;
@@ -3551,7 +3842,12 @@ $("#timeline").addEventListener("scroll", () => {
 $("#stopBtn").addEventListener("click", async () => {
   buzz(20);
   try {
-    await sendCommand("stop");
+    await sendCommand(agentMode() ? "agent_stop" : "stop");
+    if (agentMode()) {
+      state.agentRunning = false;
+      state.running = false;
+      renderMachine();
+    }
     toast("Stop requested");
   } catch (error) {
     toast(error.message);
@@ -3561,7 +3857,7 @@ $("#stopBtn").addEventListener("click", async () => {
 $("#clearChatBtn").addEventListener("click", async () => {
   if (!currentMachine()) return;
   buzz();
-  if (state.running) sendCommand("stop").catch(() => {});
+  if (state.running) sendCommand(agentMode() ? "agent_stop" : "stop").catch(() => {});
   await beginSession(true);
   renderMachine();
 });
@@ -3614,7 +3910,29 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && !$("#lightbox").classList.contains("hidden")) closeLightbox();
 });
 
-$("#micBtn").addEventListener("click", () => (recognition ? stopDictation() : startDictation()));
+$$(".remote-mode").forEach((button) => button.addEventListener("click", () => {
+  state.remoteMode = button.dataset.remoteMode || "fast";
+  prefs.set("aios_remote_mode", state.remoteMode);
+  state.running = agentMode() ? state.agentRunning : state.operatorRunning;
+  renderRemoteMode();
+  renderMachine();
+  buzz();
+}));
+
+$("#voiceReplyBtn").addEventListener("click", () => {
+  state.voiceReplies = !state.voiceReplies;
+  prefs.set("aios_voice_replies", state.voiceReplies ? 1 : 0);
+  if (!state.voiceReplies) window.speechSynthesis?.cancel?.();
+  renderRemoteMode();
+  toast(state.voiceReplies ? "Talk mode on â€” voice sends and replies aloud." : "Transcription mode â€” review before sending.");
+  buzz();
+});
+
+$("#micBtn").addEventListener("click", () => (
+  recognition || (remoteRecorder && remoteRecorder.state !== "inactive")
+    ? stopDictation()
+    : startDictation()
+));
 $("#micStopBtn").addEventListener("click", stopDictation);
 
 /* ── wiring: attachments ──────────────────────────────── */
@@ -3680,18 +3998,27 @@ $("#promptForm").addEventListener("submit", async (event) => {
   const files = state.attachments.slice();
   const prompt = typed || (files.length ? ATTACHMENT_ONLY_PROMPT : "");
   if (!prompt || state.busy) return;
+  if (agentMode() && files.length) {
+    toast("Choose Control to send photos or files to OPERATOR.");
+    return;
+  }
   const machine = currentMachine();
   // Decide follow-up BEFORE clearing History view — viewing an old thread
   // must never be treated as a follow-up to a live run.
-  const asFollowUp = treatAsFollowUp();
-  const type = asFollowUp ? "followup" : "prompt";
+  const asFollowUp = !agentMode() && treatAsFollowUp();
+  const type = agentMode() ? "agent" : (asFollowUp ? "followup" : "prompt");
   state.forceNewPrompt = false;
   // Keep the thread the user is reading; just unlock the live event gate.
   resumeLiveFeed({ keepTranscript: true });
   if (!asFollowUp && state.liveRun?.status === "open") closeRun("ended");
   // New task while a previous run still looks busy: stop it so intent:new
   // can take over instead of bouncing off "Already running".
-  if (type === "prompt" && state.running) sendCommand("stop").catch(() => {});
+  if (type === "prompt" && state.operatorRunning) sendCommand("stop").catch(() => {});
+  if (type === "agent") {
+    state.agentRunning = true;
+    state.running = true;
+    renderMachine();
+  }
   state.busy = true;
   $("#sendBtn").disabled = true;
   buzz(12);
@@ -3703,16 +4030,19 @@ $("#promptForm").addEventListener("submit", async (event) => {
   showThinkingSoon();
   try {
     if (files.length) markAttachmentsBusy(true);
-    const attachments = await packAttachments(files);
-    await sendCommand(type, {
-      prompt,
-      model: state.model,
-      planner_model: state.plannerModel,
-      max_steps: state.steps,
-      reasoning_effort: state.effort,
-      shell: state.shell,
-      ...(attachments.length ? { attachments } : {})
-    });
+    const attachments = agentMode() ? [] : await packAttachments(files);
+    const payload = agentMode()
+      ? { prompt, reasoning: agentReasoning(), speak_reply: false }
+      : {
+          prompt,
+          model: state.model,
+          planner_model: state.plannerModel,
+          max_steps: state.steps,
+          reasoning_effort: state.effort,
+          shell: state.shell,
+          ...(attachments.length ? { attachments } : {})
+        };
+    await sendCommand(type, payload);
     $("#promptInput").value = "";
     clearAttachments();
     clearClarifier();
@@ -3722,6 +4052,11 @@ $("#promptForm").addEventListener("submit", async (event) => {
     pollEvents().catch(() => {});
   } catch (error) {
     clearThinkingPlaceholder();
+    if (type === "agent") {
+      state.agentRunning = false;
+      state.running = false;
+      renderMachine();
+    }
     // Keep the files in the tray so a failed send is one tap from a retry.
     markAttachmentsBusy(false);
     toast(error.message);
@@ -3776,6 +4111,7 @@ if ("serviceWorker" in navigator) {
 /* ── boot ─────────────────────────────────────────────── */
 
 updateRunSettingsLabels();
+renderRemoteMode();
 $("#stepsInput").value = state.steps;
 $("#shellToggle").checked = state.shell;
 $("#wakeToggle").checked = state.keepAwake;

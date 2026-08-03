@@ -33,6 +33,7 @@ STATE_PATH = ROOT / "phone-relay-state.json"
 HEARTBEAT_PATH = ROOT / ".aios-phone-relay-heartbeat"
 STREAM_HEALTH_PATH = ROOT / ".aios-stream-health.json"
 LOCAL_EVENTS_PATH = ROOT / "phone_operator_events" / "events.jsonl"
+LOCAL_VOICE_EVENTS_PATH = ROOT / "phone_voice_events" / "events.jsonl"
 UPDATE_REQUEST_PATH = ROOT / ".aios-update-request"
 LOCAL_BASE = "http://127.0.0.1:5000"
 DEFAULT_RELAY = os.environ.get("AIOS_RELAY_URL", "").rstrip("/")
@@ -284,7 +285,9 @@ class Bridge:
         self.token = str(relay.get("machine_token") or "")
         self.headers = {"X-aiOS-Machine-Token": self.token}
         self.log_cursor = self.load_cursor()
+        self.voice_cursor = self.load_voice_cursor()
         self._events_next_cursor = None
+        self._voice_events_next_cursor = None
         self.last_status_at = 0.0
         self.last_monitors_at = 0.0
         self.monitors = []
@@ -310,6 +313,19 @@ class Bridge:
         except OSError:
             return 0
 
+    def load_voice_cursor(self) -> int:
+        try:
+            state = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+            saved = int((state.get("machines") or {}).get(self.machine_id, {}).get("voice_cursor", 0))
+            if saved:
+                return saved
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            pass
+        try:
+            return int(LOCAL_VOICE_EVENTS_PATH.stat().st_size)
+        except OSError:
+            return 0
+
     def save_cursor(self) -> None:
         try:
             state = json.loads(STATE_PATH.read_text(encoding="utf-8")) if STATE_PATH.exists() else {}
@@ -318,6 +334,7 @@ class Bridge:
         machines = state.setdefault("machines", {})
         machines[self.machine_id] = {
             "log_cursor": int(self.log_cursor),
+            "voice_cursor": int(self.voice_cursor),
             "shot_slot": int(self.shot_slot),
             "updated_at": int(time.time() * 1000),
         }
@@ -400,6 +417,7 @@ class Bridge:
         self.token = token
         self.headers = {"X-aiOS-Machine-Token": token}
         self.log_cursor = self.load_cursor()
+        self.voice_cursor = self.load_voice_cursor()
         self.last_status_at = 0.0
         self.last_monitors_at = 0.0
         self.monitors = []
@@ -485,13 +503,43 @@ class Bridge:
             self._release_attachment(item)
         return [str(entry.get("id")) for entry in saved if isinstance(entry, dict) and entry.get("id")]
 
+    def transcribe_attachment(self, item: dict, request_id: str = "") -> dict:
+        """Send a phone recording to the PC's configured Whisper pipeline."""
+        if not isinstance(item, dict):
+            raise RuntimeError("no voice recording arrived")
+        name, content, mime = self._attachment_bytes(item)
+        try:
+            response = httpx.post(
+                f"{LOCAL_BASE}/api/phone/transcribe",
+                data={"target": "none"},
+                files={"audio": (name or "voice.webm", content, mime)},
+                timeout=httpx.Timeout(120.0, connect=5.0),
+            )
+            try:
+                result = response.json()
+            except Exception:
+                result = {}
+            if response.status_code >= 400:
+                detail = str(result.get("error") or response.text[:200] or "transcription failed")
+                raise RuntimeError(detail)
+            return {
+                "ok": True,
+                "request_id": str(request_id or "")[:120],
+                "text": str(result.get("text") or "").strip(),
+            }
+        finally:
+            self._release_attachment(item)
+
     def execute(self, command: dict) -> dict:
         kind = str(command.get("type") or "")
         payload = command.get("payload") if isinstance(command.get("payload"), dict) else {}
         # New control messages can be tunneled through the legacy relay's
         # existing `config` command until every hosted backend is upgraded.
         tunneled = str(payload.get("_aios_command") or "") if kind == "config" else ""
-        if tunneled in {"clarify", "stream", "update", "codex_switch", "ai_settings"}:
+        if tunneled in {
+            "clarify", "stream", "update", "codex_switch", "ai_settings",
+            "agent", "agent_stop", "transcribe",
+        }:
             kind = tunneled
             payload = {key: value for key, value in payload.items() if key != "_aios_command"}
         if kind in {"prompt", "followup"}:
@@ -519,6 +567,30 @@ class Bridge:
                 # without the image the user sent is worse than a late start.
                 body["attachments"] = self.fetch_attachments(incoming)
             return self.local_json("/api/phone/send", method="POST", payload=body, timeout=30)
+        if kind == "agent":
+            reasoning = str(payload.get("reasoning") or "low").strip().lower()
+            if reasoning not in {"minimal", "low", "medium", "high", "xhigh"}:
+                reasoning = "low"
+            return self.local_json(
+                "/api/phone/send",
+                method="POST",
+                payload={
+                    "text": str(payload.get("prompt") or ""),
+                    "target": "agent",
+                    "options": {
+                        "reasoning": reasoning,
+                        "speak_reply": bool(payload.get("speak_reply", False)),
+                    },
+                },
+                timeout=30,
+            )
+        if kind == "agent_stop":
+            return self.local_json("/api/phone/voice/stop", method="POST", payload={})
+        if kind == "transcribe":
+            return self.transcribe_attachment(
+                payload.get("audio") if isinstance(payload.get("audio"), dict) else {},
+                str(payload.get("request_id") or ""),
+            )
         if kind == "stop":
             return self.local_json("/api/phone/operator/stop", method="POST", payload={})
         if kind == "config":
@@ -648,12 +720,51 @@ class Bridge:
         self._events_next_cursor = next_cursor
         return output
 
+    def collect_voice_events(self) -> list[dict]:
+        """Read the resident conversational agent's durable event stream."""
+        data = self.local_json(f"/api/phone/voice/log?since={self.voice_cursor}", timeout=4)
+        cursor = 0 if data.get("reset") else int(self.voice_cursor)
+        next_cursor = int(data.get("size") or cursor)
+        output = []
+        mapping = {
+            "turn_start": "agent_turn_start",
+            "status": "agent_status",
+            "tool_done": "agent_tool",
+            "reply_delta": "agent_reply_delta",
+            "turn_done": "agent_turn_done",
+        }
+        for item in data.get("events") or []:
+            if not isinstance(item, dict):
+                continue
+            local_type = str(item.get("type") or "")
+            remote_type = mapping.get(local_type)
+            if not remote_type:
+                continue
+            payload = dict(item)
+            payload["message"] = str(item.get("text") or item.get("message") or "")
+            created = float(item.get("ts") or time.time())
+            output.append({
+                "type": remote_type,
+                "payload": payload,
+                "created_at": int(created * 1000) if created < 10_000_000_000 else int(created),
+            })
+        self._voice_events_next_cursor = next_cursor
+        return output
+
     def commit_event_cursor(self) -> None:
         next_cursor = getattr(self, "_events_next_cursor", None)
         if next_cursor is None:
             return
         self.log_cursor = int(next_cursor)
         self._events_next_cursor = None
+        self.save_cursor()
+
+    def commit_voice_event_cursor(self) -> None:
+        next_cursor = getattr(self, "_voice_events_next_cursor", None)
+        if next_cursor is None:
+            return
+        self.voice_cursor = int(next_cursor)
+        self._voice_events_next_cursor = None
         self.save_cursor()
 
     def post_events(self, *, events=None, status=None, command_id=None, result=None) -> None:
@@ -668,25 +779,42 @@ class Bridge:
     def flush_events(self, *, force_status: bool = False) -> None:
         """Push OPERATOR activity to the phone, only advancing after success."""
         events = self.collect_events()
+        voice_events = self.collect_voice_events()
         status = None
         if force_status or time.monotonic() - self.last_status_at >= 2.5:
             status = self.collect_status()
             self.last_status_at = time.monotonic()
-        if not events and status is None:
+        if not events and not voice_events and status is None:
+            # reply_start/reply_done are intentionally not forwarded; they are
+            # still consumed so the bridge never rereads them forever.
+            if self._voice_events_next_cursor is not None:
+                self.commit_voice_event_cursor()
             return
-        self.post_events(events=events, status=status)
+        self.post_events(events=[*events, *voice_events], status=status)
         if events:
             self.commit_event_cursor()
+        if self._voice_events_next_cursor is not None:
+            self.commit_voice_event_cursor()
 
     def _complete_command(self, command: dict, *, is_clarify: bool, is_silent: bool = False) -> None:
         try:
             result = self.execute(command)
-            self.post_events(
-                events=[] if is_silent else [{
-                    "type": "clarification" if is_clarify else "command",
-                    "payload": result if is_clarify else {"title": "Command received", "message": command.get("type")},
+            raw_payload = command.get("payload") if isinstance(command.get("payload"), dict) else {}
+            command_type = str(raw_payload.get("_aios_command") or command.get("type") or "")
+            if command_type == "transcribe":
+                completion_events = [{
+                    "type": "transcription",
+                    "payload": result,
                     "created_at": int(time.time() * 1000),
-                }],
+                }]
+            else:
+                completion_events = [] if is_silent else [{
+                    "type": "clarification" if is_clarify else "command",
+                    "payload": result if is_clarify else {"title": "Command received", "message": command_type},
+                    "created_at": int(time.time() * 1000),
+                }]
+            self.post_events(
+                events=completion_events,
                 command_id=command.get("id"), result=result,
             )
         except Exception as exc:
@@ -725,8 +853,8 @@ class Bridge:
             command_type = str(raw_payload.get("_aios_command") or command.get("type") or "")
             is_clarify = command_type == "clarify"
             is_silent = command_type == "stream"
-            if is_clarify:
-                self._run_command_async(command, is_clarify=True)
+            if is_clarify or command_type == "transcribe":
+                self._run_command_async(command, is_clarify=is_clarify)
                 continue
             self._complete_command(command, is_clarify=False, is_silent=is_silent)
             self.flush_events()
