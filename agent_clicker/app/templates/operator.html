@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>aiOS Operator — Flow</title>
+<meta name="theme-color" content="#0b111b" />
+<link rel="icon" sizes="192x192" href="/static/pwa/aios-icon-192.png" />
+<link rel="stylesheet" href="/static/operator.css" />
+</head>
+<body>
+<header class="op-top">
+  <div class="op-title">
+    <img class="op-logo" src="/static/pwa/rectangle-logo.png" alt="aiOS" />
+    <span>Operator&nbsp;·&nbsp;Flow</span>
+  </div>
+  <div class="op-head-right">
+    <span id="op-step" class="op-chip">step —</span>
+    <span id="op-state" class="op-chip state-idle">idle</span>
+    <label class="op-toggle"><input type="checkbox" id="op-follow" checked /> auto-scroll</label>
+  </div>
+</header>
+
+<main class="op-main">
+  <!-- LEFT: scrollable gallery of screenshots + LocateAnything outputs -->
+  <section class="op-gallery" aria-label="Visual history">
+    <div class="op-gallery-head">
+      <span>Visual history</span>
+      <button id="op-clear-gallery" class="op-mini" type="button">clear</button>
+    </div>
+    <div id="op-gallery-list" class="op-gallery-list"></div>
+    <div id="op-gallery-empty" class="op-empty">No frames yet. Start an operator run.</div>
+  </section>
+
+  <!-- RIGHT: live activity / flow feed -->
+  <section class="op-feed" aria-label="Activity feed">
+    <div class="op-feed-head">
+      <span>Activity</span>
+      <span id="op-count" class="op-muted"></span>
+    </div>
+    <div id="op-feed-list" class="op-feed-list"></div>
+  </section>
+</main>
+
+<!-- lightbox -->
+<div id="op-lightbox" class="op-lightbox hidden">
+  <img id="op-lightbox-img" alt="" />
+  <div id="op-lightbox-cap" class="op-lightbox-cap"></div>
+</div>
+
+<script src="/static/operator.js"></script>
+</body>
+</html>

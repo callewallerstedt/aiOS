@@ -2,6 +2,7 @@ openai>=1.50.0
 python-dotenv>=1.0.0
 flask>=3.0.0
 pillow>=10.0.0
+qrcode[pil]>=8.0
 numpy>=1.26.0
 opencv-python>=4.9.0
 easyocr>=1.7.1

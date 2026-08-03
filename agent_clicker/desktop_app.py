@@ -30,7 +30,7 @@ from tkinter import ttk, scrolledtext, messagebox, filedialog
 from PIL import Image, ImageDraw, ImageTk, ImageGrab
 
 from agent.config import MODEL as DEFAULT_MODEL
-from desktop_agent.screen import list_monitors, Monitor, capture
+from desktop_agent.screen import list_monitors, Monitor, capture_for_agent as capture
 from desktop_agent.loop import AgentLoop
 from desktop_agent.tts import TTSPlayer, DEFAULT_VOICE
 from desktop_agent.actions import execute as exec_action

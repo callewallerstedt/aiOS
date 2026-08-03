@@ -1,0 +1,160 @@
+:root {
+  color-scheme: dark;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #071018;
+  color: #f5f8fb;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  min-height: 100dvh;
+  background:
+    radial-gradient(circle at 50% -10%, rgba(58, 207, 255, .16), transparent 44%),
+    #071018;
+}
+
+main {
+  width: min(100%, 480px);
+  margin: 0 auto;
+  padding: max(28px, env(safe-area-inset-top)) 22px max(28px, env(safe-area-inset-bottom));
+  text-align: center;
+}
+
+.mark {
+  display: inline-flex;
+  align-items: center;
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid rgba(110, 222, 255, .35);
+  border-radius: 999px;
+  color: #77dcff;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: .16em;
+  text-transform: uppercase;
+}
+
+h1 {
+  max-width: 360px;
+  margin: 26px auto 10px;
+  font-size: clamp(30px, 9vw, 42px);
+  line-height: 1.02;
+  letter-spacing: -.045em;
+}
+
+.intro {
+  max-width: 350px;
+  margin: 0 auto 32px;
+  color: #9db0c0;
+  font-size: 16px;
+  line-height: 1.5;
+}
+
+input[type="file"] {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.camera-button,
+.library-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  cursor: pointer;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.camera-button {
+  min-height: 128px;
+  flex-direction: column;
+  gap: 12px;
+  border-radius: 28px;
+  background: #72dfff;
+  color: #061018;
+  box-shadow: 0 20px 60px rgba(57, 195, 237, .2);
+  font-size: 20px;
+  font-weight: 800;
+}
+
+.camera-button:active { transform: scale(.985); }
+
+.camera-icon {
+  width: 42px;
+  height: 32px;
+  border: 3px solid currentColor;
+  border-radius: 9px;
+  position: relative;
+}
+
+.camera-icon::before {
+  content: "";
+  position: absolute;
+  width: 14px;
+  height: 8px;
+  top: -9px;
+  left: 11px;
+  border: 3px solid currentColor;
+  border-bottom: 0;
+  border-radius: 5px 5px 0 0;
+}
+
+.camera-icon::after {
+  content: "";
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  inset: 0;
+  margin: auto;
+  border: 3px solid currentColor;
+  border-radius: 50%;
+}
+
+.library-button {
+  min-height: 50px;
+  margin-top: 12px;
+  border: 1px solid #263746;
+  border-radius: 16px;
+  color: #d7e4ec;
+  font-weight: 650;
+}
+
+.status-card {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 26px;
+  padding: 16px;
+  border: 1px solid #1b2b38;
+  border-radius: 20px;
+  background: rgba(13, 27, 38, .82);
+  text-align: left;
+}
+
+.count {
+  display: grid;
+  place-items: center;
+  flex: 0 0 54px;
+  height: 54px;
+  border-radius: 16px;
+  background: #142b39;
+  color: #75e2ff;
+  font-size: 24px;
+  font-weight: 800;
+}
+
+.status-card strong,
+.status-card span { display: block; }
+.status-card strong { font-size: 15px; }
+.status-card span { margin-top: 3px; color: #8295a4; font-size: 13px; }
+
+.queue { margin-top: 12px; }
+.queue-item { margin: 7px 0; color: #8ea2b1; font-size: 13px; }
+.queue-item.error { color: #ff8d8d; }
+.privacy { margin: 24px 8px 0; color: #617482; font-size: 12px; line-height: 1.45; }

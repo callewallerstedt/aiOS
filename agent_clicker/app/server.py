@@ -12,10 +12,12 @@ import tempfile
 import time
 import threading
 import queue
+import re
 import secrets
 import uuid
 
 from flask import Flask, render_template, request, Response, jsonify
+import httpx
 from PIL import Image
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -220,7 +222,8 @@ def _preload_whisper():
         pass
 
 
-threading.Thread(target=_preload_whisper, daemon=True).start()
+if str(os.environ.get("AIOS_SKIP_WHISPER_PRELOAD") or "").strip().lower() not in {"1", "true", "yes"}:
+    threading.Thread(target=_preload_whisper, daemon=True).start()
 
 
 @app.after_request
@@ -773,11 +776,230 @@ def api_phone_voice_events():
 
 
 DEFAULT_PROJECTS_ROOT = os.environ.get("AIOS_PROJECTS_ROOT", r"C:\1 - Projects")
+CODE_UPLOAD_ROOT = REPO_ROOT / "code_job_uploads"
+CODE_UPLOAD_ROOT.mkdir(exist_ok=True)
 
 
+@app.route("/code")
 @app.route("/coding")
 def coding_page():
     return render_template("coding.html")
+
+
+def _code_response(result: dict, success_status: int = 200):
+    if result.get("ok"):
+        return jsonify(result), success_status
+    status = 404 if "unknown CODE job" in str(result.get("error") or "") else 400
+    return jsonify(result), status
+
+
+@app.route("/api/code/capabilities", methods=["GET", "OPTIONS"])
+@app.route("/api/phone/code/capabilities", methods=["GET", "OPTIONS"])
+def api_code_capabilities():
+    if request.method == "OPTIONS":
+        return "", 204
+    import code_jobs
+
+    force = str(request.args.get("refresh") or "").lower() in {"1", "true", "yes"}
+    return jsonify(code_jobs.capabilities(force=force))
+
+
+@app.route("/api/code/providers/<provider>/setup", methods=["POST", "OPTIONS"])
+@app.route("/api/phone/code/providers/<provider>/setup", methods=["POST", "OPTIONS"])
+def api_code_provider_setup(provider):
+    if request.method == "OPTIONS":
+        return "", 204
+    import code_jobs
+
+    return _code_response(code_jobs.setup_provider(provider))
+
+
+@app.route("/api/code/jobs", methods=["GET", "POST", "OPTIONS"])
+@app.route("/api/phone/code/jobs", methods=["GET", "POST", "OPTIONS"])
+def api_code_jobs():
+    if request.method == "OPTIONS":
+        return "", 204
+    import code_jobs
+
+    if request.method == "GET":
+        try:
+            limit = int(request.args.get("limit") or 100)
+        except (TypeError, ValueError):
+            limit = 100
+        return jsonify({"ok": True, "jobs": code_jobs.list_jobs(limit)})
+    data = request.get_json(silent=True) or {}
+    cwd = str(data.get("cwd") or data.get("project") or "").strip()
+    if cwd and not Path(cwd).is_absolute():
+        cwd = str((Path(str(data.get("projects_root") or DEFAULT_PROJECTS_ROOT)) / cwd).resolve())
+    result = code_jobs.create_job(
+        str(data.get("provider") or data.get("cli") or ""),
+        cwd,
+        str(data.get("brief") or data.get("text") or ""),
+        str(data.get("model") or ""),
+        str(data.get("reasoning") or data.get("effort") or ""),
+        fast=bool(data.get("fast")),
+        title=str(data.get("title") or ""),
+        attachments=data.get("attachments") or [],
+    )
+    return _code_response(result, 201)
+
+
+@app.route("/api/code/jobs/<job_id>", methods=["GET", "DELETE", "OPTIONS"])
+@app.route("/api/phone/code/jobs/<job_id>", methods=["GET", "DELETE", "OPTIONS"])
+def api_code_job(job_id):
+    if request.method == "OPTIONS":
+        return "", 204
+    import code_jobs
+
+    if request.method == "DELETE":
+        data = request.get_json(silent=True) or {}
+        confirmed = str(data.get("confirm") or "") == str(job_id)
+        return _code_response(code_jobs.delete_job(job_id, confirmed=confirmed))
+    job = code_jobs.get_job(job_id)
+    if job is None:
+        return jsonify({"ok": False, "error": "unknown CODE job"}), 404
+    return jsonify({"ok": True, "job": job})
+
+
+@app.route("/api/code/jobs/<job_id>/messages", methods=["POST", "OPTIONS"])
+@app.route("/api/code/jobs/<job_id>/continue", methods=["POST", "OPTIONS"])
+@app.route("/api/phone/code/jobs/<job_id>/messages", methods=["POST", "OPTIONS"])
+@app.route("/api/phone/code/jobs/<job_id>/continue", methods=["POST", "OPTIONS"])
+def api_code_message(job_id):
+    if request.method == "OPTIONS":
+        return "", 204
+    import code_jobs
+
+    data = request.get_json(silent=True) or {}
+    result = code_jobs.send_message(
+        job_id,
+        str(data.get("text") or data.get("message") or ""),
+        urgent=bool(data.get("urgent")),
+        attachments=data.get("attachments") or [],
+        model=str(data.get("model") or ""),
+        reasoning=str(data.get("reasoning") or data.get("effort") or ""),
+        fast=data.get("fast") if "fast" in data else None,
+    )
+    return _code_response(result)
+
+
+@app.route("/api/code/jobs/<job_id>/handoff", methods=["POST", "OPTIONS"])
+@app.route("/api/phone/code/jobs/<job_id>/handoff", methods=["POST", "OPTIONS"])
+def api_code_handoff(job_id):
+    if request.method == "OPTIONS":
+        return "", 204
+    import code_jobs
+
+    data = request.get_json(silent=True) or {}
+    result = code_jobs.handoff_job(
+        job_id,
+        str(data.get("provider") or data.get("target_provider") or ""),
+        str(data.get("model") or data.get("target_model") or ""),
+        str(data.get("reasoning") or data.get("effort") or data.get("target_reasoning") or ""),
+        fast=bool(data.get("fast") if "fast" in data else data.get("target_fast")),
+        instruction=str(data.get("instruction") or data.get("text") or ""),
+    )
+    return _code_response(result)
+
+
+@app.route("/api/code/jobs/<job_id>/stop", methods=["POST", "OPTIONS"])
+@app.route("/api/phone/code/jobs/<job_id>/stop", methods=["POST", "OPTIONS"])
+def api_code_stop(job_id):
+    if request.method == "OPTIONS":
+        return "", 204
+    import code_jobs
+
+    return _code_response(code_jobs.stop_job(job_id))
+
+
+@app.route("/api/code/jobs/<job_id>/log")
+@app.route("/api/phone/code/jobs/<job_id>/log")
+def api_code_log(job_id):
+    import code_jobs
+
+    try:
+        since = max(0, int(request.args.get("since") or 0))
+    except (TypeError, ValueError):
+        since = 0
+    return _code_response(code_jobs.read_events(job_id, since))
+
+
+@app.route("/api/code/jobs/<job_id>/events")
+@app.route("/api/phone/code/jobs/<job_id>/events")
+def api_code_events(job_id):
+    import code_jobs
+
+    events_file = code_jobs.events_file_for(job_id)
+    if events_file is None:
+        return jsonify({"ok": False, "error": "unknown CODE job"}), 404
+    try:
+        last_pos = max(0, int(request.args.get("since") or 0))
+    except (TypeError, ValueError):
+        last_pos = 0
+
+    def stream():
+        nonlocal last_pos
+        yield "retry: 1500\n\n"
+        idle_ticks = 0
+        while True:
+            try:
+                size = events_file.stat().st_size if events_file.exists() else 0
+                if size < last_pos:
+                    last_pos = 0
+                    yield "event: reset\ndata: {}\n\n"
+                if size > last_pos:
+                    with events_file.open("rb") as handle:
+                        handle.seek(last_pos)
+                        chunk = handle.read(size - last_pos)
+                    last_pos = size
+                    pending_events = []
+                    for raw_line in chunk.splitlines():
+                        try:
+                            event = json.loads(raw_line.decode("utf-8", "replace"))
+                        except json.JSONDecodeError:
+                            continue
+                        pending_events.append(event)
+                    for event in code_jobs.coalesce_events(pending_events):
+                        event["size"] = size
+                        yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                    idle_ticks = 0
+                else:
+                    idle_ticks += 1
+                if idle_ticks and idle_ticks % 20 == 0:
+                    yield ": ping\n\n"
+                time.sleep(0.2)
+            except GeneratorExit:
+                return
+            except Exception:
+                time.sleep(0.5)
+
+    return Response(
+        stream(),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
+    )
+
+
+@app.route("/api/code/uploads", methods=["POST", "OPTIONS"])
+@app.route("/api/phone/code/uploads", methods=["POST", "OPTIONS"])
+def api_code_uploads():
+    if request.method == "OPTIONS":
+        return "", 204
+    uploads = request.files.getlist("files") or request.files.getlist("file")
+    if not uploads:
+        return jsonify({"ok": False, "error": "No files were received."}), 400
+    batch = CODE_UPLOAD_ROOT / uuid.uuid4().hex[:12]
+    batch.mkdir(parents=True, exist_ok=False)
+    attachments = []
+    for index, upload in enumerate(uploads[:20], start=1):
+        original = Path(upload.filename or f"attachment-{index}").name
+        safe = re.sub(r"[^A-Za-z0-9._ -]+", "_", original).strip(" .") or f"attachment-{index}"
+        target = batch / safe
+        if target.exists():
+            target = batch / f"{target.stem}-{index}{target.suffix}"
+        upload.save(target)
+        attachments.append({"kind": "file", "path": str(target.resolve()), "label": original})
+    return jsonify({"ok": True, "attachments": attachments})
 
 
 @app.route("/api/phone/coding/sessions", methods=["GET", "POST", "OPTIONS"])
@@ -1327,6 +1549,67 @@ def api_phone_transcribe():
         forward_helper("phone_start", "AIOS" if target == "chat" else "OPERATOR")
     result = forward_helper(target, text) if text else {"ok": True, "sent": False}
     return jsonify({"ok": result.get("ok", False), "text": text, "sent": result.get("sent", False), "error": result.get("error", "")})
+
+
+@app.route("/api/phone/realtime/token", methods=["POST"])
+def api_phone_realtime_token():
+    """Create one short-lived browser credential for aiOS Voice Mode."""
+    cfg = _load_helper_config()
+    api_key = str(cfg.get("openai_api_key") or os.environ.get("OPENAI_API_KEY") or "").strip()
+    if not api_key:
+        return jsonify({"ok": False, "error": "Add an OpenAI API key in aiOS Settings before using Voice Mode."}), 409
+
+    session = {
+        "session": {
+            "type": "realtime",
+            "model": "gpt-realtime-2.1",
+            "instructions": (
+                "You are the live voice for the user's resident aiOS agent on their PC. "
+                "For every user request, call ask_aios_agent with the user's exact request. "
+                "Never answer from your own knowledge before calling the tool. After the tool "
+                "returns, speak its answer naturally and concisely without changing its facts."
+            ),
+            "audio": {"output": {"voice": "marin"}},
+            "tools": [{
+                "type": "function",
+                "name": "ask_aios_agent",
+                "description": "Send the user's request to the real resident aiOS agent running on this PC.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"message": {"type": "string", "description": "The user's complete request."}},
+                    "required": ["message"],
+                    "additionalProperties": False,
+                },
+            }],
+            "tool_choice": "auto",
+        }
+    }
+    try:
+        response = httpx.post(
+            "https://api.openai.com/v1/realtime/client_secrets",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "OpenAI-Safety-Identifier": "aios-phone-owner",
+            },
+            json=session,
+            timeout=20.0,
+        )
+        data = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        return jsonify({"ok": False, "error": f"OpenAI Voice Mode could not start: {exc}"}), 502
+    if response.status_code >= 400:
+        detail = data.get("error", {}).get("message") if isinstance(data.get("error"), dict) else data.get("error")
+        return jsonify({"ok": False, "error": str(detail or "OpenAI rejected the Voice Mode request.")}), response.status_code
+    value = str(data.get("value") or "").strip()
+    if not value:
+        return jsonify({"ok": False, "error": "OpenAI returned an empty Voice Mode credential."}), 502
+    return jsonify({
+        "ok": True,
+        "value": value,
+        "expires_at": data.get("expires_at"),
+        "model": "gpt-realtime-2.1",
+    })
 
 
 @app.route("/api/run", methods=["POST"])

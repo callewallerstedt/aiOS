@@ -85,8 +85,8 @@ const state = {
   plannerModel: prefs.get("aios_planner_model", "sol"),
   lastPlannerModel: prefs.get("aios_planner_last_model", "sol"),
   effort: prefs.get("aios_effort", "low"),
-  remoteMode: prefs.get("aios_remote_mode", "fast"),
-  voiceReplies: prefs.bool("aios_voice_replies", true),
+  remoteMode: "agent",
+  voiceReplies: false,
   steps: Number(prefs.get("aios_steps", 30)),
   shell: prefs.bool("aios_shell", true),
   detailed: prefs.bool("aios_detailed", true),
@@ -142,41 +142,31 @@ const state = {
   relayLatest: 0,
   resyncing: false,
   transcriptionRequestId: "",
-  transcriptionAutoSend: false
+  transcriptionAutoSend: false,
+  voicePeer: null,
+  voiceChannel: null,
+  voiceStream: null,
+  voicePendingCall: null,
+  voiceHandledCalls: new Set(),
+  voiceConnecting: false
 };
 
-if (!["fast", "think", "operator"].includes(state.remoteMode)) state.remoteMode = "fast";
-
 function agentMode() {
-  return state.remoteMode === "fast" || state.remoteMode === "think";
+  return true;
 }
 
 function agentReasoning() {
-  return state.remoteMode === "think" ? "high" : "low";
+  return "low";
 }
 
 function renderRemoteMode() {
-  $$(".remote-mode").forEach((button) => {
-    const active = button.dataset.remoteMode === state.remoteMode;
-    button.classList.toggle("on", active);
-    button.setAttribute("aria-pressed", active ? "true" : "false");
-  });
-  const conversational = agentMode();
-  $("#runSettingsBtn")?.classList.toggle("hidden", conversational);
-  $("#attachBtn")?.classList.toggle("hidden", conversational);
-  $("#voiceReplyBtn")?.classList.toggle("hidden", !conversational);
-  $("#voiceReplyBtn")?.classList.toggle("on", state.voiceReplies);
-  $("#voiceReplyBtn")?.setAttribute("aria-pressed", state.voiceReplies ? "true" : "false");
+  $("#runSettingsBtn")?.classList.add("hidden");
+  $("#attachBtn")?.classList.add("hidden");
+  $("#voiceReplyBtn")?.classList.add("hidden");
   const input = $("#promptInput");
-  if (input) {
-    input.placeholder = conversational
-      ? (state.remoteMode === "think" ? "Ask the agent to think it throughâ€¦" : "Message your agentâ€¦")
-      : (treatAsFollowUp() ? "Add a follow-upâ€¦" : "Tell OPERATOR what to doâ€¦");
-  }
+  if (input) input.placeholder = "Message your aiOS agent…";
   const mic = $("#micBtn");
-  if (mic) mic.setAttribute("aria-label", conversational && state.voiceReplies
-    ? "Talk to the agent"
-    : "Transcribe on this PC");
+  if (mic) mic.setAttribute("aria-label", "Transcribe a voice note");
 }
 
 function applyAppearance(background = state.background) {
@@ -836,8 +826,8 @@ function renderMachine() {
 
   $("#runTitle").textContent = asking
     ? "Waiting for your answer"
-    : running ? (operator.task || "Working on your task") : "Ready for a task";
-  $("#runMeta").textContent = `${labelOf(MODELS, state.model)} · ${running ? "working" : "idle"}`;
+    : running ? (operator.task || "aiOS Agent is working") : "aiOS Agent";
+  $("#runMeta").textContent = running ? "Working" : "Ready";
   $("#runDot").classList.toggle("on", state.running);
   $("#stopBtn").classList.toggle("hidden", !state.running);
   renderRemoteMode();
@@ -845,8 +835,8 @@ function renderMachine() {
     $("#machineMeta").textContent = machine.online
       ? (state.agentRunning ? "Agent is answering" : `${machine.platform || "Windows"} - agent ready`)
       : $("#machineMeta").textContent;
-    $("#runTitle").textContent = state.agentRunning ? "Your agent is answering" : "Agent ready";
-    $("#runMeta").textContent = `${state.remoteMode === "think" ? "Think" : "Fast"} - ${state.agentRunning ? "working" : "ready"}`;
+    $("#runTitle").textContent = state.agentRunning ? "aiOS Agent is answering" : "aiOS Agent";
+    $("#runMeta").textContent = state.agentRunning ? "Working" : "Ready";
   }
   $("#promptInput").placeholder = treatAsFollowUp() ? "Add a follow-up…" : "Ask your computer…";
 
@@ -1908,10 +1898,8 @@ function showThinkingSoon() {
   feed.appendChild(entry);
   state.stickBottom = true;
   scrollFeed();
-  $("#runTitle").textContent = agentMode() ? "Your agent is answering" : "OPERATOR is thinking";
-  $("#runMeta").textContent = agentMode()
-    ? `${state.remoteMode === "think" ? "Think" : "Fast"} - thinking`
-    : `${labelOf(MODELS, state.model)} · thinking`;
+  $("#runTitle").textContent = "aiOS Agent is answering";
+  $("#runMeta").textContent = "Thinking";
   $("#runDot").classList.add("on");
   if (cinema.on) cinemaStatus("thinking");
 }
@@ -2006,6 +1994,7 @@ function addEvent(event) {
   if (info.kind === "agent-done") {
     state.agentRunning = false;
     state.running = agentMode() ? false : state.operatorRunning;
+    if (!state.replaying) finishVoiceAgentReply(info.body, (event.payload || {}).error || "");
     const streamed = [...feed.querySelectorAll(".entry.agent-reply.streaming")].at(-1);
     if (streamed) {
       streamed.classList.remove("streaming");
@@ -2013,7 +2002,7 @@ function addEvent(event) {
       const paragraph = streamed.querySelector(".agent-reply-text");
       if (paragraph && info.body) paragraph.textContent = info.body;
       const time = streamed.querySelector("time");
-      if (time) time.textContent = info.hint ? `${clockTime(stamp)} Â· ${info.hint}` : clockTime(stamp);
+      if (time) time.textContent = info.hint ? `${clockTime(stamp)} · ${info.hint}` : clockTime(stamp);
       if (!state.replaying && !(event.payload || {}).error) speakAgentReply(info.body);
       renderMachine();
       trimFeed();
@@ -2803,10 +2792,11 @@ async function sendCommand(type, payload = {}) {
   // The production relay can lag behind the PWA. Tunnel newer command types
   // through its long-supported config envelope so intent questions keep
   // working while the PC and static client update independently.
+  const feature = type === "realtime_token" ? "realtime-voice" : "agent-voice";
   const tunneled = [
     "clarify", "stream", "update", "codex_switch", "ai_settings",
-    "agent", "agent_stop", "transcribe"
-  ].includes(type) && !state.relayFeatures.includes("agent-voice");
+    "agent", "agent_stop", "transcribe", "realtime_token"
+  ].includes(type) && !state.relayFeatures.includes(feature);
   return api(`/api/machines/${encodeURIComponent(machine.id)}/commands`, {
     method: "POST",
     body: JSON.stringify({
@@ -3255,6 +3245,161 @@ let remoteRecorder = null;
 let remoteStream = null;
 let remoteChunks = [];
 
+function setVoiceModeState(kind, status, caption) {
+  const orb = $("#voiceOrb");
+  if (orb) orb.className = `voice-orb ${kind}`;
+  if (status) $("#voiceModeStatus").textContent = status;
+  if (caption) $("#voiceModeCaption").textContent = caption;
+}
+
+async function waitForCommand(commandId, timeoutMs = 30_000) {
+  const machine = currentMachine();
+  if (!machine || !commandId) throw new Error("The PC did not accept the Voice Mode request.");
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const status = await api(`/api/machines/${encodeURIComponent(machine.id)}/commands/${encodeURIComponent(commandId)}`);
+    if (status.completed) {
+      if (!status.result?.ok) throw new Error(status.result?.error || "The PC could not start Voice Mode.");
+      return status.result;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 450));
+  }
+  throw new Error("The PC took too long to start Voice Mode.");
+}
+
+function sendVoiceEvent(event) {
+  if (state.voiceChannel?.readyState !== "open") return false;
+  state.voiceChannel.send(JSON.stringify(event));
+  return true;
+}
+
+async function runVoiceAgent(callId, message) {
+  const clean = String(message || "").trim();
+  if (!callId || !clean || state.voiceHandledCalls.has(callId)) return;
+  state.voiceHandledCalls.add(callId);
+  state.voicePendingCall = { callId };
+  setVoiceModeState("working", "aiOS Agent is working", clean.length > 110 ? `${clean.slice(0, 107)}…` : clean);
+  try {
+    await sendCommand("agent", { prompt: clean, reasoning: "low", speak_reply: false });
+    pollEvents().catch(() => {});
+  } catch (error) {
+    state.voicePendingCall = null;
+    sendVoiceEvent({
+      type: "conversation.item.create",
+      item: { type: "function_call_output", call_id: callId, output: JSON.stringify({ error: error.message || "The aiOS agent could not start." }) }
+    });
+    sendVoiceEvent({ type: "response.create" });
+    setVoiceModeState("error", "Agent unavailable", error.message || "Try again in a moment.");
+  }
+}
+
+function handleVoiceEvent(raw) {
+  let event;
+  try { event = JSON.parse(raw); } catch { return; }
+  if (event.type === "input_audio_buffer.speech_started") {
+    setVoiceModeState("listening", "Listening", "I’ll pass your words to the aiOS agent.");
+  } else if (event.type === "input_audio_buffer.speech_stopped") {
+    setVoiceModeState("working", "Understanding", "One moment…");
+  } else if (event.type === "response.audio.delta" || event.type === "response.output_audio.delta") {
+    setVoiceModeState("speaking", "aiOS Agent", "Speaking…");
+  } else if (event.type === "response.audio.done" || event.type === "response.output_audio.done" || event.type === "response.done") {
+    if (!state.voicePendingCall) setVoiceModeState("listening", "Listening", "Ask your aiOS agent anything.");
+  } else if (event.type === "response.function_call_arguments.done") {
+    let args = {};
+    try { args = JSON.parse(event.arguments || "{}"); } catch { /* handled below */ }
+    runVoiceAgent(event.call_id, args.message);
+  } else if (event.type === "response.output_item.done" && event.item?.type === "function_call") {
+    let args = {};
+    try { args = JSON.parse(event.item.arguments || "{}"); } catch { /* handled below */ }
+    runVoiceAgent(event.item.call_id, args.message);
+  } else if (event.type === "error") {
+    setVoiceModeState("error", "Voice Mode error", event.error?.message || "Please end Voice Mode and try again.");
+  }
+}
+
+function finishVoiceAgentReply(message, error = "") {
+  const pending = state.voicePendingCall;
+  if (!pending || state.voiceChannel?.readyState !== "open") return;
+  state.voicePendingCall = null;
+  sendVoiceEvent({
+    type: "conversation.item.create",
+    item: {
+      type: "function_call_output",
+      call_id: pending.callId,
+      output: JSON.stringify(error ? { error } : { reply: String(message || "The agent finished without a text reply.") })
+    }
+  });
+  sendVoiceEvent({ type: "response.create" });
+  setVoiceModeState(error ? "error" : "speaking", error ? "Agent error" : "aiOS Agent", error || "Answering you now…");
+}
+
+function endVoiceMode() {
+  state.voiceConnecting = false;
+  state.voicePendingCall = null;
+  state.voiceHandledCalls.clear();
+  try { state.voiceChannel?.close(); } catch { /* already closed */ }
+  try { state.voicePeer?.close(); } catch { /* already closed */ }
+  state.voiceStream?.getTracks().forEach((track) => track.stop());
+  state.voiceChannel = null;
+  state.voicePeer = null;
+  state.voiceStream = null;
+  const audio = $("#voiceAudio");
+  if (audio) audio.srcObject = null;
+  $("#voiceMode").classList.add("hidden");
+}
+
+async function startVoiceMode() {
+  if (state.voiceConnecting || state.voicePeer) return;
+  const machine = currentMachine();
+  if (!machine) return toast("Choose a computer first.");
+  if (!machine.online) return toast("That computer is offline.");
+  if (!navigator.mediaDevices?.getUserMedia || !window.RTCPeerConnection) return toast("Voice Mode is not supported by this browser.");
+  state.voiceConnecting = true;
+  $("#voiceMode").classList.remove("hidden");
+  setVoiceModeState("connecting", "Connecting…", "Starting a live conversation with your aiOS agent.");
+  buzz(12);
+  try {
+    state.voiceStream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+    });
+    const queued = await sendCommand("realtime_token", {});
+    const secret = await waitForCommand(queued.command_id);
+    if (!secret.value) throw new Error("The PC returned an empty voice session.");
+
+    const peer = new RTCPeerConnection();
+    state.voicePeer = peer;
+    state.voiceStream.getTracks().forEach((track) => peer.addTrack(track, state.voiceStream));
+    peer.ontrack = (event) => {
+      const audio = $("#voiceAudio");
+      audio.srcObject = event.streams[0];
+      audio.play().catch(() => {});
+    };
+    peer.onconnectionstatechange = () => {
+      if (peer.connectionState === "connected") setVoiceModeState("listening", "Listening", "Ask your aiOS agent anything.");
+      if (["failed", "disconnected"].includes(peer.connectionState)) setVoiceModeState("error", "Connection lost", "End Voice Mode and try again.");
+    };
+    const channel = peer.createDataChannel("oai-events");
+    state.voiceChannel = channel;
+    channel.onmessage = (event) => handleVoiceEvent(event.data);
+    channel.onopen = () => setVoiceModeState("listening", "Listening", "Ask your aiOS agent anything.");
+
+    const offer = await peer.createOffer();
+    await peer.setLocalDescription(offer);
+    const response = await fetch("https://api.openai.com/v1/realtime/calls", {
+      method: "POST",
+      body: offer.sdp,
+      headers: { Authorization: `Bearer ${secret.value}`, "Content-Type": "application/sdp" }
+    });
+    if (!response.ok) throw new Error(`Voice connection failed (${response.status}).`);
+    await peer.setRemoteDescription({ type: "answer", sdp: await response.text() });
+  } catch (error) {
+    endVoiceMode();
+    toast(error.message || "Voice Mode could not start.");
+  } finally {
+    state.voiceConnecting = false;
+  }
+}
+
 function recordingMimeType() {
   const choices = ["audio/webm;codecs=opus", "audio/mp4", "audio/webm", "audio/ogg;codecs=opus"];
   return choices.find((type) => window.MediaRecorder?.isTypeSupported?.(type)) || "";
@@ -3275,7 +3420,7 @@ async function finishRemoteRecording(blob, autoSend) {
   const requestId = `${state.machineId}:${Date.now()}:${++state.clarifierSequence}`;
   state.transcriptionRequestId = requestId;
   state.transcriptionAutoSend = Boolean(autoSend);
-  $("#listeningText").textContent = "Transcribing on this PCâ€¦";
+  $("#listeningText").textContent = "Transcribing on this PC…";
   $("#listening").classList.remove("hidden");
   try {
     const audio = await uploadAttachment({
@@ -3302,7 +3447,7 @@ async function startRemoteRecording() {
     const mimeType = recordingMimeType();
     remoteRecorder = new MediaRecorder(remoteStream, mimeType ? { mimeType, audioBitsPerSecond: 32000 } : undefined);
     remoteChunks = [];
-    const autoSend = agentMode() && state.voiceReplies;
+    const autoSend = false;
     remoteRecorder.ondataavailable = (event) => { if (event.data?.size) remoteChunks.push(event.data); };
     remoteRecorder.onstop = () => {
       const type = remoteRecorder?.mimeType || mimeType || "audio/webm";
@@ -3319,7 +3464,7 @@ async function startRemoteRecording() {
     buzz(12);
     $("#micBtn").classList.add("rec");
     $(".composer").classList.add("rec");
-    $("#listeningText").textContent = autoSend ? "Talk now â€” tap the mic to send" : "Talk now â€” tap the mic to transcribe";
+    $("#listeningText").textContent = "Talk now — tap the mic to transcribe";
     $("#listening").classList.remove("hidden");
   } catch (error) {
     remoteStream?.getTracks().forEach((track) => track.stop());
@@ -3348,7 +3493,7 @@ function applyRemoteTranscription(payload) {
   if (autoSend) $("#promptForm").requestSubmit();
   else {
     input.focus();
-    toast("Transcribed â€” edit it or tap send.");
+    toast("Transcribed — edit it or tap send.");
   }
 }
 
@@ -3908,24 +4053,19 @@ $("#lightbox").addEventListener("click", (event) => {
 $("#lightboxClose").addEventListener("click", closeLightbox);
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && !$("#lightbox").classList.contains("hidden")) closeLightbox();
+  if (event.key === "Escape" && !$("#voiceMode").classList.contains("hidden")) endVoiceMode();
 });
 
 $$(".remote-mode").forEach((button) => button.addEventListener("click", () => {
-  state.remoteMode = button.dataset.remoteMode || "fast";
-  prefs.set("aios_remote_mode", state.remoteMode);
-  state.running = agentMode() ? state.agentRunning : state.operatorRunning;
+  state.remoteMode = "agent";
+  state.running = state.agentRunning;
   renderRemoteMode();
   renderMachine();
   buzz();
 }));
 
 $("#voiceReplyBtn").addEventListener("click", () => {
-  state.voiceReplies = !state.voiceReplies;
-  prefs.set("aios_voice_replies", state.voiceReplies ? 1 : 0);
-  if (!state.voiceReplies) window.speechSynthesis?.cancel?.();
-  renderRemoteMode();
-  toast(state.voiceReplies ? "Talk mode on â€” voice sends and replies aloud." : "Transcription mode â€” review before sending.");
-  buzz();
+  startVoiceMode();
 });
 
 $("#micBtn").addEventListener("click", () => (
@@ -3934,6 +4074,9 @@ $("#micBtn").addEventListener("click", () => (
     : startDictation()
 ));
 $("#micStopBtn").addEventListener("click", stopDictation);
+$("#voiceModeBtn").addEventListener("click", startVoiceMode);
+$("#voiceModeClose").addEventListener("click", endVoiceMode);
+$("#voiceModeEnd").addEventListener("click", endVoiceMode);
 
 /* ── wiring: attachments ──────────────────────────────── */
 
@@ -3995,18 +4138,14 @@ $("#promptForm").addEventListener("submit", async (event) => {
   event.preventDefault();
   stopDictation();
   const typed = $("#promptInput").value.trim();
-  const files = state.attachments.slice();
-  const prompt = typed || (files.length ? ATTACHMENT_ONLY_PROMPT : "");
+  const files = [];
+  const prompt = typed;
   if (!prompt || state.busy) return;
-  if (agentMode() && files.length) {
-    toast("Choose Control to send photos or files to OPERATOR.");
-    return;
-  }
   const machine = currentMachine();
   // Decide follow-up BEFORE clearing History view — viewing an old thread
   // must never be treated as a follow-up to a live run.
-  const asFollowUp = !agentMode() && treatAsFollowUp();
-  const type = agentMode() ? "agent" : (asFollowUp ? "followup" : "prompt");
+  const asFollowUp = false;
+  const type = "agent";
   state.forceNewPrompt = false;
   // Keep the thread the user is reading; just unlock the live event gate.
   resumeLiveFeed({ keepTranscript: true });
@@ -4030,18 +4169,7 @@ $("#promptForm").addEventListener("submit", async (event) => {
   showThinkingSoon();
   try {
     if (files.length) markAttachmentsBusy(true);
-    const attachments = agentMode() ? [] : await packAttachments(files);
-    const payload = agentMode()
-      ? { prompt, reasoning: agentReasoning(), speak_reply: false }
-      : {
-          prompt,
-          model: state.model,
-          planner_model: state.plannerModel,
-          max_steps: state.steps,
-          reasoning_effort: state.effort,
-          shell: state.shell,
-          ...(attachments.length ? { attachments } : {})
-        };
+    const payload = { prompt, reasoning: agentReasoning(), speak_reply: false };
     await sendCommand(type, payload);
     $("#promptInput").value = "";
     clearAttachments();
@@ -4083,7 +4211,10 @@ $("#installBtn").addEventListener("click", async () => {
 window.addEventListener("appinstalled", () => toast("aiOS Remote installed"));
 window.addEventListener("online", () => { toast("Back online"); loadMachines(); });
 window.addEventListener("resize", () => fitViewer());
-window.addEventListener("pagehide", () => saveHistory({ immediate: true }));
+window.addEventListener("pagehide", () => {
+  endVoiceMode();
+  saveHistory({ immediate: true });
+});
 document.addEventListener("visibilitychange", () => {
   if (!state.token) return;
   if (document.hidden) {

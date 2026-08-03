@@ -89,13 +89,31 @@ def _usage_dict(usage, *, backend: str, model: str) -> dict:
     details = getattr(usage, "prompt_tokens_details", None) or getattr(usage, "input_tokens_details", None)
     input_tokens = int(getattr(usage, "prompt_tokens", None) or getattr(usage, "input_tokens", 0) or 0)
     output_tokens = int(getattr(usage, "completion_tokens", None) or getattr(usage, "output_tokens", 0) or 0)
-    cached_tokens = int(getattr(details, "cached_tokens", 0) or 0)
+    def detail_int(*names):
+        for name in names:
+            value = details.get(name) if isinstance(details, dict) else getattr(details, name, None)
+            if value is not None:
+                return int(value or 0)
+        return 0
+
+    cached_tokens = detail_int("cached_tokens")
+    cache_write_tokens = detail_int("cache_write_tokens", "cache_creation_tokens")
     total_tokens = int(getattr(usage, "total_tokens", 0) or input_tokens + output_tokens)
-    return {
+    result = {
         "requests": 1, "input_tokens": input_tokens, "output_tokens": output_tokens,
-        "cached_input_tokens": cached_tokens, "total_tokens": total_tokens,
+        "cached_input_tokens": cached_tokens, "cache_write_input_tokens": cache_write_tokens,
+        "total_tokens": total_tokens,
         "backend": backend, "model": model,
     }
+    if input_tokens > 272_000:
+        result.update({
+            "long_context_requests": 1,
+            "long_context_input_tokens": input_tokens,
+            "long_context_output_tokens": output_tokens,
+            "long_context_cached_input_tokens": cached_tokens,
+            "long_context_cache_write_input_tokens": cache_write_tokens,
+        })
+    return result
 
 
 def chat_with_usage(system: str, messages: list[dict], model: str | None = None,

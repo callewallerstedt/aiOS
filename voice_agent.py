@@ -23,6 +23,8 @@ import subprocess
 import threading
 import time
 import urllib.parse
+import urllib.error
+import urllib.request
 import webbrowser
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -41,6 +43,7 @@ SELF_MEMORY_PATH = SELF_DIR / "MEMORY.md"
 SELF_FILE_LIMIT = 24000
 HELPER_HOST = "127.0.0.1"
 HELPER_PORT = 48736  # aiOS helper_overlay command server
+CODE_PORT = int(os.environ.get("AIOS_PHONE_BRIDGE_PORT", "5000"))
 SHELL_TIMEOUT_SECONDS = 45
 TOOL_OUTPUT_LIMIT = 4000
 FILE_READ_LIMIT = 20000
@@ -268,17 +271,61 @@ def resolve_inside_roots(candidate, roots):
     return None, f"path is outside the allowed folders ({allowed})"
 
 
-def capture_screen_jpeg(max_width=1536, quality=70):
-    """Grab the primary monitor as a downscaled JPEG. Returns (bytes, size)."""
-    import mss
-    from PIL import Image
+def desktop_monitors():
+    """Physical monitors in the same stable 1-based order OPERATOR uses."""
+    from agent_clicker.desktop_agent.screen import list_monitors
 
-    # mss.mss is the deprecated alias for MSS on newer releases.
-    grabber = getattr(mss, "MSS", None) or mss.mss
-    with grabber() as sct:
-        monitor = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
-        shot = sct.grab(monitor)
-    image = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
+    return [monitor for monitor in list_monitors() if int(monitor.index) > 0]
+
+
+def resolve_desktop_monitor(selector):
+    monitors = desktop_monitors()
+    raw = str(selector if selector not in (None, "") else "1").strip().casefold()
+    match = re.search(r"\d+", raw)
+    if not match:
+        available = ", ".join(str(mon.index) for mon in monitors)
+        return None, f"screen must be one of {available}"
+    wanted = int(match.group(0))
+    monitor = next((item for item in monitors if int(item.index) == wanted), None)
+    if monitor is None:
+        available = ", ".join(str(mon.index) for mon in monitors)
+        return None, f"no screen {wanted}; connected screens are {available}"
+    return monitor, ""
+
+
+def monitor_context_line():
+    try:
+        monitors = desktop_monitors()
+    except Exception as exc:
+        return f"- Connected screens: unavailable ({exc})"
+    labels = "; ".join(
+        f"screen {mon.index}: {mon.width}x{mon.height} at virtual ({mon.left},{mon.top})"
+        for mon in monitors
+    )
+    return f"- Connected screens: {len(monitors)}. {labels}"
+
+
+def capture_screen_jpeg(screen="1", max_width=1536, quality=70):
+    """Capture one monitor for the agent without hiding aiOS globally."""
+    from PIL import Image
+    from agent_clicker.desktop_agent.screen import (
+        capture,
+        current_process_windows_hidden_from_agent_capture,
+    )
+
+    monitor, error = resolve_desktop_monitor(screen)
+    if error:
+        raise ValueError(error)
+    capture_token = f"voice:{threading.get_ident()}:{time.time_ns()}"
+    helper_notified = send_to_helper("agent_capture_begin", capture_token)
+    try:
+        # This hides the dictation/voice HUD in this process. The helper command
+        # does the same for the main aiOS window during this exact frame only.
+        with current_process_windows_hidden_from_agent_capture(settle_seconds=0.05):
+            image = capture(monitor)
+    finally:
+        if helper_notified:
+            send_to_helper("agent_capture_end", capture_token)
     if image.width > max_width:
         height = max(1, round(image.height * max_width / image.width))
         image = image.resize((max_width, height), Image.LANCZOS)
@@ -373,6 +420,10 @@ class VoiceAgent:
         self._timer_seq = 0
         # Screenshots captured this turn, attached to the next model request.
         self._pending_images = []
+        self._last_code_job_id = ""
+        # Last visible image geometry per monitor. Click coordinates refer to
+        # these pixels and are scaled back to the monitor's physical pixels.
+        self._screen_views = {}
         self._facts = self._load_facts()
         self._load_memory()
         self._restore_timers()
@@ -575,6 +626,15 @@ class VoiceAgent:
             "- Never ask a follow-up question when you can reasonably act. Act, then report.",
             "- If a tool fails, say plainly what failed. Do not invent success.",
             "- Answer in the language you were spoken to.",
+            "- Do quick, bounded desktop actions yourself. Opening an app or URL, reading a screen,",
+            "  making one or two obvious clicks, starting a video, scrolling once, or using media",
+            "  controls are YOUR job and do not need OPERATOR.",
+            "- Hand work to OPERATOR when it needs repeated visual reasoning, more than about three",
+            "  clicks, filling forms, editing substantial content, recovery from uncertainty, or",
+            "  verification across a longer workflow. Do not use OPERATOR as a reflex.",
+            "- For software projects, code changes, repo work, tests, commits, pushes, or deployments,",
+            "  dispatch the work through the CODE tools to Codex, Claude Code, or Cursor Agent. Do not",
+            "  use OPERATOR or raw PowerShell for work that belongs to a coding agent.",
         ]
         if soul:
             lines += [
@@ -590,6 +650,7 @@ class VoiceAgent:
             f"- User: {os.environ.get('USERNAME') or 'Calle'} on {platform.node()} ({platform.system()} {platform.release()})",
             f"- Local time: {time.strftime('%A %d %B %Y, %H:%M', now)}",
             f"- Project root: {config.get('project_root', '')}",
+            monitor_context_line(),
         ]
         if window:
             lines.append(f"- Focused window right now: {window}")
@@ -608,9 +669,12 @@ class VoiceAgent:
             "  Destructive commands are blocked outright, and state-changing ones come back as",
             "  needs_confirmation — when that happens, tell the user exactly what you want to run",
             "  and call the tool again with confirm set to true only after they agree.",
-            "- read_screen captures the monitor and attaches the picture to your next turn.",
-            "  YOU look at it — nothing describes it for you. Use it for 'what does this say',",
-            "  'what is this error', 'read that to me'. Far cheaper and faster than OPERATOR.",
+            "- This PC has multiple screens and an app may be on any of them. read_screen accepts",
+            "  screen 1, 2, 3, or all. If you do not know where something opened, read all screens.",
+            "  YOU look at the attached pixels; nothing describes them for you.",
+            "- click_screen uses coordinates from the most recent read_screen image for that screen.",
+            "  It can left-click, right-click, or double-click. scroll_screen scrolls at a visible",
+            "  point. Use these directly for short obvious actions, then re-read to verify if needed.",
             "- read_self_file / write_self_file / append_self_file / list_self_files are your own",
             "  files. Edit SOUL.md when told how to behave; edit MEMORY.md for what to remember.",
             "  Read a file before you overwrite it, and keep SOUL.md written in your own voice.",
@@ -633,8 +697,9 @@ class VoiceAgent:
             "- remember stores a durable fact about the user across restarts. Use it when they say",
             "  'remember that…'. Do not store secrets or passwords.",
             "- operator_task hands a job to the aiOS OPERATOR agent, which takes the mouse and",
-            "  keyboard and works visibly. Use it for multi-step GUI work, not for things a",
-            "  shell command or open_app can do instantly. The tool waits and returns OPERATOR's",
+            "  keyboard and works visibly. Use it for longer multi-step GUI work, not quick",
+            "  actions you can finish with open_app, read_screen, click_screen, or media_control.",
+            "  The tool waits and returns OPERATOR's",
             "  verified completion, failure, or question. Summarize that result for the user.",
             "- If OPERATOR returns needs_input, relay its exact question plainly and wait for the",
             "  user's answer. Never claim OPERATOR finished when its result says otherwise.",
@@ -643,6 +708,25 @@ class VoiceAgent:
             "  next / tell the operator …",
             "- operator_stop cancels the running OPERATOR job. Use when the user says stop,",
             "  cancel, abort, or kill the operator.",
+            "- CODE jobs are persistent native coding-agent sessions. The provider must always be",
+            "  explicit: codex, claude, or cursor. The exact model, intelligence/reasoning level,",
+            "  and fast-mode choice must also be explicit. Never silently choose or substitute them.",
+            "- If the user omitted any CODE choice, call code_capabilities, propose the most sensible",
+            "  available values in one short spoken sentence, and ask before launching. If everything",
+            "  is clear, call code_start immediately. Rewrite their request into a self-contained brief",
+            "  with outcome, context, constraints, acceptance checks, and finish expectations.",
+            "- CODE providers have full autonomy and approve their own permission prompts. Their native",
+            "  terminal result is the completion report; relay it without independently re-verifying.",
+            "  If a job asks a question, repeat the exact question and use code_continue for the answer.",
+            "- Normal code_continue messages queue behind the active turn. Set urgent=true only when the",
+            "  user says urgent, interrupt, immediately, or stop what it is doing and change direction.",
+            "- If the user asks to switch an existing CODE session to another provider, call",
+            "  code_handoff. This preserves the aiOS job and working tree, creates a provider-neutral",
+            "  context manifest, and starts a fresh native target session. Never describe it as the",
+            "  same native provider transcript. Exact target model/reasoning/fast choices are required.",
+            "- Use code_list/code_status to find current jobs. Follow-ups continue the same native session.",
+            "- If a chosen provider is installed but not signed in, offer to open its official local sign-in",
+            "  terminal. Call code_setup only after the user agrees; aiOS never handles the credentials.",
             "- type_text types into whatever window the user had focused when they spoke.",
             "  Use it when they dictate content meant for that window.",
             "- hide_overlay dismisses the visible dictation/chat overlay without deleting the",
@@ -652,6 +736,138 @@ class VoiceAgent:
             "  'Alright, thank you. Goodbye.' Never end this tool turn with an empty response.",
         ]
         return "\n".join(lines)
+
+    @staticmethod
+    def _code_tools():
+        attachment_schema = {
+            "type": "array",
+            "description": "Optional absolute local file paths or http/https links explicitly supplied by the user.",
+            "items": {"type": "string"},
+        }
+        return [
+            {
+                "type": "function",
+                "name": "code_capabilities",
+                "description": "List current local Codex, Claude Code, and Cursor readiness plus exact model and intelligence choices. Call before proposing missing CODE settings.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"refresh": {"type": "boolean", "description": "Force a live capability refresh."}},
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "type": "function",
+                "name": "code_setup",
+                "description": "Open the official local CLI sign-in terminal for Codex, Claude Code, or Cursor. Only call after the user asks or agrees to sign in.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"provider": {"type": "string", "enum": ["codex", "claude", "cursor"]}},
+                    "required": ["provider"],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "type": "function",
+                "name": "code_start",
+                "description": "Start a persistent autonomous coding job. Only call when provider, exact model, reasoning/intelligence, fast choice, folder, and brief are all explicit.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "provider": {"type": "string", "enum": ["codex", "claude", "cursor"]},
+                        "cwd": {"type": "string", "description": "Absolute project folder on this PC."},
+                        "brief": {"type": "string", "description": "Self-contained outcome, context, constraints, acceptance checks, and finish expectations."},
+                        "model": {"type": "string", "description": "Exact model id returned by code_capabilities."},
+                        "reasoning": {"type": "string", "description": "Exact intelligence/reasoning value returned for that model."},
+                        "fast": {"type": "boolean", "description": "Explicit fast-mode choice."},
+                        "attachments": attachment_schema,
+                    },
+                    "required": ["provider", "cwd", "brief", "model", "reasoning", "fast"],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "type": "function",
+                "name": "code_list",
+                "description": "List persistent CODE jobs with ids, providers, projects, settings, and current state.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "provider": {"type": "string", "enum": ["codex", "claude", "cursor"]},
+                        "status": {"type": "string"},
+                        "limit": {"type": "integer"},
+                    },
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "type": "function",
+                "name": "code_status",
+                "description": "Read one CODE job's current state and recent output, including its exact question or final report.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"job_id": {"type": "string", "description": "CODE job id. Omit to use the last job started in this voice conversation."}},
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "type": "function",
+                "name": "code_continue",
+                "description": "Send a follow-up or answer to the same native CODE session. Normal messages queue; urgent messages steer or interrupt the active turn.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "job_id": {"type": "string", "description": "CODE job id. Omit to use the last job."},
+                        "text": {"type": "string"},
+                        "urgent": {"type": "boolean"},
+                        "attachments": attachment_schema,
+                    },
+                    "required": ["text", "urgent"],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "type": "function",
+                "name": "code_handoff",
+                "description": "Switch an existing logical CODE session to a different provider. aiOS transfers a bounded context manifest and working-tree state into a new native target session; it does not claim native transcript identity.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "job_id": {"type": "string", "description": "CODE job id. Omit to use the last job."},
+                        "provider": {"type": "string", "enum": ["codex", "claude", "cursor"]},
+                        "model": {"type": "string", "description": "Exact target model id returned by code_capabilities."},
+                        "reasoning": {"type": "string", "description": "Exact target reasoning/intelligence level."},
+                        "fast": {"type": "boolean", "description": "Explicit target fast-mode choice."},
+                        "instruction": {"type": "string", "description": "Optional direction for what the target provider should do next; omit to continue the transferred task."},
+                    },
+                    "required": ["provider", "model", "reasoning", "fast"],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "type": "function",
+                "name": "code_stop",
+                "description": "Stop the active turn for a CODE job without deleting its persistent session.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"job_id": {"type": "string", "description": "CODE job id. Omit to use the last job."}},
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "type": "function",
+                "name": "code_delete",
+                "description": "Delete a stopped CODE session transcript and metadata. Project files are not deleted. Only use when the user explicitly asks to delete it and confirms deletion.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "job_id": {"type": "string", "description": "CODE job id. Omit to use the last job."},
+                        "confirm": {"type": "boolean", "description": "True only after the user explicitly confirmed deletion."},
+                    },
+                    "required": ["confirm"],
+                    "additionalProperties": False,
+                },
+            },
+        ]
 
     def _tools(self, settings):
         tools = []
@@ -823,9 +1039,8 @@ class VoiceAgent:
                     "type": "function",
                     "name": "read_screen",
                     "description": (
-                        "Look at the screen right now and answer a question about what is on it. "
-                        "Use for reading errors, dialogs, or whatever the user is pointing at. "
-                        "Much faster than OPERATOR when nothing needs to be clicked."
+                        "Capture one physical screen or all connected screens and attach the pixels "
+                        "to your next turn. Use 'all' when you do not know which screen contains the app."
                     ),
                     "parameters": {
                         "type": "object",
@@ -833,9 +1048,57 @@ class VoiceAgent:
                             "question": {
                                 "type": "string",
                                 "description": "What to find out, e.g. 'what does the error say?'",
-                            }
+                            },
+                            "screen": {
+                                "type": "string",
+                                "enum": ["1", "2", "3", "all"],
+                                "description": "Physical screen number, or all to inspect every screen.",
+                            },
                         },
-                        "required": ["question"],
+                        "required": ["question", "screen"],
+                        "additionalProperties": False,
+                    },
+                }
+            )
+            tools.append(
+                {
+                    "type": "function",
+                    "name": "click_screen",
+                    "description": (
+                        "Make one quick click on a physical screen. Coordinates are pixels from the "
+                        "latest read_screen image for that screen. Read the screen first."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "screen": {"type": "string", "enum": ["1", "2", "3"]},
+                            "x": {"type": "integer", "description": "X pixel in the attached screen image."},
+                            "y": {"type": "integer", "description": "Y pixel in the attached screen image."},
+                            "button": {"type": "string", "enum": ["left", "right"]},
+                            "clicks": {"type": "integer", "enum": [1, 2]},
+                        },
+                        "required": ["screen", "x", "y", "button", "clicks"],
+                        "additionalProperties": False,
+                    },
+                }
+            )
+            tools.append(
+                {
+                    "type": "function",
+                    "name": "scroll_screen",
+                    "description": (
+                        "Scroll once at a point visible in the latest read_screen image. Positive "
+                        "amount scrolls up and negative amount scrolls down."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "screen": {"type": "string", "enum": ["1", "2", "3"]},
+                            "x": {"type": "integer"},
+                            "y": {"type": "integer"},
+                            "amount": {"type": "integer", "minimum": -12, "maximum": 12},
+                        },
+                        "required": ["screen", "x", "y", "amount"],
                         "additionalProperties": False,
                     },
                 }
@@ -1108,6 +1371,7 @@ class VoiceAgent:
                     },
                 }
             )
+        tools.extend(self._code_tools())
         tools.append(
             {
                 "type": "function",
@@ -1233,12 +1497,23 @@ class VoiceAgent:
             "operator_task": self._tool_operator_task,
             "operator_followup": self._tool_operator_followup,
             "operator_stop": self._tool_operator_stop,
+            "code_capabilities": self._tool_code_capabilities,
+            "code_setup": self._tool_code_setup,
+            "code_start": self._tool_code_start,
+            "code_list": self._tool_code_list,
+            "code_status": self._tool_code_status,
+            "code_continue": self._tool_code_continue,
+            "code_handoff": self._tool_code_handoff,
+            "code_stop": self._tool_code_stop,
+            "code_delete": self._tool_code_delete,
             "type_text": self._tool_type_text,
             "copy_text": self._tool_copy_text,
             "add_note": self._tool_add_note,
             "hide_overlay": self._tool_hide_overlay,
             "read_clipboard": self._tool_read_clipboard,
             "read_screen": self._tool_read_screen,
+            "click_screen": self._tool_click_screen,
+            "scroll_screen": self._tool_scroll_screen,
             "read_file": self._tool_read_file,
             "write_file": self._tool_write_file,
             "append_file": self._tool_append_file,
@@ -1529,6 +1804,219 @@ class VoiceAgent:
             return "OPERATOR stop requested"
         return "could not reach the aiOS window — is it running?"
 
+    @staticmethod
+    def _code_request(path, method="GET", payload=None, timeout=35):
+        body = json.dumps(payload).encode("utf-8") if payload is not None else None
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{CODE_PORT}{path}",
+            data=body,
+            method=method,
+            headers={"Content-Type": "application/json"} if body is not None else {},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", "replace")
+            try:
+                return json.loads(detail)
+            except json.JSONDecodeError:
+                return {"ok": False, "error": detail or str(exc)}
+        except Exception as exc:
+            return {"ok": False, "error": f"CODE backend unavailable: {exc}"}
+
+    @staticmethod
+    def _code_attachments(values):
+        rows = []
+        for value in values or []:
+            text = str(value or "").strip()
+            if text.startswith(("https://", "http://")):
+                rows.append({"url": text, "label": text})
+            elif text:
+                rows.append({"path": text, "label": Path(text).name})
+        return rows
+
+    def _code_job_id(self, arguments):
+        return str(arguments.get("job_id") or self._last_code_job_id or "").strip()
+
+    def _tool_code_capabilities(self, arguments):
+        suffix = "?refresh=1" if arguments.get("refresh") else ""
+        result = self._code_request(f"/api/code/capabilities{suffix}", timeout=50)
+        if result.get("ok"):
+            compact = []
+            for provider in result.get("providers") or []:
+                compact.append({
+                    "provider": provider.get("provider"),
+                    "ready": provider.get("ready"),
+                    "message": provider.get("message"),
+                    "models": [
+                        {
+                            "id": model.get("id"),
+                            "reasoning": model.get("reasoning") or [],
+                            "default_reasoning": model.get("default_reasoning"),
+                            "fast_available": bool(model.get("fast")),
+                            "default": bool(model.get("default")),
+                        }
+                        for model in provider.get("models") or []
+                    ],
+                })
+            result = {"ok": True, "providers": compact}
+        return json.dumps(result, ensure_ascii=False, default=str)
+
+    def _tool_code_setup(self, arguments):
+        provider = str(arguments.get("provider") or "").strip().lower()
+        result = self._code_request(
+            f"/api/code/providers/{urllib.parse.quote(provider)}/setup",
+            "POST",
+            {},
+        )
+        return json.dumps(result, ensure_ascii=False, default=str)
+
+    def _tool_code_start(self, arguments):
+        payload = {
+            "provider": str(arguments.get("provider") or "").strip().lower(),
+            "cwd": str(arguments.get("cwd") or "").strip(),
+            "brief": str(arguments.get("brief") or "").strip(),
+            "model": str(arguments.get("model") or "").strip(),
+            "reasoning": str(arguments.get("reasoning") or "").strip().lower(),
+            "fast": bool(arguments.get("fast")),
+            "attachments": self._code_attachments(arguments.get("attachments")),
+        }
+        result = self._code_request("/api/code/jobs", "POST", payload, timeout=45)
+        job = result.get("job") or {}
+        if result.get("ok") and job.get("id"):
+            self._last_code_job_id = str(job["id"])
+            result = {
+                "ok": True,
+                "job_id": job.get("id"),
+                "title": job.get("title"),
+                "provider": job.get("provider"),
+                "status": job.get("status"),
+                "model": job.get("model"),
+                "reasoning": job.get("reasoning"),
+                "fast": job.get("fast"),
+                "cwd": job.get("cwd"),
+                "message": "The job was dispatched. aiOS will notify at milestones, questions, failure, and the provider's final report.",
+            }
+        log_event(f"CODE start: {json.dumps(result, ensure_ascii=False, default=str)[:800]}")
+        return json.dumps(result, ensure_ascii=False, default=str)
+
+    def _tool_code_list(self, arguments):
+        result = self._code_request(f"/api/code/jobs?limit={max(1, min(100, int(arguments.get('limit') or 20)))}")
+        if result.get("ok"):
+            provider = str(arguments.get("provider") or "").strip().lower()
+            status = str(arguments.get("status") or "").strip().lower()
+            rows = []
+            for job in result.get("jobs") or []:
+                if provider and job.get("provider") != provider:
+                    continue
+                if status and job.get("status") != status:
+                    continue
+                rows.append({key: job.get(key) for key in ("id", "title", "provider", "project_name", "cwd", "status", "model", "reasoning", "fast", "pending_question", "last_summary", "last_error", "updated_at")})
+            result = {"ok": True, "jobs": rows}
+            if rows:
+                self._last_code_job_id = str(rows[0].get("id") or self._last_code_job_id)
+        return json.dumps(result, ensure_ascii=False, default=str)
+
+    def _tool_code_status(self, arguments):
+        job_id = self._code_job_id(arguments)
+        if not job_id:
+            return json.dumps({"ok": False, "error": "No CODE job is selected. Call code_list first."})
+        result = self._code_request(f"/api/code/jobs/{urllib.parse.quote(job_id)}/log?since=0")
+        if result.get("ok"):
+            self._last_code_job_id = job_id
+            events = result.get("events") or []
+            result = {
+                "ok": True,
+                "job": result.get("job"),
+                "recent_events": [
+                    {key: event.get(key) for key in ("ts", "kind", "text", "notify")}
+                    for event in events[-16:]
+                ],
+            }
+        return json.dumps(result, ensure_ascii=False, default=str)
+
+    def _tool_code_continue(self, arguments):
+        job_id = self._code_job_id(arguments)
+        if not job_id:
+            return json.dumps({"ok": False, "error": "No CODE job is selected. Call code_list first."})
+        payload = {
+            "text": str(arguments.get("text") or "").strip(),
+            "urgent": bool(arguments.get("urgent")),
+            "attachments": self._code_attachments(arguments.get("attachments")),
+        }
+        result = self._code_request(f"/api/code/jobs/{urllib.parse.quote(job_id)}/messages", "POST", payload)
+        if result.get("ok"):
+            self._last_code_job_id = job_id
+            result = {
+                "ok": True,
+                "job_id": job_id,
+                "steered": bool(result.get("steered")),
+                "queued": bool(result.get("queued")),
+                "status": (result.get("job") or {}).get("status"),
+            }
+        return json.dumps(result, ensure_ascii=False, default=str)
+
+    def _tool_code_handoff(self, arguments):
+        job_id = self._code_job_id(arguments)
+        if not job_id:
+            return json.dumps({"ok": False, "error": "No CODE job is selected. Call code_list first."})
+        payload = {
+            "provider": str(arguments.get("provider") or "").strip().lower(),
+            "model": str(arguments.get("model") or "").strip(),
+            "reasoning": str(arguments.get("reasoning") or "").strip().lower(),
+            "fast": bool(arguments.get("fast")),
+            "instruction": str(arguments.get("instruction") or "").strip(),
+        }
+        result = self._code_request(
+            f"/api/code/jobs/{urllib.parse.quote(job_id)}/handoff",
+            "POST",
+            payload,
+            timeout=90,
+        )
+        if result.get("ok"):
+            self._last_code_job_id = job_id
+            handoff = result.get("handoff") or {}
+            result = {
+                "ok": True,
+                "job_id": job_id,
+                "from_provider": handoff.get("from_provider"),
+                "from_model": handoff.get("from_model"),
+                "provider": handoff.get("to_provider"),
+                "model": handoff.get("to_model"),
+                "native_continuation": False,
+                "status": (result.get("job") or {}).get("status"),
+                "message": "The logical CODE session was handed off. The target provider is continuing in a new native session with the aiOS context manifest.",
+            }
+        log_event(f"CODE handoff: {json.dumps(result, ensure_ascii=False, default=str)[:800]}")
+        return json.dumps(result, ensure_ascii=False, default=str)
+
+    def _tool_code_stop(self, arguments):
+        job_id = self._code_job_id(arguments)
+        if not job_id:
+            return json.dumps({"ok": False, "error": "No CODE job is selected. Call code_list first."})
+        result = self._code_request(f"/api/code/jobs/{urllib.parse.quote(job_id)}/stop", "POST", {})
+        return json.dumps(result, ensure_ascii=False, default=str)
+
+    def _tool_code_delete(self, arguments):
+        job_id = self._code_job_id(arguments)
+        if not job_id:
+            return json.dumps({"ok": False, "error": "No CODE job is selected. Call code_list first."})
+        if arguments.get("confirm") is not True:
+            return json.dumps({
+                "ok": False,
+                "error": "Deletion was not confirmed. Ask the user to explicitly confirm deleting this CODE session.",
+                "needs_confirmation": True,
+            })
+        result = self._code_request(
+            f"/api/code/jobs/{urllib.parse.quote(job_id)}",
+            "DELETE",
+            {"confirm": job_id},
+        )
+        if result.get("ok") and job_id == self._last_code_job_id:
+            self._last_code_job_id = ""
+        return json.dumps(result, ensure_ascii=False, default=str)
+
     def _tool_type_text(self, arguments):
         text = str(arguments.get("text") or "")
         if not text:
@@ -1585,22 +2073,124 @@ class VoiceAgent:
         description would only lose detail.
         """
         question = str(arguments.get("question") or "").strip()
+        selector = str(arguments.get("screen") or "all").strip().casefold()
         try:
-            image_bytes, size = capture_screen_jpeg()
+            monitors = desktop_monitors()
+            if selector != "all":
+                monitor, error = resolve_desktop_monitor(selector)
+                if error:
+                    return error
+                monitors = [monitor]
         except Exception as exc:
-            return f"could not capture the screen: {exc}"
-        encoded = base64.b64encode(image_bytes).decode("ascii")
-        self._pending_images.append(
-            {
-                "url": f"data:image/jpeg;base64,{encoded}",
-                "note": question or "the screen",
+            return f"could not enumerate screens: {exc}"
+        if not monitors:
+            return "could not capture the screen: no physical screens found"
+        if not hasattr(self, "_screen_views"):
+            self._screen_views = {}
+        attached = []
+        for monitor in monitors:
+            try:
+                image_bytes, size = capture_screen_jpeg(screen=str(monitor.index))
+            except Exception as exc:
+                return f"could not capture screen {monitor.index}: {exc}"
+            encoded = base64.b64encode(image_bytes).decode("ascii")
+            note = (
+                f"screen {monitor.index}, attached image {size[0]}x{size[1]}, "
+                f"physical screen {monitor.width}x{monitor.height}; {question or 'inspect this screen'}"
+            )
+            self._pending_images.append(
+                {"url": f"data:image/jpeg;base64,{encoded}", "note": note}
+            )
+            self._screen_views[int(monitor.index)] = {
+                "image_width": int(size[0]),
+                "image_height": int(size[1]),
+                "captured_at": time.time(),
             }
-        )
-        log_event(f"read_screen {size[0]}x{size[1]} ({len(image_bytes) // 1024} KB) q={question[:80]}")
+            attached.append(f"screen {monitor.index} as {size[0]}x{size[1]}")
+            log_event(
+                f"read_screen {monitor.index} {size[0]}x{size[1]} "
+                f"({len(image_bytes) // 1024} KB) q={question[:80]}"
+            )
         return (
-            f"screen captured at {size[0]}x{size[1]} and attached to this turn — "
-            "look at the image below and answer from what you can actually see."
+            f"attached {', '.join(attached)}. Look at those images directly. "
+            "For a quick click, use pixel coordinates from the matching attached image."
         )
+
+    def _screen_point(self, arguments):
+        monitor, error = resolve_desktop_monitor(arguments.get("screen"))
+        if error:
+            return None, None, None, error
+        try:
+            x = int(arguments.get("x"))
+            y = int(arguments.get("y"))
+        except (TypeError, ValueError):
+            return None, None, None, "x and y must be image pixel coordinates"
+        view = getattr(self, "_screen_views", {}).get(int(monitor.index), {})
+        image_width = int(view.get("image_width") or monitor.width)
+        image_height = int(view.get("image_height") or monitor.height)
+        if not (0 <= x < image_width and 0 <= y < image_height):
+            return None, None, None, (
+                f"point ({x},{y}) is outside the last screen {monitor.index} image "
+                f"({image_width}x{image_height}); read_screen again"
+            )
+        local_x = min(int(monitor.width) - 1, round(x * int(monitor.width) / image_width))
+        local_y = min(int(monitor.height) - 1, round(y * int(monitor.height) / image_height))
+        return monitor, local_x, local_y, ""
+
+    def _tool_click_screen(self, arguments):
+        monitor, local_x, local_y, error = self._screen_point(arguments)
+        if error:
+            return error
+        button = str(arguments.get("button") or "left").strip().lower()
+        if button not in {"left", "right"}:
+            return "button must be left or right"
+        try:
+            clicks = int(arguments.get("clicks") or 1)
+        except (TypeError, ValueError):
+            clicks = 1
+        if clicks not in {1, 2}:
+            return "clicks must be 1 or 2"
+        try:
+            from agent_clicker.desktop_agent.actions import execute
+
+            result = execute(
+                {"type": "click", "x": local_x, "y": local_y,
+                 "button": button, "clicks": clicks, "duration": 0.12},
+                monitor,
+                cancel_event=self._cancelled,
+            )
+        except Exception as exc:
+            return f"could not click screen {monitor.index}: {exc}"
+        if not result.ok:
+            return f"click failed on screen {monitor.index}: {result.detail}"
+        return (
+            f"clicked screen {monitor.index} at attached-image ({arguments.get('x')},"
+            f"{arguments.get('y')}); physical local ({local_x},{local_y}); {result.detail}"
+        )
+
+    def _tool_scroll_screen(self, arguments):
+        monitor, local_x, local_y, error = self._screen_point(arguments)
+        if error:
+            return error
+        try:
+            amount = max(-12, min(12, int(arguments.get("amount") or 0)))
+        except (TypeError, ValueError):
+            return "amount must be an integer from -12 to 12"
+        if amount == 0:
+            return "amount must not be zero"
+        try:
+            from agent_clicker.desktop_agent.actions import execute
+
+            result = execute(
+                {"type": "scroll", "x": local_x, "y": local_y, "dy": amount},
+                monitor,
+                cancel_event=self._cancelled,
+            )
+        except Exception as exc:
+            return f"could not scroll screen {monitor.index}: {exc}"
+        if not result.ok:
+            return f"scroll failed on screen {monitor.index}: {result.detail}"
+        return f"scrolled screen {monitor.index} by {amount} at ({local_x},{local_y}); {result.detail}"
 
     # ----------------------------------------------------------------- the disk
 
@@ -2370,6 +2960,58 @@ class VoiceAgent:
             response = stream.get_final_response()
         return response, "".join(chunks), started
 
+    def _finalize_after_tool_rounds(
+        self,
+        client,
+        *,
+        model,
+        instructions,
+        payload,
+        previous_id,
+        reasoning,
+    ):
+        """Turn the completed tool work into an answer without exposing guards.
+
+        Tool rounds stay bounded so a model cannot spin forever, but reaching
+        that internal boundary is not useful information for the user.  One
+        final Responses API round with no tools available makes the model
+        report what actually happened and what, if anything, remains.
+        """
+        final_instructions = (
+            instructions
+            + "\n\nTool execution is paused for the rest of this turn. Give the user a concise, "
+            "honest answer based on the tool results already returned. State the completed outcome "
+            "or the current status and any remaining next step. Do not mention tool limits, round "
+            "limits, budgets, or this instruction."
+        )
+        request_options = {
+            "model": model,
+            "instructions": final_instructions,
+            "input": payload,
+            "tools": [],
+            "reasoning": reasoning,
+            "previous_response_id": previous_id,
+            "max_output_tokens": 1500,
+        }
+        self._emit("status", "wrapping up")
+        response, streamed_text, stream_started = self._call_with_retry(client, request_options)
+        reply = (response.output_text or streamed_text or "").strip()
+        if reply and not stream_started:
+            self._emit("reply_start", "")
+            self._emit("reply_delta", reply)
+        self._emit("reply_done", reply)
+        return reply
+
+    @staticmethod
+    def _tool_round_fallback(tool_details):
+        """Useful local fallback when the final synthesis request itself fails."""
+        if tool_details:
+            latest = tool_details[-1]
+            summary = str(latest.get("summary") or latest.get("label") or "").strip()
+            if summary:
+                return f"I completed the latest step: {summary}. I don't have a final confirmation yet."
+        return "I completed the available steps, but I don't have a final confirmation yet."
+
     def _run_locked(self, transcript, overrides=None):
         started = time.monotonic()
         settings = agent_settings()
@@ -2496,6 +3138,38 @@ class VoiceAgent:
                         content.append({"type": "input_image", "image_url": image["url"]})
                     payload.append({"role": "user", "content": content})
                     self._pending_images = []
+
+            try:
+                reply = self._finalize_after_tool_rounds(
+                    client,
+                    model=model,
+                    instructions=instructions,
+                    payload=payload,
+                    previous_id=previous_id,
+                    reasoning=reasoning,
+                )
+            except CancelledTurn:
+                raise
+            except Exception as exc:
+                log_event(f"final tool summary failed: {exc}")
+                reply = self._tool_round_fallback(tool_details)
+                self._emit("reply_start", "")
+                self._emit("reply_delta", reply)
+                self._emit("reply_done", reply)
+            if not reply:
+                reply = self._tool_round_fallback(tool_details)
+                self._emit("reply_start", "")
+                self._emit("reply_delta", reply)
+                self._emit("reply_done", reply)
+            self._remember(tool_trace, reply)
+            log_event(f"reply after bounded tool work: {reply[:200]}")
+            self._finish_overlay_hide(reply)
+            return AgentResult(
+                reply=reply,
+                tools=used_tools,
+                tool_details=tool_details,
+                elapsed=time.monotonic() - started,
+            )
         except CancelledTurn:
             log_event("turn cancelled mid-flight")
             # Drop the user turn too — replaying a question the user talked over
@@ -2520,19 +3194,6 @@ class VoiceAgent:
                 tool_details=tool_details,
                 elapsed=time.monotonic() - started,
             )
-
-        reply = "I ran out of tool rounds before finishing that."
-        self._emit("reply_start", "")
-        self._emit("reply_delta", reply)
-        self._emit("reply_done", reply)
-        self._remember(tool_trace, reply)
-        self._finish_overlay_hide(reply)
-        return AgentResult(
-            reply=reply,
-            tools=used_tools,
-            tool_details=tool_details,
-            elapsed=time.monotonic() - started,
-        )
 
     # ---------------------------------------------------------------- memory
 
@@ -2566,6 +3227,24 @@ class VoiceAgent:
             return "sending OPERATOR follow-up"
         if name == "operator_stop":
             return "stopping OPERATOR"
+        if name == "code_capabilities":
+            return "checking CODE agents and models"
+        if name == "code_setup":
+            return f"opening {arguments.get('provider') or 'CODE'} sign-in"
+        if name == "code_start":
+            return f"dispatching {arguments.get('provider') or 'CODE'}"
+        if name == "code_list":
+            return "checking CODE sessions"
+        if name == "code_status":
+            return "reading CODE progress"
+        if name == "code_continue":
+            return "sending CODE follow-up"
+        if name == "code_handoff":
+            return f"switching CODE to {arguments.get('provider') or 'another provider'}"
+        if name == "code_stop":
+            return "stopping CODE job"
+        if name == "code_delete":
+            return "deleting CODE session"
         if name == "type_text":
             return "typing into your window"
         if name == "copy_text":
@@ -2579,7 +3258,13 @@ class VoiceAgent:
         if name == "read_clipboard":
             return "reading the clipboard"
         if name == "read_screen":
-            return "looking at your screen"
+            return f"looking at screen {arguments.get('screen') or 'all'}"
+        if name == "click_screen":
+            clicks = int(arguments.get("clicks") or 1)
+            verb = "double-clicking" if clicks == 2 else "clicking"
+            return f"{verb} screen {arguments.get('screen') or '?'}"
+        if name == "scroll_screen":
+            return f"scrolling screen {arguments.get('screen') or '?'}"
         if name == "read_file":
             return f"reading {Path(str(arguments.get('path') or 'file')).name}"
         if name in {"write_file", "append_file"}:

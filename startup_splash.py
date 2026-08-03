@@ -28,6 +28,10 @@ PAD_X = 64
 PAD_Y = 52
 CORNER_RADIUS = 22
 LOGO_DARK_THRESHOLD = 26
+LOGO_GLOW_RADIUS = 18
+LOGO_GLOW_ALPHA = 145
+LOGO_HALO_RADIUS = 5
+LOGO_HALO_ALPHA = 95
 PANEL_TOP = (14, 18, 26)
 PANEL_BOTTOM = (9, 12, 18)
 PANEL_ALPHA = 255
@@ -94,9 +98,15 @@ def _lerp(a, b, t):
 
 
 def _rounded_rect_alpha(width, height, radius):
-    mask = Image.new("L", (width, height), 0)
-    ImageDraw.Draw(mask).rounded_rectangle((0, 0, width - 1, height - 1), radius=radius, fill=255)
-    return mask.point(lambda v: 255 if v >= 128 else 0)
+    scale = 4
+    large = Image.new("L", (width * scale, height * scale), 0)
+    ImageDraw.Draw(large).rounded_rectangle(
+        (0, 0, width * scale - 1, height * scale - 1),
+        radius=radius * scale,
+        fill=255,
+    )
+    resampling = getattr(Image, "Resampling", Image).LANCZOS
+    return large.resize((width, height), resampling)
 
 
 def build_splash_panel(logo_width, logo_height):
@@ -130,13 +140,38 @@ def build_splash_panel(logo_width, logo_height):
 def _logo_mask(logo):
     red, green, blue, alpha = logo.split()
     bright = ImageChops.lighter(ImageChops.lighter(red, green), blue)
-    mask = bright.point(lambda value: 255 if value > LOGO_DARK_THRESHOLD else 0)
-    return ImageChops.multiply(mask, alpha.point(lambda value: 255 if value > 0 else 0))
+    span = max(1, 255 - LOGO_DARK_THRESHOLD)
+    mask = bright.point(lambda value: max(0, min(255, int((value - LOGO_DARK_THRESHOLD) * 255 / span))))
+    mask = mask.filter(ImageFilter.GaussianBlur(0.35))
+    return ImageChops.multiply(mask, alpha)
+
+
+def _tinted_layer(size, color, alpha_mask):
+    layer = Image.new("RGBA", size, (*color, 0))
+    layer.putalpha(alpha_mask)
+    return layer
+
+
+def _scaled_alpha(mask, alpha):
+    alpha = max(0, min(255, int(alpha)))
+    return mask.point(lambda value: value * alpha // 255)
+
+
+def add_logo_glow(frame, mask, offset):
+    glow_mask = mask.filter(ImageFilter.GaussianBlur(LOGO_GLOW_RADIUS))
+    halo_mask = mask.filter(ImageFilter.GaussianBlur(LOGO_HALO_RADIUS))
+    glow = _tinted_layer(mask.size, ACCENT, _scaled_alpha(glow_mask, LOGO_GLOW_ALPHA))
+    halo = _tinted_layer(mask.size, (220, 248, 255), _scaled_alpha(halo_mask, LOGO_HALO_ALPHA))
+    frame.alpha_composite(glow, dest=offset)
+    frame.alpha_composite(halo, dest=offset)
+    return frame
 
 
 def compose_splash_frame(logo, panel, offset):
     composed = panel.copy()
-    composed.paste(logo, offset, _logo_mask(logo))
+    mask = _logo_mask(logo)
+    add_logo_glow(composed, mask, offset)
+    composed.paste(logo, offset, mask)
     return composed
 
 
@@ -178,6 +213,7 @@ def prepare_splash_frames(frame_paths):
         wipe = _wipe_mask(final_logo.size[0], final_logo.size[1], eased)
         combined = ImageChops.multiply(base_logo_mask, wipe)
         composed = panel.copy()
+        add_logo_glow(composed, combined, offset)
         composed.paste(final_logo, offset, combined)
         frames.append(composed)
     return frames
@@ -356,7 +392,10 @@ def main():
         if not frames:
             log("no composed frames")
             return
-        run_tk_fallback(frames)
+        if os.name == "nt":
+            run_layered(frames)
+        else:
+            run_tk_fallback(frames)
         log("ok")
     except Exception as exc:
         log(f"failed: {exc}")

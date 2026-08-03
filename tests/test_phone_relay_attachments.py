@@ -178,3 +178,11 @@ def test_transcription_command_keeps_its_request_id(bridge, monkeypatch):
 
     assert result["text"] == "hello computer"
     assert seen["request_id"] == "voice-42"
+
+
+def test_realtime_token_command_is_brokered_by_the_pc(wired):
+    wired.execute({"type": "config", "payload": {"_aios_command": "realtime_token"}})
+
+    path, payload = wired.calls["sent"][0]
+    assert path == "/api/phone/realtime/token"
+    assert payload == {}

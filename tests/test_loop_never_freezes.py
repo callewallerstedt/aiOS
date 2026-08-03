@@ -185,3 +185,22 @@ def test_a_superseded_run_goes_quiet(monkeypatch, tmp_path):
     time.sleep(0.5)
 
     assert len(events) == before, "the abandoned run kept talking"
+
+
+def test_a_second_completed_run_still_reaches_the_ui(monkeypatch, tmp_path):
+    """A finished run must not leave its transcript wrapper around the UI sink."""
+    model = FakeModel([
+        {"thought": "first", "status": "done", "message": "first done"},
+        {"thought": "second", "status": "done", "message": "second done"},
+    ])
+    _wire(monkeypatch, tmp_path, model.chat_raw)
+    events = []
+    agent = AgentLoop(events.append)
+    for task in ("First", "Follow-up after completion"):
+        agent.start(task, MONITOR, model="clicker", max_steps=2,
+                    action_delay=0.0, settle_after_step=0.0, planner_model="")
+        agent._thread.join(timeout=15)
+        assert not agent.is_running()
+
+    done = [event for event in events if event.get("type") == "done"]
+    assert [event.get("message") for event in done] == ["first done", "second done"]

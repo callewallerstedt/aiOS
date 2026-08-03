@@ -21,6 +21,8 @@ sys.path.insert(0, str(REPO / "agent_clicker" / "app"))
 import voice_dictation
 
 PHONE_JS = REPO / "phone_site" / "phone.js"
+PHONE_HTML = REPO / "phone_site" / "index.html"
+PHONE_CSS = REPO / "phone_site" / "phone.css"
 
 
 @pytest.fixture
@@ -153,7 +155,7 @@ def test_send_routes_the_voice_target_to_the_agent_port(client, monkeypatch):
     }
 
 
-def test_phone_fast_or_think_is_a_one_turn_agent_override(client, monkeypatch):
+def test_phone_agent_is_a_one_turn_agent_override(client, monkeypatch):
     http, _events, server = client
     sent = {}
     monkeypatch.setattr(server, "forward_voice", lambda payload: sent.update(payload) or {"ok": True})
@@ -237,3 +239,68 @@ def test_hosted_pwa_streams_agent_fragments_into_one_reply_row():
     assert 'kind: "agent-stream"' in describe
     assert 'info.kind === "agent-stream"' in add_event
     assert '.entry.agent-reply.streaming' in add_event
+
+
+def test_voice_mode_uses_a_short_lived_realtime_credential(client, monkeypatch):
+    http, _events, server = client
+    seen = {}
+
+    class FakeResponse:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"value": "ek_test_short_lived", "expires_at": 123456}
+
+    monkeypatch.setattr(server, "_load_helper_config", lambda: {"openai_api_key": "sk-test-private-key-long-enough"})
+    monkeypatch.setattr(
+        server.httpx,
+        "post",
+        lambda url, **kwargs: seen.update({"url": url, **kwargs}) or FakeResponse(),
+    )
+
+    response = http.post("/api/phone/realtime/token")
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert payload["value"] == "ek_test_short_lived"
+    assert seen["url"].endswith("/v1/realtime/client_secrets")
+    assert seen["headers"]["Authorization"].startswith("Bearer sk-test")
+    realtime = seen["json"]["session"]
+    assert realtime["model"] == "gpt-realtime-2.1"
+    assert realtime["audio"]["output"]["voice"] == "marin"
+    assert realtime["tools"][0]["name"] == "ask_aios_agent"
+    assert "resident aiOS agent" in realtime["instructions"]
+
+
+def test_voice_mode_refuses_to_expose_a_missing_api_key(client, monkeypatch):
+    http, _events, server = client
+    monkeypatch.setattr(server, "_load_helper_config", lambda: {})
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    response = http.post("/api/phone/realtime/token")
+
+    assert response.status_code == 409
+    assert "OpenAI API key" in response.get_json()["error"]
+
+
+def test_pwa_has_one_agent_and_a_real_webrtc_voice_mode():
+    html = PHONE_HTML.read_text(encoding="utf-8")
+    js = PHONE_JS.read_text(encoding="utf-8")
+
+    assert "Voice Mode" in html
+    assert "Fast Agent" not in html
+    assert "Think Agent" not in html
+    assert "Control PC" not in html
+    assert "new RTCPeerConnection()" in js
+    assert "/v1/realtime/calls" in js
+    assert 'sendCommand("realtime_token"' in js
+    assert 'sendCommand("agent"' in js
+    assert 'return "low"' in js
+
+
+def test_shipped_phone_sources_are_strict_utf8_without_mojibake():
+    bad = ("â", "Ã", "Â", "ð", "€")
+    for path in (PHONE_HTML, PHONE_JS, PHONE_CSS):
+        text = path.read_bytes().decode("utf-8", errors="strict")
+        assert not any(marker in text for marker in bad), f"mojibake in {path.name}"

@@ -297,7 +297,7 @@ async function handleApi(request, env, url, context) {
     return json({
       ok: true,
       service: "aiOS Remote",
-      features: ["uploads", "push", "event-latest", "agent-voice", "pc-transcription"]
+      features: ["uploads", "push", "event-latest", "agent-voice", "pc-transcription", "realtime-voice"]
     });
   }
 
@@ -444,6 +444,26 @@ async function handleApi(request, env, url, context) {
     })) });
   }
 
+  const commandResultMatch = path.match(/^\/api\/machines\/([^/]+)\/commands\/(\d+)$/);
+  if (commandResultMatch && request.method === "GET") {
+    const machineId = commandResultMatch[1];
+    const commandId = Number(commandResultMatch[2]);
+    const row = await env.DB.prepare("SELECT id, type, payload_json, completed_at, result_json FROM commands WHERE id = ? AND machine_id = ? AND account_id = ?")
+      .bind(commandId, machineId, accountId).first();
+    if (!row) return json({ error: "Command not found." }, 404);
+    if (!row.completed_at) return json({ ok: true, completed: false });
+    const payload = safeJson(row.payload_json);
+    const effectiveType = row.type === "config" ? String(payload._aios_command || "config") : String(row.type || "");
+    const result = safeJson(row.result_json);
+    if (effectiveType === "realtime_token") {
+      // A Realtime client secret is short-lived and must be single-use. Return
+      // it once, then remove it from relay storage immediately.
+      await env.DB.prepare("DELETE FROM commands WHERE id = ? AND machine_id = ? AND account_id = ?")
+        .bind(commandId, machineId, accountId).run();
+    }
+    return json({ ok: true, completed: true, result });
+  }
+
   const commandMatch = path.match(/^\/api\/machines\/([^/]+)\/commands$/);
   if (commandMatch && request.method === "POST") {
     const machineId = commandMatch[1];
@@ -452,7 +472,7 @@ async function handleApi(request, env, url, context) {
     const input = await body(request);
     const allowed = new Set([
       "prompt", "followup", "stop", "config", "clarify", "stream", "update",
-      "codex_switch", "ai_settings", "agent", "agent_stop", "transcribe"
+      "codex_switch", "ai_settings", "agent", "agent_stop", "transcribe", "realtime_token"
     ]);
     if (!allowed.has(input.type)) return json({ error: "Unsupported command." }, 400);
     const payload = input.payload && typeof input.payload === "object" ? input.payload : {};

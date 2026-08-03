@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>aiOS Coding</title>
+<meta name="theme-color" content="#05060a" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<link rel="manifest" href="/manifest.webmanifest" />
+<link rel="apple-touch-icon" href="/icons/aios-icon-180.png" />
+<link rel="icon" sizes="192x192" href="/icons/aios-icon-192.png" />
+<link rel="preconnect" href="https://rsms.me/" />
+<link rel="stylesheet" href="https://rsms.me/inter/inter.css" />
+<link rel="stylesheet" href="/coding.css" />
+</head>
+<body>
+<main class="shell">
+  <header class="top">
+    <button id="home" class="circle-btn" type="button" aria-label="Back to voice chat"></button>
+    <div class="title-wrap">
+      <div id="title" class="title">Claude</div>
+      <div id="subtitle" class="subtitle"></div>
+    </div>
+    <button id="tts" class="chip-btn" type="button" aria-label="Toggle speech">🔊</button>
+    <button id="sessions" class="chip-btn" type="button" aria-label="Sessions">☰</button>
+  </header>
+
+  <section id="chat" class="chat" aria-live="polite"></section>
+
+  <footer class="dock">
+    <button id="stop" class="stop-btn" type="button" hidden>■</button>
+    <button id="mic" class="mic" type="button" aria-label="Microphone"><span></span></button>
+    <div class="entry">
+      <textarea id="input" rows="1" placeholder="Message…"></textarea>
+      <button id="send" class="send-btn" type="button" aria-label="Send">↑</button>
+    </div>
+  </footer>
+</main>
+
+<div id="overlay" class="overlay" hidden>
+  <div class="overlay-panel">
+    <div class="overlay-head">
+      <div class="overlay-title">Sessions</div>
+      <button id="overlay-close" class="chip-btn" type="button">×</button>
+    </div>
+    <div class="new-row">
+      <button id="new-claude" class="new-btn" type="button">+ Claude</button>
+      <button id="new-codex" class="new-btn" type="button">+ Codex</button>
+    </div>
+    <div id="project-picker" class="project-picker" hidden>
+      <div class="picker-label">Project folder</div>
+      <div id="project-list" class="project-list"></div>
+    </div>
+    <div id="session-list" class="session-list"></div>
+  </div>
+</div>
+
+<script src="/coding.js"></script>
+</body>
+</html>

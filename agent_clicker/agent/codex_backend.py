@@ -257,13 +257,27 @@ def _parse_sse(stream_bytes_iter, deadline: float | None = None) -> tuple[str, d
                     details = raw_usage.get("input_tokens_details") or {}
                     input_tokens = int(raw_usage.get("input_tokens") or 0)
                     output_tokens = int(raw_usage.get("output_tokens") or 0)
+                    cache_write_tokens = int(
+                        details.get("cache_write_tokens")
+                        or details.get("cache_creation_tokens")
+                        or 0
+                    )
                     usage = {
                         "requests": 1,
                         "input_tokens": input_tokens,
                         "output_tokens": output_tokens,
                         "cached_input_tokens": int(details.get("cached_tokens") or 0),
+                        "cache_write_input_tokens": cache_write_tokens,
                         "total_tokens": int(raw_usage.get("total_tokens") or input_tokens + output_tokens),
                     }
+                    if input_tokens > 272_000:
+                        usage.update({
+                            "long_context_requests": 1,
+                            "long_context_input_tokens": input_tokens,
+                            "long_context_output_tokens": output_tokens,
+                            "long_context_cached_input_tokens": int(details.get("cached_tokens") or 0),
+                            "long_context_cache_write_input_tokens": cache_write_tokens,
+                        })
                     # also has full content in `response.output[]` — but we
                     # already accumulated deltas
                     pass

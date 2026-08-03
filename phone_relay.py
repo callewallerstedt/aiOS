@@ -538,7 +538,7 @@ class Bridge:
         tunneled = str(payload.get("_aios_command") or "") if kind == "config" else ""
         if tunneled in {
             "clarify", "stream", "update", "codex_switch", "ai_settings",
-            "agent", "agent_stop", "transcribe",
+            "agent", "agent_stop", "transcribe", "realtime_token",
         }:
             kind = tunneled
             payload = {key: value for key, value in payload.items() if key != "_aios_command"}
@@ -591,6 +591,8 @@ class Bridge:
                 payload.get("audio") if isinstance(payload.get("audio"), dict) else {},
                 str(payload.get("request_id") or ""),
             )
+        if kind == "realtime_token":
+            return self.local_json("/api/phone/realtime/token", method="POST", payload={}, timeout=30)
         if kind == "stop":
             return self.local_json("/api/phone/operator/stop", method="POST", payload={})
         if kind == "config":
@@ -853,7 +855,7 @@ class Bridge:
             command_type = str(raw_payload.get("_aios_command") or command.get("type") or "")
             is_clarify = command_type == "clarify"
             is_silent = command_type == "stream"
-            if is_clarify or command_type == "transcribe":
+            if is_clarify or command_type in {"transcribe", "realtime_token"}:
                 self._run_command_async(command, is_clarify=is_clarify)
                 continue
             self._complete_command(command, is_clarify=False, is_silent=is_silent)

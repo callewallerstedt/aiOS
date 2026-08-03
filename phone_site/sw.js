@@ -1,4 +1,4 @@
-const CACHE = "aios-remote-v34";
+const CACHE = "aios-remote-v36";
 const SHELL = [
   "./",
   "phone.css",

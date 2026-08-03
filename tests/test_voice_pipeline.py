@@ -15,6 +15,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import voice_agent
+import voice_dictation
 import voice_settings
 import voice_text
 
@@ -128,6 +129,32 @@ def test_new_models_are_offered_and_english_only_ones_are_swapped_for_swedish():
     # distil-* cannot do Swedish at all, so auto must not keep it.
     assert voice_settings.normalize_whisper_model("distil-large-v3", "auto") == "large-v3-turbo"
     assert voice_settings.normalize_whisper_model("distil-large-v3", "en") == "distil-large-v3"
+
+
+def test_dictation_reload_invalidates_compute_change_and_preloads(monkeypatch):
+    settings = dict(voice_settings.DEFAULT_VOICE_DICTATION)
+    settings.update({
+        "whisper_model": "large-v3-turbo",
+        "device": "cuda",
+        "compute_type": "float32",
+    })
+    monkeypatch.setattr(voice_dictation, "load_voice_dictation_settings", lambda: settings)
+
+    dictation = voice_dictation.Dictation.__new__(voice_dictation.Dictation)
+    dictation.model = object()
+    dictation._loaded_model_name = "large-v3-turbo"
+    dictation._loaded_device = "cuda"
+    dictation._loaded_compute_type = "float16"
+    dictation.overlay = type("Overlay", (), {"apply_opacity_settings": lambda *_args: None})()
+    dictation.ui = lambda fn, *args, **kwargs: fn(*args, **kwargs)
+    dictation._configure_agent_tts = lambda: None
+    preloads = []
+    dictation.preload_model_async = lambda: preloads.append(True)
+
+    dictation.reload_settings(preload_model=True)
+
+    assert dictation.model is None
+    assert preloads == [True]
 
 
 def test_string_list_accepts_text_from_the_settings_ui():
@@ -281,6 +308,71 @@ def _bare_agent(monkeypatch, **overrides):
     events = []
     agent = voice_agent.VoiceAgent(on_event=lambda kind, payload: events.append((kind, payload)))
     return agent, events
+
+
+def test_legacy_tool_event_does_not_duplicate_completed_tool_in_voice_overlay(monkeypatch):
+    pushed = []
+    notes = []
+    app = voice_dictation.Dictation.__new__(voice_dictation.Dictation)
+    app._turn_id = 7
+    app._agent_echo_user = True
+    app.overlay = type(
+        "Overlay",
+        (),
+        {
+            "push_tool": lambda _self, value: pushed.append(value),
+            "set_compose_note": lambda _self, value: notes.append(value),
+        },
+    )()
+    app._ui_if_current = lambda _turn, fn, *args: fn(*args)
+    monkeypatch.setattr(voice_dictation, "mirror_phone_event", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(voice_dictation, "send_to_helper", lambda *_args, **_kwargs: True)
+
+    detail = {"name": "code_status", "label": "reading CODE progress", "call_id": "call-7"}
+    app._agent_event("tool", detail["label"])
+    app._agent_event("tool_start", detail)
+    app._agent_event("tool_done", detail)
+
+    assert pushed == ["reading CODE progress"]
+    assert notes == ["reading CODE progress..."]
+
+
+def test_tool_round_guard_gets_a_final_answer_without_tools(monkeypatch):
+    agent, events = _bare_agent(monkeypatch, agent_max_rounds=1, api_key="")
+    agent._client = object()
+    agent._pending_images = []
+    monkeypatch.setattr(agent, "_ensure_client", lambda _key: agent._client)
+    monkeypatch.setattr(agent, "_instructions", lambda _settings: "base instructions")
+    monkeypatch.setattr(agent, "_tools", lambda _settings: [{"type": "function", "name": "check"}])
+    monkeypatch.setattr(agent, "_conversation_input", lambda _settings: [{"role": "user", "content": "go"}])
+    monkeypatch.setattr(agent, "_execute", lambda _name, _args: "still running")
+    monkeypatch.setattr(agent, "_remember", lambda _trace, _reply: None)
+    monkeypatch.setattr(agent, "_finish_overlay_hide", lambda _reply: None)
+
+    call = type("Call", (), {"type": "function_call", "name": "check", "arguments": "{}", "call_id": "c1"})()
+    tool_response = type("Response", (), {"id": "r1", "output": [call], "output_text": ""})()
+    final_response = type(
+        "Response",
+        (),
+        {"id": "r2", "output": [], "output_text": "The check is still running; I can verify it again next."},
+    )()
+    requests = []
+
+    def fake_call(_client, options):
+        requests.append(options)
+        if len(requests) == 1:
+            return tool_response, "", False
+        return final_response, final_response.output_text, False
+
+    monkeypatch.setattr(agent, "_call_with_retry", fake_call)
+    result = agent.run("check it")
+
+    assert result.reply == "The check is still running; I can verify it again next."
+    assert len(requests) == 2
+    assert requests[1]["tools"] == []
+    assert requests[1]["previous_response_id"] == "r1"
+    assert "Do not mention tool limits" in requests[1]["instructions"]
+    assert "tool rounds" not in result.reply.casefold()
 
 
 @pytest.mark.parametrize(
@@ -484,6 +576,22 @@ def test_timer_rejects_an_out_of_range_delay(monkeypatch, tmp_path):
 # ------------------------------------------------------------- tool plumbing
 
 
+def test_system_prompt_routes_quick_clicks_locally_and_long_work_to_operator(self_agent, monkeypatch):
+    monkeypatch.setattr(
+        voice_agent,
+        "monitor_context_line",
+        lambda: "- Connected screens: 3. screen 1; screen 2; screen 3",
+    )
+
+    prompt = self_agent._instructions({"config": {}})
+
+    assert "Do quick, bounded desktop actions yourself" in prompt
+    assert "more than about three" in prompt
+    assert "Connected screens: 3" in prompt
+    assert "read_screen accepts" in prompt
+    assert "click_screen" in prompt
+
+
 def test_new_tools_are_offered_when_enabled_and_hidden_when_not():
     agent = voice_agent.VoiceAgent.__new__(voice_agent.VoiceAgent)
     enabled = {
@@ -505,7 +613,8 @@ def test_new_tools_are_offered_when_enabled_and_hidden_when_not():
         if name
     }
     for name in (
-        "read_clipboard", "read_screen", "read_file", "write_file", "append_file",
+        "read_clipboard", "read_screen", "click_screen", "scroll_screen",
+        "read_file", "write_file", "append_file",
         "list_files", "set_volume", "media_control", "set_timer", "list_timers",
         "cancel_timer", "list_windows", "focus_window", "close_window", "remember", "forget",
     ):
@@ -518,7 +627,7 @@ def test_new_tools_are_offered_when_enabled_and_hidden_when_not():
     assert {"type_text", "copy_text", "add_note", "hide_overlay"} <= disabled
 
 
-def test_every_offered_tool_has_a_handler():
+def test_every_offered_tool_has_a_handler_without_executing_tools():
     agent = voice_agent.VoiceAgent.__new__(voice_agent.VoiceAgent)
     settings = dict.fromkeys(
         (
@@ -532,7 +641,8 @@ def test_every_offered_tool_has_a_handler():
         if tool.get("type") != "function":
             continue
         name = tool["name"]
-        assert agent._execute(name, {}) != f"unknown tool {name}", f"{name} has no handler"
+        handler = getattr(agent, f"_tool_{name}", None)
+        assert callable(handler), f"{name} has no handler"
 
 
 def test_tool_labels_exist_for_every_function_tool():
@@ -771,14 +881,99 @@ def test_editing_memory_directly_refreshes_the_facts(self_agent):
 # ---------------------------------------------------------------- read_screen
 
 
+def test_voice_agent_capture_scopes_aios_visibility(monkeypatch):
+    from contextlib import contextmanager
+    from PIL import Image
+    from agent_clicker.desktop_agent import screen as screen_module
+
+    monitor = type("Monitor", (), {
+        "index": 1, "width": 120, "height": 80, "left": 0, "top": 0,
+    })()
+    events = []
+    monkeypatch.setattr(voice_agent, "resolve_desktop_monitor", lambda _screen: (monitor, ""))
+    monkeypatch.setattr(
+        voice_agent,
+        "send_to_helper",
+        lambda action, text="", options=None: events.append((action, text)) or True,
+    )
+    monkeypatch.setattr(
+        screen_module,
+        "capture",
+        lambda selected: events.append(("capture", selected.index)) or Image.new("RGB", (120, 80)),
+    )
+
+    @contextmanager
+    def scoped(**_kwargs):
+        events.append(("local", "begin"))
+        try:
+            yield True
+        finally:
+            events.append(("local", "end"))
+
+    monkeypatch.setattr(screen_module, "current_process_windows_hidden_from_agent_capture", scoped)
+
+    jpeg, size = voice_agent.capture_screen_jpeg("1")
+
+    assert jpeg.startswith(b"\xff\xd8")
+    assert size == (120, 80)
+    assert [item[0] for item in events] == [
+        "agent_capture_begin", "local", "capture", "local", "agent_capture_end",
+    ]
+    assert events[0][1] == events[-1][1]
+
+
 def test_read_screen_attaches_the_image_instead_of_describing_it(self_agent, monkeypatch):
     monkeypatch.setattr(voice_agent, "capture_screen_jpeg", lambda *a, **k: (b"\xff\xd8fake", (1536, 864)))
-    output = self_agent._tool_read_screen({"question": "what does the error say?"})
-    assert "attached to this turn" in output
+    output = self_agent._tool_read_screen({"question": "what does the error say?", "screen": "1"})
+    assert "attached screen 1" in output
     assert len(self_agent._pending_images) == 1
     image = self_agent._pending_images[0]
     assert image["url"].startswith("data:image/jpeg;base64,")
-    assert image["note"] == "what does the error say?"
+    assert "screen 1" in image["note"]
+    assert "what does the error say?" in image["note"]
+
+
+def test_read_screen_all_attaches_every_physical_monitor(self_agent, monkeypatch):
+    monitors = [
+        type("Monitor", (), {"index": n, "width": 1920, "height": 1080,
+                              "left": (n - 1) * 1920, "top": 0})()
+        for n in (1, 2, 3)
+    ]
+    monkeypatch.setattr(voice_agent, "desktop_monitors", lambda: monitors)
+    monkeypatch.setattr(
+        voice_agent, "capture_screen_jpeg",
+        lambda screen="1", **_kwargs: (f"jpeg-{screen}".encode(), (1536, 864)),
+    )
+
+    output = self_agent._tool_read_screen({"question": "find the video", "screen": "all"})
+
+    assert len(self_agent._pending_images) == 3
+    assert "screen 1" in output and "screen 2" in output and "screen 3" in output
+
+
+def test_click_screen_scales_attached_image_pixels_to_physical_monitor(self_agent, monkeypatch):
+    monitor = type("Monitor", (), {
+        "index": 2, "width": 2560, "height": 1440, "left": -2560, "top": 0,
+    })()
+    monkeypatch.setattr(voice_agent, "resolve_desktop_monitor", lambda _screen: (monitor, ""))
+    self_agent._screen_views[2] = {"image_width": 1280, "image_height": 720}
+    recorded = []
+
+    from agent_clicker.desktop_agent import actions
+
+    def fake_execute(action, selected, **_kwargs):
+        recorded.append((action, selected))
+        return type("Result", (), {"ok": True, "detail": "clicked"})()
+
+    monkeypatch.setattr(actions, "execute", fake_execute)
+    output = self_agent._tool_click_screen({
+        "screen": "2", "x": 640, "y": 360, "button": "left", "clicks": 2,
+    })
+
+    assert recorded[0][0]["x"] == 1280
+    assert recorded[0][0]["y"] == 720
+    assert recorded[0][0]["clicks"] == 2
+    assert "clicked screen 2" in output
 
 
 def test_a_failed_capture_reports_rather_than_attaching(self_agent, monkeypatch):

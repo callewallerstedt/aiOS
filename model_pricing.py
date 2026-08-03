@@ -1,40 +1,54 @@
-"""Turn OPERATOR token usage into a US dollar estimate.
+"""Turn AIOS/OPERATOR token usage into an exact API cost breakdown.
 
-Rates are per one million tokens, as published for the OpenAI API in July 2026.
-Cached input tokens bill at the reduced cache-read rate.
+Rates are USD per one million tokens.  Calls made through the signed-in Codex
+backend consume the user's ChatGPT plan and therefore have a $0 incremental API
+charge; only calls that actually use the API-key backend are priced here.
 
 To correct or extend the table without touching the code, drop a
-``model_pricing.json`` next to this file:
-
-    {"gpt-5.6-sol": {"input": 5.0, "cached_input": 0.5, "output": 30.0}}
-
-Anything listed there wins over the defaults below. Prices are estimates for
-standard-tier calls: OpenAI's separate long-context meter is not applied, and
-runs on a signed-in Codex account bill to the ChatGPT plan rather than
-per token, so those calls are reported as plan usage instead of dollars.
+``model_pricing.json`` next to this file. Anything listed there wins over the
+defaults below.
 """
 
 from __future__ import annotations
 
+from decimal import Decimal
 import json
 from pathlib import Path
 
 PRICES_PATH = Path(__file__).resolve().parent / "model_pricing.json"
 
-# USD per 1M tokens.
+# USD per 1M tokens. Cache writes are charged at 1.25x fresh input. Requests
+# above the long-context threshold charge 2x input and 1.5x output.
 DEFAULT_PRICES = {
-    "gpt-5.6-sol": {"input": 5.00, "cached_input": 0.50, "output": 30.00},
-    "gpt-5.6-terra": {"input": 2.50, "cached_input": 0.25, "output": 15.00},
-    "gpt-5.6-luna": {"input": 1.00, "cached_input": 0.10, "output": 6.00},
+    "gpt-5.6-sol": {
+        "input": 5.00, "cached_input": 0.50, "cache_write_input": 6.25,
+        "output": 30.00, "long_input_multiplier": 2.0, "long_output_multiplier": 1.5,
+    },
+    "gpt-5.6-terra": {
+        "input": 2.00, "cached_input": 0.20, "cache_write_input": 2.50,
+        "output": 12.00, "long_input_multiplier": 2.0, "long_output_multiplier": 1.5,
+    },
+    "gpt-5.6-luna": {
+        "input": 0.20, "cached_input": 0.02, "cache_write_input": 0.25,
+        "output": 1.20, "long_input_multiplier": 2.0, "long_output_multiplier": 1.5,
+    },
 }
 
-# The phone and the desktop both speak in short names.
 ALIASES = {"sol": "gpt-5.6-sol", "terra": "gpt-5.6-terra", "luna": "gpt-5.6-luna"}
-
-# Backends that spend the user's API key. Codex calls ride the ChatGPT plan.
 BILLED_BACKENDS = {"api", "", "openai"}
+TOKEN_KEYS = (
+    "requests", "input_tokens", "output_tokens", "cached_input_tokens",
+    "cache_write_input_tokens", "total_tokens", "long_context_requests",
+    "long_context_input_tokens", "long_context_output_tokens",
+    "long_context_cached_input_tokens", "long_context_cache_write_input_tokens",
+)
 
-TOKEN_KEYS = ("requests", "input_tokens", "output_tokens", "cached_input_tokens", "total_tokens")
+
+def _decimal(value) -> Decimal:
+    try:
+        return Decimal(str(value or 0))
+    except Exception:
+        return Decimal(0)
 
 
 def load_prices() -> dict:
@@ -45,11 +59,15 @@ def load_prices() -> dict:
         return prices
     if not isinstance(override, dict):
         return prices
+    allowed = (
+        "input", "cached_input", "cache_write_input", "output",
+        "long_input_multiplier", "long_output_multiplier",
+    )
     for name, rates in override.items():
         if not isinstance(rates, dict):
             continue
         entry = prices.setdefault(str(name).strip().lower(), {})
-        for key in ("input", "cached_input", "output"):
+        for key in allowed:
             if key in rates:
                 try:
                     entry[key] = float(rates[key])
@@ -61,8 +79,7 @@ def load_prices() -> dict:
 def price_for(model: str, prices: dict | None = None) -> dict | None:
     """Rates for a model name, tolerating aliases and dated variants."""
     prices = load_prices() if prices is None else prices
-    name = str(model or "").strip().lower()
-    name = ALIASES.get(name, name)
+    name = ALIASES.get(str(model or "").strip().lower(), str(model or "").strip().lower())
     while name:
         if name in prices:
             return prices[name]
@@ -72,32 +89,72 @@ def price_for(model: str, prices: dict | None = None) -> dict | None:
     return None
 
 
-def _cost(tokens: dict, rates: dict) -> float:
-    input_tokens = int(tokens.get("input_tokens") or 0)
-    cached_tokens = min(int(tokens.get("cached_input_tokens") or 0), input_tokens)
-    output_tokens = int(tokens.get("output_tokens") or 0)
-    fresh_input = input_tokens - cached_tokens
-    return (
-        fresh_input * float(rates.get("input") or 0.0)
-        + cached_tokens * float(rates.get("cached_input", rates.get("input")) or 0.0)
-        + output_tokens * float(rates.get("output") or 0.0)
-    ) / 1_000_000
+def token_breakdown(tokens: dict) -> dict:
+    """Normalize token categories while ensuring their totals cannot overlap."""
+    input_tokens = max(0, int(tokens.get("input_tokens") or 0))
+    cached = min(max(0, int(tokens.get("cached_input_tokens") or 0)), input_tokens)
+    cache_write = min(
+        max(0, int(tokens.get("cache_write_input_tokens") or 0)),
+        max(0, input_tokens - cached),
+    )
+    output = max(0, int(tokens.get("output_tokens") or 0))
+    total = max(0, int(tokens.get("total_tokens") or input_tokens + output))
+    return {
+        "requests": max(0, int(tokens.get("requests") or 0)),
+        "input_tokens": input_tokens,
+        "fresh_input_tokens": max(0, input_tokens - cached - cache_write),
+        "cached_input_tokens": cached,
+        "cache_write_input_tokens": cache_write,
+        "output_tokens": output,
+        "total_tokens": total,
+    }
+
+
+def _cost(tokens: dict, rates: dict) -> Decimal:
+    counts = token_breakdown(tokens)
+    long_input = min(max(0, int(tokens.get("long_context_input_tokens") or 0)), counts["input_tokens"])
+    long_cached = min(
+        max(0, int(tokens.get("long_context_cached_input_tokens") or 0)),
+        counts["cached_input_tokens"], long_input,
+    )
+    long_write = min(
+        max(0, int(tokens.get("long_context_cache_write_input_tokens") or 0)),
+        counts["cache_write_input_tokens"], max(0, long_input - long_cached),
+    )
+    long_fresh = max(0, long_input - long_cached - long_write)
+    long_output = min(
+        max(0, int(tokens.get("long_context_output_tokens") or 0)), counts["output_tokens"])
+    normal_fresh = counts["fresh_input_tokens"] - long_fresh
+    normal_cached = counts["cached_input_tokens"] - long_cached
+    normal_write = counts["cache_write_input_tokens"] - long_write
+    normal_output = counts["output_tokens"] - long_output
+
+    input_rate = _decimal(rates.get("input"))
+    cached_rate = _decimal(rates.get("cached_input", rates.get("input")))
+    write_rate = _decimal(rates.get("cache_write_input", rates.get("input")))
+    output_rate = _decimal(rates.get("output"))
+    long_input_multiplier = _decimal(rates.get("long_input_multiplier") or 1)
+    long_output_multiplier = _decimal(rates.get("long_output_multiplier") or 1)
+    token_dollars = (
+        Decimal(normal_fresh) * input_rate
+        + Decimal(normal_cached) * cached_rate
+        + Decimal(normal_write) * write_rate
+        + Decimal(normal_output) * output_rate
+        + Decimal(long_fresh) * input_rate * long_input_multiplier
+        + Decimal(long_cached) * cached_rate * long_input_multiplier
+        + Decimal(long_write) * write_rate * long_input_multiplier
+        + Decimal(long_output) * output_rate * long_output_multiplier
+    )
+    return token_dollars / Decimal(1_000_000)
 
 
 def _backends(model_usage: dict, fallback_backend: str) -> dict:
     backends = model_usage.get("backends")
-    if isinstance(backends, dict) and backends:
-        return backends
-    return {fallback_backend: model_usage}
+    return backends if isinstance(backends, dict) and backends else {fallback_backend: model_usage}
 
 
 def estimate_cost(usage: dict, default_model: str = "") -> dict:
-    """Summarise what a finished run cost.
-
-    Returns the dollar total for API-billed calls, the tokens that went to a
-    ChatGPT plan instead, and any model we have no price for — so the UI can
-    be honest about which of the three it is showing.
-    """
+    """Return exact API charges plus separately metered ChatGPT-plan usage."""
     usage = usage if isinstance(usage, dict) else {}
     run_backend = str(usage.get("backend") or "api").strip().lower()
     models = usage.get("models")
@@ -105,8 +162,11 @@ def estimate_cost(usage: dict, default_model: str = "") -> dict:
         models = {str(default_model or usage.get("model") or ""): usage}
 
     prices = load_prices()
+    exact_total = Decimal(0)
     result = {
         "usd": 0.0,
+        "usd_exact": "0.000000000",
+        "api_requests": 0,
         "plan_tokens": 0,
         "plan_requests": 0,
         "unpriced": [],
@@ -120,23 +180,31 @@ def estimate_cost(usage: dict, default_model: str = "") -> dict:
         for backend, tokens in _backends(model_usage, run_backend).items():
             if not isinstance(tokens, dict):
                 continue
-            billed = str(backend).strip().lower() in BILLED_BACKENDS
-            if not billed:
-                result["plan_tokens"] += int(tokens.get("total_tokens") or 0)
-                result["plan_requests"] += int(tokens.get("requests") or 0)
+            counts = token_breakdown(tokens)
+            if str(backend).strip().lower() not in BILLED_BACKENDS:
+                result["plan_tokens"] += counts["total_tokens"]
+                result["plan_requests"] += counts["requests"]
                 continue
+            result["api_requests"] += counts["requests"]
             if not rates:
                 if model and model not in result["unpriced"]:
                     result["unpriced"].append(model)
                 continue
             amount = _cost(tokens, rates)
-            result["usd"] += amount
-            entry = result["models"].setdefault(model, {"usd": 0.0})
-            entry["usd"] = round(entry["usd"] + amount, 6)
+            exact_total += amount
+            entry = result["models"].setdefault(model, {"usd": 0.0, "usd_exact": "0.000000000"})
+            entry_total = _decimal(entry["usd_exact"]) + amount
+            entry["usd_exact"] = f"{entry_total:.9f}"
+            entry["usd"] = float(entry_total)
             for key in TOKEN_KEYS:
                 entry[key] = int(entry.get(key) or 0) + int(tokens.get(key) or 0)
-    result["usd"] = round(result["usd"], 6)
+    result["usd_exact"] = f"{exact_total:.9f}"
+    result["usd"] = float(exact_total)
     result["priced"] = bool(result["models"])
+    result["billing"] = (
+        "mixed" if result["api_requests"] and result["plan_requests"]
+        else "api" if result["api_requests"] else "plan" if result["plan_requests"] else "none"
+    )
     plan_usage = usage.get("plan_usage") if isinstance(usage.get("plan_usage"), dict) else {}
     if result["plan_requests"] and plan_usage:
         result["plan_usage_measured"] = bool(plan_usage.get("measured"))
@@ -160,19 +228,27 @@ def format_usd(amount: float) -> str:
     return f"${amount:,.2f}"
 
 
+def format_usd_exact(cost_or_amount) -> str:
+    """Nine decimals preserve the smallest supported per-token rate exactly."""
+    if isinstance(cost_or_amount, dict):
+        value = cost_or_amount.get("usd_exact", "0")
+    else:
+        value = cost_or_amount
+    return f"${_decimal(value):,.9f}"
+
+
 def describe_cost(usage: dict, default_model: str = "") -> str:
-    """One line for the desktop log and the phone timeline."""
+    """One exact line for the desktop log and the phone timeline."""
     cost = estimate_cost(usage, default_model)
-    parts = []
-    if cost["priced"]:
-        parts.append(f"≈ {format_usd(cost['usd'])}")
+    parts = [f"{format_usd_exact(cost)} API charge"]
     if cost["plan_requests"]:
+        plan_type = str(cost.get("plan_type") or "ChatGPT").strip()
+        label = f"ChatGPT {plan_type.title()} plan" if plan_type.lower() != "chatgpt" else "ChatGPT plan"
+        parts.append(f"{cost['plan_tokens']:,} tokens on your {label}")
         if cost.get("plan_usage_measured"):
             percent = float(cost.get("plan_usage_percent") or 0)
-            amount = f"approximately {percent:g}%" if percent > 0 else "less than 1%"
+            amount = f"{percent:g}%" if percent > 0 else "less than 1%"
             parts.append(f"{amount} of your ChatGPT plan this run")
-        else:
-            parts.append(f"{cost['plan_tokens']:,} tokens on your ChatGPT plan")
         if cost.get("plan_window_used_percent") is not None:
             parts.append(f"{float(cost['plan_window_used_percent']):g}% of the current window used")
     if cost["unpriced"]:

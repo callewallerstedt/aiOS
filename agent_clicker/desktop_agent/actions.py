@@ -130,6 +130,95 @@ def _to_screen(local_x: float, local_y: float, mon) -> tuple[int, int]:
     return int(round(mon.left + local_x)), int(round(mon.top + local_y))
 
 
+def _window_center_on_monitor(hwnd, mon) -> tuple[bool, str]:
+    """Move/resize a top-level window so it fits on `mon` (virtual coords)."""
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+    if not hwnd or not user32.IsWindow(hwnd):
+        return False, "no window"
+    if user32.IsIconic(hwnd):
+        user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+    rect = wintypes.RECT()
+    if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+        return False, "GetWindowRect failed"
+    width = max(320, int(rect.right - rect.left))
+    height = max(240, int(rect.bottom - rect.top))
+    max_w = max(320, int(mon.width) - 40)
+    max_h = max(240, int(mon.height) - 40)
+    width = min(width, max_w)
+    height = min(height, max_h)
+    left = int(mon.left + (int(mon.width) - width) // 2)
+    top = int(mon.top + (int(mon.height) - height) // 2)
+    SWP_NOZORDER = 0x0004
+    SWP_SHOWWINDOW = 0x0040
+    ok = bool(
+        user32.SetWindowPos(
+            hwnd, 0, left, top, width, height, SWP_NOZORDER | SWP_SHOWWINDOW
+        )
+    )
+    if not ok:
+        return False, "SetWindowPos failed"
+    user32.SetForegroundWindow(hwnd)
+    return True, f"moved hwnd={int(hwnd)} -> ({left},{top}) {width}x{height} on {getattr(mon, 'label', 'monitor')}"
+
+
+def _find_window_hwnd(title_substr: str = "") -> int:
+    """Foreground window, or first visible top-level match for title_substr."""
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+    wanted = (title_substr or "").strip().casefold()
+    if not wanted:
+        return int(user32.GetForegroundWindow() or 0)
+
+    best = 0
+    callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    def callback(hwnd, _lparam):
+        nonlocal best
+        if not user32.IsWindowVisible(hwnd):
+            return True
+        length = user32.GetWindowTextLengthW(hwnd)
+        if length <= 0:
+            return True
+        buf = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(hwnd, buf, length + 1)
+        if wanted in (buf.value or "").casefold():
+            best = int(hwnd)
+            return False
+        return True
+
+    user32.EnumWindows(callback_type(callback), 0)
+    return best
+
+
+def ensure_window_on_monitor(monitor, title_substr: str = "") -> tuple[bool, str]:
+    """Bring a window onto the controlled monitor if it is off to the side."""
+    hwnd = _find_window_hwnd(title_substr)
+    if not hwnd:
+        return False, "no matching window"
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+    rect = wintypes.RECT()
+    if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+        return False, "GetWindowRect failed"
+    cx = (int(rect.left) + int(rect.right)) // 2
+    cy = (int(rect.top) + int(rect.bottom)) // 2
+    on_monitor = (
+        int(monitor.left) <= cx < int(monitor.left) + int(monitor.width)
+        and int(monitor.top) <= cy < int(monitor.top) + int(monitor.height)
+    )
+    if on_monitor:
+        user32.SetForegroundWindow(hwnd)
+        return True, f"already on monitor (center {cx},{cy})"
+    return _window_center_on_monitor(hwnd, monitor)
+
+
 def execute(
     action: dict,
     monitor,                      # desktop_agent.screen.Monitor
@@ -444,6 +533,19 @@ def execute(
                 return ExecResult(action=a, ok=False,
                                   detail=f"write_file failed: {type(e).__name__}: {e}",
                                   elapsed_ms=int((time.time() - t0) * 1000))
+
+        elif t in ("ensure_on_monitor", "move_to_monitor", "bring_to_monitor"):
+            # Pull a window onto the controlled monitor when apps open elsewhere.
+            title = str(a.get("title") or a.get("window") or a.get("name") or "").strip()
+            _check_cancel(cancel_event)
+            ok, detail = ensure_window_on_monitor(monitor, title)
+            return ExecResult(
+                action=a,
+                ok=ok,
+                detail=detail,
+                output=detail,
+                elapsed_ms=int((time.time() - t0) * 1000),
+            )
 
         elif t == "noop" or t == "":
             d = "noop"

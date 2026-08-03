@@ -169,13 +169,13 @@
         <div class="run">
           <span id="runDot" class="run-dot"></span>
           <div>
-            <strong id="runTitle">Ready for a task</strong>
-            <small id="runMeta">Luna · idle</small>
+            <strong id="runTitle">aiOS Agent</strong>
+            <small id="runMeta">Ready</small>
           </div>
         </div>
         <div class="run-actions">
           <button id="historyBtn" class="iconbtn sm" type="button" aria-label="Previous runs"><svg class="ic"><use href="#i-history"/></svg></button>
-          <button id="filterBtn" class="ghostbtn" type="button">All</button>
+          <button id="filterBtn" class="ghostbtn hidden" type="button" tabindex="-1" aria-hidden="true">All</button>
           <button id="clearChatBtn" class="iconbtn sm" type="button" aria-label="New chat"><svg class="ic"><use href="#i-plus"/></svg></button>
           <button id="stopBtn" class="stopbtn hidden" type="button"><svg class="ic"><use href="#i-stop"/></svg>Stop</button>
         </div>
@@ -187,7 +187,7 @@
       <div id="timeline" class="timeline">
         <div class="timeline-empty">
           <svg class="ic"><use href="#i-spark"/></svg>
-          <p>Nothing yet. Ask your computer to do something.</p>
+          <p>Ask your aiOS agent anything.</p>
         </div>
       </div>
       <button id="jumpBtn" class="jump hidden" type="button"><svg class="ic"><use href="#i-arrow-down"/></svg>Jump to latest</button>
@@ -210,18 +210,14 @@
     </section>
     <div class="composer">
       <div id="attachTray" class="attach-tray hidden" aria-label="Attachments"></div>
-      <div class="remote-modes" role="group" aria-label="Choose how aiOS should respond">
-        <button class="remote-mode on" type="button" data-remote-mode="fast"><strong>Fast</strong><span>Agent</span></button>
-        <button class="remote-mode" type="button" data-remote-mode="think"><strong>Think</strong><span>Agent</span></button>
-        <button class="remote-mode" type="button" data-remote-mode="operator"><strong>Control</strong><span>PC</span></button>
-      </div>
-      <textarea id="promptInput" rows="1" maxlength="8000" placeholder="Ask your computer…"></textarea>
+      <textarea id="promptInput" rows="1" maxlength="8000" placeholder="Message your aiOS agent…"></textarea>
       <div class="composer-bar">
-        <button id="attachBtn" class="roundbtn attach" type="button" aria-label="Add photos or files"><svg class="ic"><use href="#i-plus"/></svg></button>
-        <button id="runSettingsBtn" class="pill run-settings-pill" type="button" aria-label="Choose run models"><svg class="ic"><use href="#i-sliders"/></svg><span id="runSettingsLabel">Luna · Plan Sol</span></button>
-        <button id="voiceReplyBtn" class="pill voice-reply" type="button" aria-pressed="true" aria-label="Toggle spoken agent replies"><span>Speak</span></button>
+        <button id="attachBtn" class="roundbtn attach hidden" type="button" tabindex="-1" aria-hidden="true" aria-label="Add photos or files"><svg class="ic"><use href="#i-plus"/></svg></button>
+        <button id="runSettingsBtn" class="pill run-settings-pill hidden" type="button" tabindex="-1" aria-hidden="true" aria-label="Choose run models"><svg class="ic"><use href="#i-sliders"/></svg><span id="runSettingsLabel">Luna · Plan Sol</span></button>
+        <button id="voiceReplyBtn" class="pill voice-reply hidden" type="button" tabindex="-1" aria-hidden="true" aria-label="Legacy spoken replies"><span>Speak</span></button>
+        <button id="voiceModeBtn" class="pill voice-mode-launch" type="button" aria-label="Start Voice Mode"><svg class="ic"><use href="#i-mic"/></svg><span>Voice Mode</span></button>
         <div class="composer-spacer"></div>
-        <button id="micBtn" class="roundbtn" type="button" aria-label="Record and transcribe on this PC"><svg class="ic"><use href="#i-mic"/></svg></button>
+        <button id="micBtn" class="roundbtn" type="button" aria-label="Transcribe a voice note"><svg class="ic"><use href="#i-mic"/></svg></button>
         <button id="sendBtn" class="roundbtn send" type="submit" aria-label="Send"><svg class="ic"><use href="#i-send"/></svg></button>
       </div>
       <input id="fileInput" class="file-input" type="file" multiple tabindex="-1" aria-hidden="true"
@@ -235,6 +231,20 @@
     </div>
   </form>
 </main>
+
+<section id="voiceMode" class="voice-mode hidden" role="dialog" aria-modal="true" aria-label="aiOS Voice Mode">
+  <audio id="voiceAudio" autoplay></audio>
+  <div class="voice-mode-top">
+    <div class="voice-mode-brand"><svg class="ic"><use href="#i-spark"/></svg><span>aiOS Voice</span></div>
+    <button id="voiceModeClose" class="iconbtn" type="button" aria-label="Close Voice Mode">×</button>
+  </div>
+  <div class="voice-stage">
+    <div id="voiceOrb" class="voice-orb connecting" aria-hidden="true"><i></i><i></i><i></i></div>
+    <strong id="voiceModeStatus">Connecting…</strong>
+    <p id="voiceModeCaption">Starting a live conversation with your aiOS agent.</p>
+  </div>
+  <button id="voiceModeEnd" class="voice-mode-end" type="button">End Voice Mode</button>
+</section>
 
 <!-- ───────────────────────── SHEETS ───────────────────────── -->
 <div id="backdrop" class="backdrop hidden"></div>

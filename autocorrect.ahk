@@ -1,7 +1,14 @@
 #Requires AutoHotkey v2.0
 #SingleInstance Force
+InstallKeybdHook
+#UseHook True
+
+; Visible tray identity so it's obvious the macropad layer is alive.
+A_IconTip := "aiOS Macropad"
 
 ^!+F12::Suspend
+; Fresh launch should never stay suspended from a previous session.
+Suspend(False)
 
 global InsertDownAt := 0
 global InsertHoldActive := false
@@ -9,14 +16,25 @@ global InsertLongFired := false
 global DiscordMutedByUs := false
 global WsaInited := false
 global VoiceHoldMs := 280
+global SeparateHoldToggleMs := 600   ; < this = toggle dictate; >= this = hold-to-talk
 global VoiceSettingsCheckedAt := 0
 global DiscordMuteEnabled := false
 global DiscordMuteExplicit := ""
 global DiscordMuteSendDelayMs := 35
-global VoiceHotkey := "Insert"          ; current hotkey name (AHK key syntax)
-global VoiceHotkeyRegistered := ""      ; what we actually registered last
-global VoiceHotkeyDown := ""            ; the "$<key>" string we registered
-global VoiceHotkeyUp := ""              ; the "$<key> up" string we registered
+global SeparateHotkeys := false
+global VoiceHotkey := "Insert"          ; dictation key (or shared key in combined mode)
+global AiosHotkey := "Insert"           ; open-aiOS key when SeparateHotkeys is true
+global VoiceHotkeyRegistered := ""      ; fingerprint of last registration
+global VoiceHotkeyDown := ""
+global VoiceHotkeyUp := ""
+global AiosHotkeyDown := ""
+global DictationActive := false
+global AiosToggleAt := 0
+global DictateDownAt := 0
+
+AiosLog(msg) {
+    try FileAppend(FormatTime(, "HH:mm:ss") "  " msg "`n", A_ScriptDir "\.aios-ahk-log.txt", "UTF-8")
+}
 
 AiosHeartbeat() {
     path := A_ScriptDir "\.aios-ahk-heartbeat"
@@ -24,77 +42,214 @@ AiosHeartbeat() {
     try FileAppend(A_NowUTC, path, "UTF-8")
 }
 
-VoiceHotkeyDownHandler(*) {
-    global InsertDownAt, InsertHoldActive, InsertLongFired
+; --- Combined mode: short tap opens aiOS, hold starts dictation ---
+
+CombinedHotkeyDown(*) {
+    global InsertHoldActive, InsertLongFired, VoiceHoldMs, VoiceHotkey
     if (InsertHoldActive) {
         return
     }
-    LoadVoiceConfig()
     InsertHoldActive := true
     InsertLongFired := false
-    InsertDownAt := A_TickCount
-    SetTimer(InsertHoldThreshold, -VoiceHoldMs)
-}
-
-VoiceHotkeyUpHandler(*) {
-    global InsertHoldActive, InsertLongFired
-    SetTimer(InsertHoldThreshold, 0)
-    if (!InsertHoldActive) {
-        return
-    }
-    InsertHoldActive := false
-    if (InsertLongFired) {
-        VoiceStopFast()
-        DiscordMuteStop()
-    } else {
+    timeoutSec := Max(0.15, Min(0.80, VoiceHoldMs / 1000.0))
+    if KeyWait(VoiceHotkey, "T" . timeoutSec) {
+        InsertHoldActive := false
         AiosToggleNow()
-    }
-}
-
-InsertHoldThreshold() {
-    global InsertHoldActive, InsertLongFired
-    if (!InsertHoldActive || InsertLongFired) {
         return
     }
     InsertLongFired := true
-    DiscordMuteStart()
     VoiceStartFast()
+    DiscordMuteStart(false)
+    KeyWait(VoiceHotkey)
+    VoiceStopFast()
+    DiscordMuteStop()
+    InsertHoldActive := false
+    InsertLongFired := false
 }
 
-RegisterVoiceHotkey(keyName) {
-    global VoiceHotkeyRegistered, VoiceHotkeyDown, VoiceHotkeyUp
-    if (keyName = "") {
-        keyName := "Insert"
-    }
-    if (VoiceHotkeyRegistered = keyName) {
+; --- Separate mode ---
+; Quick press (< 0.6s): start dictation, leave it on until next press (toggle).
+; Hold (>= 0.6s): hold-to-talk — stop as soon as the key is released.
+;
+; Macro Deck often only sends a short key pulse on press (logs showed 0ms hold).
+; For hold-to-talk you MUST also fire something on Button Released:
+;   - send the same dictate key again, OR
+;   - run voice_ptt_up.bat
+; Press action: dictate key or voice_ptt_down.bat
+
+SeparateDictationDown(*) {
+    global DictationActive, InsertHoldActive, VoiceHotkey, DictateDownAt, SeparateHoldToggleMs
+    ; Already dictating: stop only after threshold (ignore Macro Deck quick-release echo).
+    if (DictationActive) {
+        elapsed := A_TickCount - DictateDownAt
+        if (elapsed < SeparateHoldToggleMs) {
+            AiosLog("dictate ignore echo at " elapsed "ms via " VoiceHotkey)
+            return
+        }
+        AiosLog("dictate stop via " VoiceHotkey " after " elapsed "ms")
+        SendToVoice("ptt_down")
+        VoiceStopFast()
+        DiscordMuteStop()
+        DictationActive := false
+        InsertHoldActive := false
         return
     }
-    ; Tear down any previous registration cleanly.
+
+    if (InsertHoldActive) {
+        return
+    }
+
+    InsertHoldActive := true
+    DictationActive := true
+    DictateDownAt := A_TickCount
+    AiosLog("dictate start via " VoiceHotkey)
+    if !SendToVoice("ptt_down") {
+        VoiceStartFast()
+    }
+    SetTimer(DeferDiscordMuteStart, -1)
+}
+
+SeparateDictationUp(*) {
+    global DictationActive, InsertHoldActive, SeparateHoldToggleMs, DictateDownAt, VoiceHotkey
+    heldMs := A_TickCount - DictateDownAt
+    InsertHoldActive := false
+    if (!DictationActive) {
+        return
+    }
+    ; Tell the voice server (handles Macro Deck bats + real key-up holds).
+    SendToVoice("ptt_up")
+    if (heldMs >= SeparateHoldToggleMs) {
+        AiosLog("dictate hold-release stop after " heldMs "ms via " VoiceHotkey)
+        VoiceStopFast()
+        DiscordMuteStop()
+        DictationActive := false
+    } else {
+        AiosLog("dictate toggle-on (held " heldMs "ms) via " VoiceHotkey)
+    }
+}
+
+DeferDiscordMuteStart() {
+    DiscordMuteStart(false)
+}
+
+SeparateAiosDown(*) {
+    global AiosHotkey, AiosToggleAt
+    now := A_TickCount
+    if (now - AiosToggleAt < 220) {
+        return
+    }
+    AiosToggleAt := now
+    AiosLog("aios toggle via " AiosHotkey)
+    AiosToggleNow()
+}
+
+NormalizeVoiceHotkeyKey(keyName) {
+    keyName := Trim(keyName)
+    if (keyName = "") {
+        return "Insert"
+    }
+    lower := StrLower(keyName)
+    static aliases := Map(
+        "pageup", "PgUp", "pgup", "PgUp",
+        "pagedown", "PgDn", "pgdn", "PgDn",
+        "del", "Delete", "ins", "Insert",
+        "scrolllock", "ScrollLock",
+        "appskey", "AppsKey", "menu", "AppsKey", "apps", "AppsKey",
+        "mouse4", "XButton1", "mouse 4", "XButton1", "xbutton1", "XButton1",
+        "mouse5", "XButton2", "mouse 5", "XButton2", "xbutton2", "XButton2",
+    )
+    if aliases.Has(lower) {
+        return aliases[lower]
+    }
+    if RegExMatch(keyName, "i)^F(\d{1,2})$", &m) {
+        return "F" . m[1]
+    }
+    static known := Map(
+        "insert", "Insert", "home", "Home", "end", "End",
+        "delete", "Delete", "pause", "Pause",
+    )
+    if known.Has(lower) {
+        return known[lower]
+    }
+    return keyName
+}
+
+UnregisterAllVoiceHotkeys() {
+    global VoiceHotkeyDown, VoiceHotkeyUp, AiosHotkeyDown
     if (VoiceHotkeyDown != "") {
         try Hotkey VoiceHotkeyDown, "Off"
     }
     if (VoiceHotkeyUp != "") {
         try Hotkey VoiceHotkeyUp, "Off"
     }
-    newDown := "$" . keyName
-    newUp := "$" . keyName . " up"
+    if (AiosHotkeyDown != "") {
+        try Hotkey AiosHotkeyDown, "Off"
+    }
+    VoiceHotkeyDown := ""
+    VoiceHotkeyUp := ""
+    AiosHotkeyDown := ""
+}
+
+BindHotkey(name, callback) {
+    ; Prefer hook form ($). Fall back to plain name if that fails (some F13–F24 setups).
     try {
-        Hotkey newDown, VoiceHotkeyDownHandler
-        Hotkey newUp, VoiceHotkeyUpHandler
-        VoiceHotkeyRegistered := keyName
-        VoiceHotkeyDown := newDown
-        VoiceHotkeyUp := newUp
+        Hotkey "$" . name, callback, "On"
+        return "$" . name
+    } catch {
+    }
+    try {
+        Hotkey name, callback, "On"
+        return name
     } catch as err {
-        ; If the new key is invalid, fall back to Insert so the user can
-        ; always recover.
-        if (keyName != "Insert") {
-            RegisterVoiceHotkey("Insert")
+        AiosLog("FAILED to bind " name ": " err.Message)
+        return ""
+    }
+}
+
+RegisterHotkeys() {
+    global SeparateHotkeys, VoiceHotkey, AiosHotkey, VoiceHotkeyRegistered
+    global VoiceHotkeyDown, VoiceHotkeyUp, AiosHotkeyDown
+
+    voiceKey := NormalizeVoiceHotkeyKey(VoiceHotkey = "" ? "Insert" : VoiceHotkey)
+    aiosKey := NormalizeVoiceHotkeyKey(AiosHotkey = "" ? "Insert" : AiosHotkey)
+    VoiceHotkey := voiceKey
+    AiosHotkey := aiosKey
+
+    fingerprint := (SeparateHotkeys ? "sep|" : "comb|") . voiceKey . "|" . aiosKey . "|v4"
+    if (VoiceHotkeyRegistered = fingerprint) {
+        return
+    }
+
+    UnregisterAllVoiceHotkeys()
+    VoiceHotkeyRegistered := ""
+
+    ok := true
+    if (SeparateHotkeys) {
+        if (voiceKey = aiosKey) {
+            VoiceHotkeyDown := BindHotkey(voiceKey, CombinedHotkeyDown)
+            ok := (VoiceHotkeyDown != "")
+        } else {
+            VoiceHotkeyDown := BindHotkey(voiceKey, SeparateDictationDown)
+            VoiceHotkeyUp := BindHotkey(voiceKey . " up", SeparateDictationUp)
+            AiosHotkeyDown := BindHotkey(aiosKey, SeparateAiosDown)
+            ok := (VoiceHotkeyDown != "" && VoiceHotkeyUp != "" && AiosHotkeyDown != "")
         }
+    } else {
+        VoiceHotkeyDown := BindHotkey(voiceKey, CombinedHotkeyDown)
+        ok := (VoiceHotkeyDown != "")
+    }
+
+    if (ok) {
+        VoiceHotkeyRegistered := fingerprint
+        AiosLog("registered " fingerprint " down=" VoiceHotkeyDown " up=" VoiceHotkeyUp " aios=" AiosHotkeyDown)
+    } else {
+        AiosLog("registration incomplete for " fingerprint)
     }
 }
 
 LoadVoiceConfig() {
-    global VoiceHoldMs, VoiceSettingsCheckedAt, DiscordMuteEnabled, DiscordMuteExplicit, VoiceHotkey
+    global VoiceHoldMs, VoiceSettingsCheckedAt, DiscordMuteEnabled, DiscordMuteExplicit
+    global VoiceHotkey, AiosHotkey, SeparateHotkeys
     now := A_TickCount
     if (now - VoiceSettingsCheckedAt < 1500) {
         return
@@ -105,6 +260,8 @@ LoadVoiceConfig() {
     discordEnabled := false
     discordHotkey := ""
     voiceHotkey := "Insert"
+    aiosHotkey := "Insert"
+    separate := false
     if FileExist(path) {
         try {
             txt := FileRead(path, "UTF-8")
@@ -122,6 +279,21 @@ LoadVoiceConfig() {
             if RegExMatch(txt, '"voice_hotkey"\s*:\s*"([^"]*)"', &m) {
                 voiceHotkey := m[1]
             }
+            if RegExMatch(txt, '"aios_hotkey"\s*:\s*"([^"]*)"', &m) {
+                aiosHotkey := m[1]
+            }
+            if RegExMatch(txt, '"separate_hotkeys"\s*:\s*(true|false)', &m) {
+                separate := (m[1] = "true")
+            }
+            ; Optional override: when Macro Deck owns mute, set ahk_discord_mute false.
+            if RegExMatch(txt, '"ahk_discord_mute"\s*:\s*(true|false)', &m) {
+                if (m[1] = "false") {
+                    discordEnabled := false
+                }
+            } else if (separate) {
+                ; Separate-key mode is driven by Macro Deck TCP actions which mute once.
+                discordEnabled := false
+            }
         } catch {
         }
     }
@@ -134,8 +306,10 @@ LoadVoiceConfig() {
     VoiceHoldMs := holdMs
     DiscordMuteEnabled := discordEnabled
     DiscordMuteExplicit := HotkeyToExplicitSendSequence(discordHotkey)
-    VoiceHotkey := voiceHotkey = "" ? "Insert" : voiceHotkey
-    RegisterVoiceHotkey(VoiceHotkey)
+    VoiceHotkey := NormalizeVoiceHotkeyKey(voiceHotkey = "" ? "Insert" : voiceHotkey)
+    AiosHotkey := NormalizeVoiceHotkeyKey(aiosHotkey = "" ? "Insert" : aiosHotkey)
+    SeparateHotkeys := separate
+    RegisterHotkeys()
 }
 
 LoadDiscordMuteSettings() {
@@ -243,13 +417,16 @@ NormalizeHotkeyInput(hotkey) {
     return RegExReplace(hotkey, "\s+", "+")
 }
 
-DiscordMuteStart() {
+DiscordMuteStart(clearVoiceKey := true) {
     global DiscordMutedByUs, DiscordMuteEnabled, DiscordMuteExplicit
+    if (DiscordMutedByUs) {
+        return
+    }
     LoadDiscordMuteSettings()
     if (!DiscordMuteEnabled || DiscordMuteExplicit = "") {
         return
     }
-    SendDiscordHotkey(true)
+    SendDiscordHotkey(clearVoiceKey)
     DiscordMutedByUs := true
 }
 
@@ -266,6 +443,10 @@ DiscordMuteStop() {
 }
 
 AiosToggleNow() {
+    ; Fast path: talk to the already-running helper over TCP (same as voice).
+    if (SendToHelper("toggle")) {
+        return
+    }
     pythonw := A_ScriptDir "\.venv\Scripts\pythonw.exe"
     if !FileExist(pythonw) {
         pythonw := "C:\Python313\pythonw.exe"
@@ -276,9 +457,32 @@ AiosToggleNow() {
     Run('"' pythonw '" "' A_ScriptDir '\helper_overlay.py" --toggle', A_ScriptDir)
 }
 
-; Dedicated aiOS launcher requested for this desktop. Insert keeps its
-; existing tap-to-open / hold-to-dictate behavior.
-^Space::AiosToggleNow()
+SendToHelper(msg) {
+    if !EnsureWSA() {
+        return false
+    }
+    sock := DllCall("ws2_32\socket", "Int", 2, "Int", 1, "Int", 6, "UInt")
+    if (sock = -1 || sock = 0xFFFFFFFF) {
+        return false
+    }
+    addr := Buffer(16, 0)
+    NumPut("UShort", 2, addr, 0)
+    NumPut("UShort", DllCall("ws2_32\htons", "UShort", 48736, "UShort"), addr, 2)
+    NumPut("UInt", 0x0100007F, addr, 4)   ; 127.0.0.1
+    res := DllCall("ws2_32\connect", "Ptr", sock, "Ptr", addr.Ptr, "Int", 16, "Int")
+    if (res != 0) {
+        DllCall("ws2_32\closesocket", "Ptr", sock)
+        return false
+    }
+    size := StrPut(msg, "UTF-8")
+    payload := Buffer(size, 0)
+    StrPut(msg, payload, "UTF-8")
+    DllCall("ws2_32\send", "Ptr", sock, "Ptr", payload.Ptr, "Int", size - 1, "Int", 0, "Int")
+    DllCall("ws2_32\closesocket", "Ptr", sock)
+    return true
+}
+
+; Ctrl+Space is intentionally unbound here — Assetto Corsa uses it to reset VR view.
 
 ; --- fast TCP send to the voice server (no Python spawn) ---
 

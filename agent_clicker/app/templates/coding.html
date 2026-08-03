@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>aiOS CODE</title>
+<meta name="theme-color" content="#080a0b" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<link rel="manifest" href="/static/manifest.webmanifest" />
+<link rel="apple-touch-icon" href="/static/pwa/aios-icon-180.png" />
+<link rel="stylesheet" href="/static/coding.css" />
+</head>
+<body>
+<main class="code-shell">
+  <header class="topbar">
+    <a class="brand" href="/phone" aria-label="Back to aiOS"><span class="brand-mark">ai</span><span>CODE</span></a>
+    <div id="provider-health" class="provider-health" aria-live="polite"></div>
+    <button id="refresh" class="icon-btn" type="button" title="Refresh capabilities">↻</button>
+    <button id="new-job" class="primary compact" type="button">+ New job</button>
+  </header>
+
+  <section class="summary" aria-label="CODE overview">
+    <div><strong id="count-active">0</strong><span>active</span></div>
+    <div><strong id="count-waiting">0</strong><span>need you</span></div>
+    <div><strong id="count-done">0</strong><span>finished</span></div>
+    <p id="overview-copy">Codex, Claude, and Cursor projects in one place.</p>
+  </section>
+
+  <div class="workspace">
+    <aside class="rail">
+      <div class="rail-head">
+        <span>SESSIONS</span>
+        <select id="filter" aria-label="Filter sessions">
+          <option value="all">All</option>
+          <option value="active">Active</option>
+          <option value="waiting_user">Needs input</option>
+          <option value="completed">Finished</option>
+          <option value="failed">Failed</option>
+        </select>
+      </div>
+      <div id="job-list" class="job-list"></div>
+    </aside>
+
+    <section id="empty-view" class="empty-view">
+      <div class="orb">&lt;/&gt;</div>
+      <h1>Build through conversation</h1>
+      <p>Choose the coding agent and its exact intelligence. aiOS keeps the conversation, progress, questions, and outputs together.</p>
+      <button id="empty-new" class="primary" type="button">Create a CODE job</button>
+    </section>
+
+    <section id="job-view" class="job-view" hidden>
+      <header class="job-head">
+        <div class="job-identity">
+          <div class="eyebrow"><span id="job-provider-dot" class="provider-dot"></span><span id="job-provider">CODE</span><span id="job-status" class="status-pill">queued</span></div>
+          <h1 id="job-title">Session</h1>
+          <div id="job-meta" class="job-meta"></div>
+        </div>
+        <div class="head-actions">
+          <button id="speak" class="secondary" type="button" title="Speak milestone and result notifications">Voice on</button>
+          <button id="stop" class="secondary danger" type="button">Stop</button>
+          <button id="delete" class="icon-btn danger" type="button" title="Delete session">×</button>
+        </div>
+      </header>
+      <div id="run-strip" class="run-strip" data-state="idle" aria-live="polite">
+        <span class="run-orb" aria-hidden="true"><i></i></span>
+        <div class="run-copy">
+          <strong id="run-label">Ready</strong>
+          <span id="run-detail">Waiting for the next instruction</span>
+        </div>
+        <div class="run-facts">
+          <span id="activity-summary">No activity yet</span>
+          <time id="run-elapsed">0s</time>
+        </div>
+      </div>
+      <div id="timeline" class="timeline" aria-live="polite"></div>
+      <footer class="composer">
+        <div id="pending-question" class="pending-question" hidden></div>
+        <div id="attachment-list" class="attachment-list"></div>
+        <div class="compose-row">
+          <label class="attach-button" title="Attach files or images">＋<input id="followup-files" type="file" multiple /></label>
+          <textarea id="message" rows="1" placeholder="Continue this same session…"></textarea>
+          <label class="urgent-toggle"><input id="urgent" type="checkbox" /><span>Urgent</span></label>
+          <button id="send" class="primary compact" type="button">Send</button>
+        </div>
+        <div class="composer-note">Normal follow-ups queue. Urgent instructions steer Codex immediately and interrupt other active agents.</div>
+      </footer>
+    </section>
+  </div>
+</main>
+
+<dialog id="create-dialog" class="create-dialog">
+  <form id="create-form" method="dialog">
+    <div class="dialog-head"><div><div class="eyebrow">NEW CODE JOB</div><h2>What should it build?</h2></div><button id="close-create" class="icon-btn" type="button">×</button></div>
+    <div class="provider-picker" id="provider-picker">
+      <label class="provider-card codex"><input type="radio" name="provider" value="codex" checked /><b>Codex</b><span>OpenAI coding agent</span><i data-health="codex">checking</i></label>
+      <label class="provider-card claude"><input type="radio" name="provider" value="claude" /><b>Claude</b><span>Anthropic Claude Code</span><i data-health="claude">checking</i></label>
+      <label class="provider-card cursor"><input type="radio" name="provider" value="cursor" /><b>Cursor</b><span>Cursor Agent in WSL</span><i data-health="cursor">checking</i></label>
+    </div>
+    <div class="form-grid">
+      <label class="wide">Project folder<input id="cwd" type="text" value="C:\aiOS" spellcheck="false" required /></label>
+      <label>Model<select id="model" required></select></label>
+      <label>Intelligence<select id="reasoning" required></select></label>
+      <label class="switch-row">Fast mode<input id="fast" type="checkbox" /><span class="switch"></span></label>
+      <label class="wide">Project brief<textarea id="brief" rows="7" placeholder="Describe the outcome, constraints, acceptance checks, and whether to commit, push, or deploy." required></textarea></label>
+      <label class="wide">Links (one per line)<textarea id="links" rows="2" placeholder="https://…"></textarea></label>
+      <label class="file-drop wide">Attach files or images<input id="create-files" type="file" multiple /><span id="create-file-label">Choose files</span></label>
+    </div>
+    <div id="create-error" class="form-error" hidden></div>
+    <div class="dialog-actions"><button id="setup-agent" class="secondary" type="button" hidden>Sign in to agent</button><button id="cancel-create" class="secondary" type="button">Cancel</button><button id="launch" class="primary" type="submit">Launch agent</button></div>
+  </form>
+</dialog>
+
+<script src="/static/coding.js"></script>
+</body>
+</html>

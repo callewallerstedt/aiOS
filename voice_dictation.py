@@ -196,6 +196,9 @@ AGENT_LINGER_MS = 25000
 # The agent transcript grows upward from the fixed mic pill. Once this viewport
 # is full, older turns roll off the top so the newest answer remains visible.
 COMPOSE_MAX_HEIGHT = 960
+BUBBLE_PAD_X = 12
+BUBBLE_PAD_Y = 9
+BUBBLE_MIN_WIDTH = 52
 CONFIG_PATH = Path(__file__).resolve().parent / "helper_config.json"
 LOG_PATH = Path(__file__).resolve().parent / "voice-err.log"
 TRANSCRIPT_LOG_PATH = Path(__file__).resolve().parent / "voice-transcripts.jsonl"
@@ -212,6 +215,7 @@ WS_EX_LAYERED = 0x00080000
 WS_EX_TRANSPARENT = 0x00000020
 WS_EX_TOOLWINDOW = 0x00000080
 WS_EX_NOACTIVATE = 0x08000000
+WDA_NONE = 0x00000000
 WDA_MONITOR = 0x00000001
 WDA_EXCLUDEFROMCAPTURE = 0x00000011
 LWA_COLORKEY = 0x00000001
@@ -688,7 +692,7 @@ class MicOverlay:
     def show(self):
         if self._visible:
             self.root.lift()
-            self._exclude_from_capture()
+            self._allow_normal_capture()
             return
         self._place_bottom_center()
         try:
@@ -700,14 +704,14 @@ class MicOverlay:
             self.root.attributes("-topmost", True)
             self._apply_transparency()
             self._apply_window_shape()
-            self._exclude_from_capture()
+            self._allow_normal_capture()
             self._force_topmost()
             self.root.update()
         except tk.TclError:
             pass
         self._visible = True
         self._install_clickthrough()
-        self._exclude_from_capture()
+        self._allow_normal_capture()
         stderr_write(f"[overlay] shown at geometry {self.root.geometry()}\n")
         self._animate()
 
@@ -867,8 +871,8 @@ class MicOverlay:
                 out.append(hwnd)
         return out
 
-    def _exclude_from_capture(self):
-        """Keep the dictation/agent HUD out of OPERATOR desktop captures."""
+    def _allow_normal_capture(self):
+        """Keep the voice HUD visible to screenshots and screen sharing."""
         if not sys.platform.startswith("win"):
             self._capture_exclusion_ok = False
             return False
@@ -876,11 +880,9 @@ class MicOverlay:
             self.root.update_idletasks()
             hwnd = self._overlay_hwnd()
             user32 = ctypes.windll.user32
-            excluded = bool(user32.SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE))
-            if not excluded:
-                excluded = bool(user32.SetWindowDisplayAffinity(hwnd, WDA_MONITOR))
-            self._capture_exclusion_ok = excluded
-            return excluded
+            visible = bool(user32.SetWindowDisplayAffinity(hwnd, WDA_NONE))
+            self._capture_exclusion_ok = False
+            return visible
         except (AttributeError, OSError, tk.TclError, TypeError, ValueError):
             self._capture_exclusion_ok = False
             return False
@@ -1057,7 +1059,7 @@ class MicOverlay:
                 self.root.geometry(f"{width}x{height}+{x}+{y}")
             except tk.TclError:
                 pass
-            self._exclude_from_capture()
+            self._allow_normal_capture()
 
     def _apply_window_shape(self):
         """Minecraft keeps a round region; dictation uses color-key only.
@@ -1194,11 +1196,20 @@ class MicOverlay:
         for block in blocks:
             if block.get("kind") != "bubble":
                 continue
-            lines = self._wrap_lines(block["raw"], block["font"], min(max_bubble, block["max_w"]), block["limit"])
+            bubble_w = min(max_bubble, block["max_w"])
+            text_avail = max(1, bubble_w - BUBBLE_PAD_X * 2)
+            lines = self._wrap_lines(block["raw"], block["font"], text_avail, block["limit"])
             block["lines"] = lines
             text_w = max((block["font"].measure(line) for line in lines), default=40)
-            block["bubble_w"] = min(max_bubble, max(48, text_w + 20))
-            block["height"] = len(lines) * block["line_height"] + 14 + block["gap_after"]
+            block["bubble_w"] = min(
+                max_bubble,
+                max(BUBBLE_MIN_WIDTH, text_w + BUBBLE_PAD_X * 2),
+            )
+            block["height"] = (
+                len(lines) * block["line_height"]
+                + BUBBLE_PAD_Y * 2
+                + block["gap_after"]
+            )
 
         if not blocks:
             # Nothing to say yet — no empty box floating over the pill.
@@ -1260,7 +1271,7 @@ class MicOverlay:
         raw = prefix + str(text or "")
         # Provisional width; finalized in _compose_build against the panel.
         max_w = self.compose_width - 72
-        lines = self._wrap_lines(raw, font, max_w, limit)
+        lines = self._wrap_lines(raw, font, max_w - BUBBLE_PAD_X * 2, limit)
         line_height = font.metrics("linespace") + 3
         text_w = max((font.measure(line) for line in lines), default=40)
         align = "right" if side == "user" else "left"
@@ -1276,8 +1287,8 @@ class MicOverlay:
             "gap_after": gap_after,
             "limit": limit,
             "max_w": max_w,
-            "bubble_w": min(max_w, max(48, text_w + 20)),
-            "height": len(lines) * line_height + 14 + gap_after,
+            "bubble_w": min(max_w, max(BUBBLE_MIN_WIDTH, text_w + BUBBLE_PAD_X * 2)),
+            "height": len(lines) * line_height + BUBBLE_PAD_Y * 2 + gap_after,
         }
 
     def _chat_block(self, label, text, font, color, gap_after, limit=4, prefix="", gap_before=0):
@@ -1313,9 +1324,16 @@ class MicOverlay:
             elif kind == "bubble":
                 _, x, y, bw, bh, bg, lines, fill, font, line_height = op
                 self._round_rect(x, y, x + bw, y + bh, 12, fill=bg, outline="")
-                ty = y + 7
+                ty = y + BUBBLE_PAD_Y
                 for line in lines:
-                    self.canvas.create_text(x + 10, ty, text=line, fill=fill, font=font, anchor="nw")
+                    self.canvas.create_text(
+                        x + BUBBLE_PAD_X,
+                        ty,
+                        text=line,
+                        fill=fill,
+                        font=font,
+                        anchor="nw",
+                    )
                     ty += line_height
             elif kind == "chip":
                 _, x, y, text, color = op
@@ -1407,20 +1425,44 @@ class MicOverlay:
         words = str(text or "").split()
         if not words:
             return []
-        lines, current, truncated = [], words[0], False
-        for word in words[1:]:
-            trial = current + " " + word
+        avail = max(1, int(avail))
+        lines = []
+        current = ""
+
+        def fitting_prefix(value):
+            """Largest non-empty prefix that fits the available pixel width."""
+            low, high = 1, len(value)
+            while low < high:
+                middle = (low + high + 1) // 2
+                if font.measure(value[:middle]) <= avail:
+                    low = middle
+                else:
+                    high = middle - 1
+            return max(1, low)
+
+        for word in words:
+            trial = f"{current} {word}" if current else word
             if font.measure(trial) <= avail:
                 current = trial
-            else:
+                continue
+            if current:
                 lines.append(current)
-                current = word
-                if len(lines) == max_lines:
-                    truncated = True  # words are still left over
+                current = ""
+            while font.measure(word) > avail:
+                cut = fitting_prefix(word)
+                lines.append(word[:cut])
+                word = word[cut:]
+                if max_lines is not None and len(lines) > max_lines:
                     break
-        if not truncated:
+            if max_lines is not None and len(lines) > max_lines:
+                break
+            current = word
+        if current:
             lines.append(current)
-        if truncated or font.measure(lines[-1]) > avail:
+
+        truncated = max_lines is not None and len(lines) > max_lines
+        if truncated:
+            lines = lines[:max_lines]
             tail = lines[-1]
             while tail and font.measure(tail + "…") > avail:
                 tail = tail[:-1]
@@ -1533,6 +1575,13 @@ class Dictation:
         self.model_lock = threading.Lock()
         self._loaded_model_name = None
         self._loaded_device = None
+        self._loaded_compute_type = None
+        self._model_loading = False
+        self._model_loading_name = ""
+        self._preload_lock = threading.Lock()
+        self._preload_thread = None
+        self._preload_requested = False
+        self._preload_warm_agent = False
         self._session_language = None
         # Language guesses that were not confident enough to lock on their own.
         self._language_votes = {}
@@ -1620,7 +1669,7 @@ class Dictation:
         if self.active:
             self.overlay.set_status(message)
 
-    def reload_settings(self):
+    def reload_settings(self, preload_model=False):
         self.settings = load_voice_dictation_settings()
         env_model = os.environ.get("VOICE_WHISPER_MODEL", "").strip()
         env_device = os.environ.get("VOICE_WHISPER_DEVICE", "").strip()
@@ -1633,9 +1682,16 @@ class Dictation:
             self.settings["compute_type"] = env_compute
         model_name = self.settings["whisper_model"]
         device = self._whisper_device()
+        compute_type = self._whisper_compute_type()
+        model_changed = self.model is None or (
+            getattr(self, "_loaded_model_name", None) != model_name
+            or getattr(self, "_loaded_device", None) != device
+            or getattr(self, "_loaded_compute_type", None) != compute_type
+        )
         if self.model is not None and (
             getattr(self, "_loaded_model_name", None) != model_name
             or getattr(self, "_loaded_device", None) != device
+            or getattr(self, "_loaded_compute_type", None) != compute_type
         ):
             self.model = None
         try:
@@ -1643,6 +1699,9 @@ class Dictation:
         except Exception:
             pass
         self._configure_agent_tts()
+        if preload_model and model_changed:
+            log_event(f"scheduling whisper preload model={model_name}")
+            self.preload_model_async()
 
     def _configure_agent_tts(self):
         enabled = bool(self.settings.get("agent_tts_enabled", True))
@@ -1759,14 +1818,81 @@ class Dictation:
             model_name = self.settings["whisper_model"]
             device = self._whisper_device()
             compute_type = self._whisper_compute_type()
-            self.ui(self.overlay.set_status, "loading model...")
+            self._model_loading = True
+            self._model_loading_name = model_name
+            self.ui(self.overlay.set_status, f"loading {model_name}...")
             log_event(f"loading whisper model={model_name} device={device} compute={compute_type}")
-            load_whisper_dependency()
-            self.model = WhisperModel(model_name, device=device, compute_type=compute_type)
-            self._loaded_model_name = model_name
-            self._loaded_device = device
-            log_event("whisper model ready")
-            self.ui(self._set_status_if_active, "")
+            try:
+                load_whisper_dependency()
+                self.model = WhisperModel(model_name, device=device, compute_type=compute_type)
+                self._loaded_model_name = model_name
+                self._loaded_device = device
+                self._loaded_compute_type = compute_type
+                log_event("whisper model ready")
+            finally:
+                self._model_loading = False
+                self._model_loading_name = ""
+                self.ui(self._set_status_if_active, "")
+
+    def preload_model_async(self, *, warm_agent=False):
+        """Coalesce model-change preloads without blocking the settings UI."""
+        if os.environ.get("VOICE_PRELOAD", "1") == "0":
+            return
+        with self._preload_lock:
+            self._preload_requested = True
+            self._preload_warm_agent = self._preload_warm_agent or bool(warm_agent)
+            if self._preload_thread is not None and self._preload_thread.is_alive():
+                return
+
+            def runner():
+                while True:
+                    with self._preload_lock:
+                        run_agent_warmup = self._preload_warm_agent
+                        self._preload_requested = False
+                        self._preload_warm_agent = False
+                    try:
+                        if run_agent_warmup:
+                            self.warmup()
+                        else:
+                            self._warm_whisper()
+                    except Exception as exc:
+                        log_event(f"whisper preload failed: {exc}")
+                    with self._preload_lock:
+                        if self._preload_requested:
+                            continue
+                        self._preload_thread = None
+                        return
+
+            self._preload_thread = threading.Thread(
+                target=runner,
+                daemon=True,
+                name="aios-whisper-preload",
+            )
+            self._preload_thread.start()
+
+    def _warm_whisper(self):
+        """Load and exercise Whisper so the next press can transcribe at once."""
+        self.ensure_model()
+        self._ensure_pipeline()
+        # Keep a local reference: a settings reload may replace self.model while
+        # this old checkpoint is completing its harmless silent warm-up.
+        model = self.model
+        try:
+            silence = np.zeros(int(SAMPLE_RATE * 0.4), dtype=np.float32)
+            segments, _info = model.transcribe(
+                silence,
+                language="en",
+                beam_size=1,
+                best_of=1,
+                temperature=0,
+                vad_filter=False,
+                without_timestamps=True,
+            )
+            # Force engine work even if VAD would skip.
+            _ = "".join(seg.text for seg in segments)
+            log_event("whisper warmup complete")
+        except Exception as exc:
+            log_event(f"whisper warmup skipped: {exc}")
 
     def warmup(self):
         """Warm agent client + Whisper so the first real turn isn't cold."""
@@ -1783,24 +1909,7 @@ class Dictation:
             log_event("agent client warmup complete")
         except Exception as exc:
             log_event(f"agent warmup skipped: {exc}")
-        self.ensure_model()
-        self._ensure_pipeline()
-        try:
-            silence = np.zeros(int(SAMPLE_RATE * 0.4), dtype=np.float32)
-            segments, _info = self.model.transcribe(
-                silence,
-                language="en",
-                beam_size=1,
-                best_of=1,
-                temperature=0,
-                vad_filter=False,
-                without_timestamps=True,
-            )
-            # Force engine work even if VAD would skip.
-            _ = "".join(seg.text for seg in segments)
-            log_event("whisper warmup complete")
-        except Exception as exc:
-            log_event(f"whisper warmup skipped: {exc}")
+        self._warm_whisper()
 
     def _audio_callback(self, indata, frames, time_info, status):
         if status:
@@ -1986,6 +2095,10 @@ class Dictation:
         try:
             self.reload_settings()
             self._ensure_pipeline()
+            if self._model_loading:
+                self.overlay.set_status(
+                    f"loading {self._model_loading_name or 'speech model'}..."
+                )
         except Exception as exc:
             log_event(f"microphone stream failed: {exc}")
             self.active = False
@@ -2356,9 +2469,10 @@ class Dictation:
                 {"tool": str(payload.get("name") or ""), "ok": bool(payload.get("ok", True))},
             )
         if kind == "tool":
-            text = payload if isinstance(payload, str) else str((payload or {}).get("label") or "")
-            if text:
-                self._ui_if_current(turn, self.overlay.push_tool, text)
+            # Legacy notification emitted immediately before tool_start.  The
+            # completed tool_done event below owns the durable timeline row;
+            # pushing both made every tool appear twice in the voice overlay.
+            return
         elif kind == "status":
             text = payload if isinstance(payload, str) else str((payload or {}).get("text") or "thinking")
             self._ui_if_current(turn, self.overlay.set_compose_note, f"{text}...")
@@ -3038,7 +3152,7 @@ def run_command_server(dictation):
                 dictation.overlay.root.after(0, dictation.stop)
             elif data == "reload":
                 log_event("voice command: reload")
-                dictation.overlay.root.after(0, dictation.reload_settings)
+                dictation.overlay.root.after(0, lambda: dictation.reload_settings(preload_model=True))
             elif data == "quit":
                 log_event("voice command: quit")
                 dictation.overlay.root.after(0, dictation.stop)
@@ -3104,12 +3218,7 @@ def main():
 
     # Pre-load model + warm mic/CUDA so the first real PTT is instant
     if os.environ.get("VOICE_PRELOAD", "1") != "0":
-        def _preload():
-            try:
-                dictation.warmup()
-            except Exception as exc:
-                stderr_write(f"[preload] {exc}\n")
-        threading.Thread(target=_preload, daemon=True).start()
+        dictation.preload_model_async(warm_agent=True)
 
     def quit_app():
         try:

@@ -1,3 +1,4 @@
 @echo off
-set OLLAMA_MODELS=D:\AI\OllamaModels
-python "%~dp0local_ai_chat.py"
+set OLLAMA_MODELS=C:\AI\OllamaModels
+py -3 "%~dp0local_ai_chat.py"
+if errorlevel 1 python "%~dp0local_ai_chat.py"

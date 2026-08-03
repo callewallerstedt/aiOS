@@ -2,9 +2,18 @@
 from __future__ import annotations
 import ctypes
 from ctypes import wintypes
+from contextlib import contextmanager
 from dataclasses import dataclass
+import threading
+import time
 import mss
 from PIL import Image
+
+
+WDA_NONE = 0x00000000
+WDA_MONITOR = 0x00000001
+WDA_EXCLUDEFROMCAPTURE = 0x00000011
+_CAPTURE_AFFINITY_LOCK = threading.RLock()
 
 
 @dataclass
@@ -115,6 +124,78 @@ def sys_platform_windows() -> bool:
     return sys.platform.startswith("win")
 
 
+def _current_process_top_level_windows() -> list[int]:
+    """Return top-level HWNDs owned by this process."""
+    if not sys_platform_windows():
+        return []
+    user32 = ctypes.windll.user32
+    process_id = ctypes.windll.kernel32.GetCurrentProcessId()
+    windows: list[int] = []
+    callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    def callback(hwnd, _lparam):
+        owner_pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner_pid))
+        if owner_pid.value == process_id:
+            windows.append(int(hwnd))
+        return True
+
+    callback_ref = callback_type(callback)
+    user32.EnumWindows(callback_ref, 0)
+    return windows
+
+
+def show_current_process_windows_in_normal_capture() -> bool:
+    """Remove persistent capture protection from this process's windows."""
+    if not sys_platform_windows():
+        return False
+    user32 = ctypes.windll.user32
+    changed = False
+    for hwnd in _current_process_top_level_windows():
+        try:
+            changed = bool(user32.SetWindowDisplayAffinity(hwnd, WDA_NONE)) or changed
+        except (AttributeError, OSError, ValueError):
+            pass
+    return changed
+
+
+@contextmanager
+def current_process_windows_hidden_from_agent_capture(settle_seconds: float = 0.025):
+    """Temporarily exclude this process's UI from an agent-only screenshot.
+
+    The affinity is restored immediately after capture, so ordinary screenshots
+    and screen-sharing software continue to see the UI at all other times.
+    """
+    if not sys_platform_windows():
+        yield False
+        return
+    user32 = ctypes.windll.user32
+    with _CAPTURE_AFFINITY_LOCK:
+        previous: list[tuple[int, int]] = []
+        for hwnd in _current_process_top_level_windows():
+            try:
+                old = wintypes.DWORD(WDA_NONE)
+                user32.GetWindowDisplayAffinity(hwnd, ctypes.byref(old))
+                excluded = bool(user32.SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE))
+                if not excluded:
+                    excluded = bool(user32.SetWindowDisplayAffinity(hwnd, WDA_MONITOR))
+                if excluded:
+                    previous.append((hwnd, int(old.value)))
+            except (AttributeError, OSError, ValueError):
+                continue
+        if previous and settle_seconds > 0:
+            time.sleep(float(settle_seconds))
+        try:
+            yield bool(previous)
+        finally:
+            for hwnd, affinity in previous:
+                try:
+                    if user32.IsWindow(hwnd):
+                        user32.SetWindowDisplayAffinity(hwnd, affinity)
+                except (AttributeError, OSError, ValueError):
+                    pass
+
+
 def capture(mon: Monitor) -> Image.Image:
     try:
         with mss.mss() as sct:
@@ -122,3 +203,9 @@ def capture(mon: Monitor) -> Image.Image:
             return Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
     except Exception:
         return capture_region(mon.left, mon.top, mon.width, mon.height)
+
+
+def capture_for_agent(mon: Monitor) -> Image.Image:
+    """Capture a monitor while excluding only this agent process's UI."""
+    with current_process_windows_hidden_from_agent_capture():
+        return capture(mon)

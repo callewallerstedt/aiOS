@@ -46,9 +46,32 @@ def _system_info_block(monitor=None, shell_enabled: bool = False) -> str:
         lang = "?"
     screen = ""
     if monitor is not None:
-        screen = (f"Screen: {getattr(monitor, 'width', '?')}x{getattr(monitor, 'height', '?')} "
+        screen = (f"Controlled screen: {getattr(monitor, 'width', '?')}x{getattr(monitor, 'height', '?')} "
                   f"at ({getattr(monitor, 'left', 0)},{getattr(monitor, 'top', 0)}) "
-                  f"— {getattr(monitor, 'label', 'display')}\n")
+                  f"— {getattr(monitor, 'label', 'display')}\n"
+                  "You ONLY see and click this monitor. Apps may open on another "
+                  "display; if a launched window is missing from the screenshot, "
+                  "use ensure_on_monitor before continuing.\n")
+    other = ""
+    try:
+        from .screen import list_monitors
+        others = [
+            m for m in list_monitors()
+            if getattr(m, "index", 0) != 0
+            and (
+                monitor is None
+                or getattr(m, "left", None) != getattr(monitor, "left", None)
+                or getattr(m, "top", None) != getattr(monitor, "top", None)
+            )
+        ]
+        if others:
+            bits = [
+                f"{m.label} @ ({m.left},{m.top}) {m.width}x{m.height}"
+                for m in others
+            ]
+            other = "Other monitors: " + "; ".join(bits) + "\n"
+    except Exception:
+        other = ""
     return (
         "--- SYSTEM INFO ---\n"
         f"OS: {platform.system()} {platform.release()} ({platform.version()})\n"
@@ -56,6 +79,7 @@ def _system_info_block(monitor=None, shell_enabled: bool = False) -> str:
         f"User: {user}@{host}\n"
         f"Locale: {lang}\n"
         + screen
+        + other
         + f"PowerShell available: {'yes' if shell_enabled else 'no'}\n"
         + f"{_now_block()}\n"
         "Anything relative — today, tomorrow, this Friday, next month, "
@@ -66,7 +90,7 @@ def _system_info_block(monitor=None, shell_enabled: bool = False) -> str:
 from agent.config import MODEL as DEFAULT_MODEL
 from .prompts import SYSTEM_PROMPT
 from .progress import LoopWatch, action_signature, checklist_block, frame_fingerprint, parse_plan
-from .screen import Monitor, capture
+from .screen import Monitor, capture_for_agent as capture
 from .actions import execute, ExecResult, any_button_held, any_key_held, release_all
 
 
@@ -280,6 +304,8 @@ class AgentLoop:
     """
 
     def __init__(self, on_event: Callable[[dict], None]):
+        self._event_sink = on_event
+        self._active_event_wrapper = None
         self.on_event = on_event
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
@@ -389,6 +415,11 @@ class AgentLoop:
         """
         if self.is_running():
             raise RuntimeError("loop already running")
+        # Some embedders replace the public callback between construction and
+        # start. Preserve that supported pattern while never adopting a stale
+        # wrapper left by an earlier run.
+        if self.on_event is not self._active_event_wrapper:
+            self._event_sink = self.on_event
         self._stop.clear()
         self._pause.set()
         # Per-run state — without this a second run would be born "already
@@ -573,10 +604,13 @@ class AgentLoop:
             return d
 
         # Wrap on_event so every event also lands in transcript.jsonl
-        orig_on_event = self.on_event
+        # Always wrap the permanent UI sink, not the previous run's wrapper.
+        # Re-wrapping a stale closure caused every event after run one to be
+        # treated as superseded, leaving follow-up HUDs and waiters blank.
+        orig_on_event = self._event_sink
         usage_total = {
             "requests": 0, "input_tokens": 0, "output_tokens": 0,
-            "cached_input_tokens": 0, "total_tokens": 0,
+            "cached_input_tokens": 0, "cache_write_input_tokens": 0, "total_tokens": 0,
             "backend": backend, "models": {},
         }
         initial_plan_usage = {}
@@ -597,7 +631,12 @@ class AgentLoop:
                 "measured": False,
             }
 
-        _COUNTERS = ("requests", "input_tokens", "output_tokens", "cached_input_tokens", "total_tokens")
+        _COUNTERS = (
+            "requests", "input_tokens", "output_tokens", "cached_input_tokens",
+            "cache_write_input_tokens", "total_tokens", "long_context_requests",
+            "long_context_input_tokens", "long_context_output_tokens",
+            "long_context_cached_input_tokens", "long_context_cache_write_input_tokens",
+        )
 
         def _accumulate(into: dict, item: dict):
             for key in _COUNTERS:
@@ -658,6 +697,7 @@ class AgentLoop:
             self._last_event_at = time.monotonic()
             _write_event(ev)
             orig_on_event(ev)
+        self._active_event_wrapper = _emit
         self.on_event = _emit  # type: ignore
 
         def _stall_watch():
@@ -1195,6 +1235,9 @@ class AgentLoop:
             self.on_event({"type": "log", "msg": f"FATAL: {e}\n{traceback.format_exc()}"})
             self.on_event({"type": "done", "ok": False, "message": f"fatal: {e}", "steps": 0})
         finally:
+            if self.on_event is _emit:
+                self.on_event = self._event_sink
+                self._active_event_wrapper = None
             # Finalize debug run: update meta.json with end status, close transcript.
             try:
                 if run_dir:

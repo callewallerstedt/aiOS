@@ -86,6 +86,12 @@ STARTUP_FRAME_DIR = BASE_DIR / "assets" / "startup" / "aios-logo-reveal-frames"
 HELPER_HEARTBEAT_PATH = BASE_DIR / ".aios-helper-heartbeat"
 APP_ICON_PATH = BASE_DIR / "assets" / "aios-logo.ico"
 TRAY_ICON_PATH = BASE_DIR / "assets" / "rectangle-logo.ico"
+CODE_PROVIDER_ICON_DIR = BASE_DIR / "assets" / "providers"
+CODE_PROVIDER_CHOICES = (
+    ("codex", "chatgpt.png", "ChatGPT Codex"),
+    ("claude", "claude.png", "Claude"),
+    ("cursor", "cursor.png", "Cursor"),
+)
 APP_USER_MODEL_ID = "aiOS.Desktop.Helper"
 APP_MUTEX_NAME = "Local\\aiOS.Desktop.Helper.Singleton"
 APP_MUTEX_HANDLE = None
@@ -106,6 +112,7 @@ HWND_TOPMOST = -1
 SWP_NOACTIVATE = 0x0010
 SWP_SHOWWINDOW = 0x0040
 LWA_ALPHA = 0x00000002
+WDA_NONE = 0x00000000
 WDA_MONITOR = 0x00000001
 WDA_EXCLUDEFROMCAPTURE = 0x00000011
 ULW_ALPHA = 0x00000002
@@ -128,6 +135,10 @@ NIM_DELETE = 0x00000002
 NIF_MESSAGE = 0x00000001
 NIF_ICON = 0x00000002
 NIF_TIP = 0x00000004
+NIF_INFO = 0x00000010
+NIIF_INFO = 0x00000001
+NIIF_WARNING = 0x00000002
+NIIF_ERROR = 0x00000003
 IDI_APPLICATION = 32512
 IMAGE_ICON = 1
 LR_LOADFROMFILE = 0x00000010
@@ -289,9 +300,9 @@ class NativeOperatorOverlay:
             self.labels[hwnd] = name
             alpha = 238 if self.compact else 210 if name == "log" else 190
             self.user32.SetLayeredWindowAttributes(hwnd, 0, alpha, LWA_ALPHA)
-            # Keep the visible OPERATOR chrome out of every Windows capture path.
-            if not self.user32.SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE):
-                self.user32.SetWindowDisplayAffinity(hwnd, WDA_MONITOR)
+            # Visible to normal screenshots/screen sharing. Agent captures apply
+            # exclusion only around the frame grab itself.
+            self.user32.SetWindowDisplayAffinity(hwnd, WDA_NONE)
 
     def show(self, monitor):
         self.ensure()
@@ -474,6 +485,15 @@ class BITMAPINFO(ctypes.Structure):
     _fields_ = [("bmiHeader", BITMAPINFOHEADER), ("bmiColors", RGBQUAD * 1)]
 
 
+class GUID(ctypes.Structure):
+    _fields_ = [
+        ("Data1", wintypes.DWORD),
+        ("Data2", wintypes.WORD),
+        ("Data3", wintypes.WORD),
+        ("Data4", ctypes.c_ubyte * 8),
+    ]
+
+
 class NOTIFYICONDATA(ctypes.Structure):
     _fields_ = [
         ("cbSize", wintypes.DWORD),
@@ -483,6 +503,14 @@ class NOTIFYICONDATA(ctypes.Structure):
         ("uCallbackMessage", wintypes.UINT),
         ("hIcon", wintypes.HICON),
         ("szTip", wintypes.WCHAR * 128),
+        ("dwState", wintypes.DWORD),
+        ("dwStateMask", wintypes.DWORD),
+        ("szInfo", wintypes.WCHAR * 256),
+        ("uTimeoutOrVersion", wintypes.UINT),
+        ("szInfoTitle", wintypes.WCHAR * 64),
+        ("dwInfoFlags", wintypes.DWORD),
+        ("guidItem", GUID),
+        ("hBalloonIcon", wintypes.HICON),
     ]
 
 
@@ -940,10 +968,10 @@ AIOS_CHAT_TOOLS = [
         "type": "function",
         "function": {
             "name": "switch_tab",
-            "description": "Switch aiOS tab: Dashboard, Projects, Codex, Apps, Drop, AI Operator, or Settings.",
+            "description": "Switch aiOS tab: Dashboard, Projects, CODE, Apps, Drop, AI Operator, or Settings.",
             "parameters": {
                 "type": "object",
-                "properties": {"tab": {"type": "string", "enum": ["Dashboard", "Projects", "Codex", "Apps", "Drop", "AI Operator", "Settings"]}},
+                "properties": {"tab": {"type": "string", "enum": ["Dashboard", "Projects", "CODE", "Apps", "Drop", "AI Operator", "Settings"]}},
                 "required": ["tab"],
                 "additionalProperties": False,
             },
@@ -1691,13 +1719,23 @@ class ScrollFrame(tk.Frame):
 
     def __init__(self, parent, bg):
         super().__init__(parent, bg=bg)
+        self.on_user_scroll = None
         self.canvas = tk.Canvas(self, bg=bg, highlightthickness=0, bd=0)
         self.inner = tk.Frame(self.canvas, bg=bg)
         self.window = self.canvas.create_window(0, 0, anchor="nw", window=self.inner)
         self.canvas.pack(side="left", fill="both", expand=True)
         self.inner.bind("<Configure>", self._on_inner_configure)
         self.canvas.bind("<Configure>", self._update_width)
+        self.bind("<Destroy>", self._remove_instance, add="+")
         ScrollFrame._instances.append(self)
+
+    def _remove_instance(self, event=None):
+        if event is not None and event.widget is not self:
+            return
+        try:
+            ScrollFrame._instances.remove(self)
+        except ValueError:
+            pass
 
     def _on_inner_configure(self, _event=None):
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
@@ -1707,10 +1745,14 @@ class ScrollFrame(tk.Frame):
         self.canvas.itemconfigure(self.window, width=event.width)
 
     def _bind_wheel_tree(self, widget):
-        try:
-            widget.bind("<MouseWheel>", self._mousewheel, add="+")
-        except tk.TclError:
-            pass
+        bindings = getattr(widget, "_aios_scroll_bindings", set())
+        binding_key = id(self)
+        if binding_key not in bindings:
+            try:
+                widget.bind("<MouseWheel>", self._mousewheel, add="+")
+                widget._aios_scroll_bindings = {*bindings, binding_key}
+            except tk.TclError:
+                pass
         for child in widget.winfo_children():
             self._bind_wheel_tree(child)
 
@@ -1729,9 +1771,19 @@ class ScrollFrame(tk.Frame):
         if target is not self:
             return
         self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        if callable(self.on_user_scroll):
+            self.on_user_scroll(event.delta)
+        # Do not let Text/Listbox class bindings also scroll their own content.
+        return "break"
 
     def _deepest_scroll(self, widget):
-        matches = [frame for frame in ScrollFrame._instances if frame._contains_widget(widget) and frame.winfo_ismapped()]
+        matches = []
+        for frame in list(ScrollFrame._instances):
+            try:
+                if frame.winfo_exists() and frame.winfo_ismapped() and frame._contains_widget(widget):
+                    matches.append(frame)
+            except tk.TclError:
+                frame._remove_instance()
         if not matches:
             return None
         return max(matches, key=lambda frame: frame._depth())
@@ -1750,6 +1802,139 @@ class ScrollFrame(tk.Frame):
             return "break"
 
         widget.bind("<MouseWheel>", forward, add="+")
+
+
+CODE_SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+_CODE_INLINE = re.compile(
+    r"(?P<code>`[^`\n]+`)"
+    r"|(?P<link>\[[^\]\n]+\]\([^)\s]+\))"
+    r"|(?P<bold>\*\*[^*\n]+\*\*|__[^_\n]+__)"
+    r"|(?P<italic>(?<![\w*])\*[^*\n]+\*(?![\w*])|(?<![\w_])_[^_\n]+_(?![\w_]))"
+)
+
+
+def code_inline_spans(text):
+    """Split one markdown line into (text, style) spans for a Tk Text widget."""
+    spans = []
+    cursor = 0
+    for match in _CODE_INLINE.finditer(str(text or "")):
+        if match.start() > cursor:
+            spans.append((text[cursor:match.start()], ""))
+        if match.group("code"):
+            spans.append((match.group("code")[1:-1], "code"))
+        elif match.group("link"):
+            label, _, target = match.group("link")[1:].partition("](")
+            spans.append((label, "link", target[:-1]))
+        elif match.group("bold"):
+            spans.append((match.group("bold")[2:-2], "bold"))
+        else:
+            spans.append((match.group("italic")[1:-1], "italic"))
+        cursor = match.end()
+    if cursor < len(text or ""):
+        spans.append((text[cursor:], ""))
+    return [span for span in spans if span[0]]
+
+
+def code_markdown_blocks(text):
+    """Turn markdown into flat blocks the chat renderer can paint line by line.
+
+    Each block is ``{"type": ..., "spans": [(text, style)], "indent": int}``.
+    Fenced code keeps its raw text so commands stay copyable and unstyled.
+    """
+    blocks = []
+    lines = str(text or "").replace("\r\n", "\n").split("\n")
+    fence = None
+    buffer = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            if fence is None:
+                fence = stripped[3:].strip()
+                buffer = []
+            else:
+                blocks.append({"type": "code", "spans": [("\n".join(buffer), "codeblock")], "indent": 0, "lang": fence})
+                fence = None
+                buffer = []
+            index += 1
+            continue
+        if fence is not None:
+            buffer.append(line)
+            index += 1
+            continue
+        if not stripped:
+            blocks.append({"type": "blank", "spans": [], "indent": 0})
+            index += 1
+            continue
+        if "|" in stripped and index + 1 < len(lines):
+            header = [cell.strip() for cell in stripped.strip("|").split("|")]
+            divider = [cell.strip() for cell in lines[index + 1].strip().strip("|").split("|")]
+            if len(header) >= 2 and len(divider) == len(header) and all(re.fullmatch(r":?-{3,}:?", cell) for cell in divider):
+                rows = [header]
+                index += 2
+                while index < len(lines) and "|" in lines[index] and lines[index].strip():
+                    row = [cell.strip() for cell in lines[index].strip().strip("|").split("|")]
+                    rows.append((row + [""] * len(header))[:len(header)])
+                    index += 1
+                blocks.append({"type": "table", "rows": rows, "spans": [], "indent": 0})
+                continue
+        heading = re.match(r"^(#{1,6})\s+(.*)$", stripped)
+        if heading:
+            level = min(3, len(heading.group(1)))
+            blocks.append({"type": f"h{level}", "spans": code_inline_spans(heading.group(2)), "indent": 0})
+            index += 1
+            continue
+        if re.match(r"^([-*_])\s*\1\s*\1[-*_\s]*$", stripped):
+            blocks.append({"type": "rule", "spans": [], "indent": 0})
+            index += 1
+            continue
+        if stripped.startswith("> "):
+            blocks.append({"type": "quote", "spans": code_inline_spans(stripped[2:]), "indent": 0})
+            index += 1
+            continue
+        indent = (len(line) - len(line.lstrip(" "))) // 2
+        bullet = re.match(r"^[-*+]\s+(.*)$", stripped)
+        if bullet:
+            task = re.match(r"^\[([ xX])\]\s+(.*)$", bullet.group(1))
+            if task:
+                blocks.append({"type": "task", "spans": code_inline_spans(task.group(2)), "indent": indent, "checked": task.group(1).casefold() == "x"})
+            else:
+                blocks.append({"type": "bullet", "spans": code_inline_spans(bullet.group(1)), "indent": indent})
+            index += 1
+            continue
+        numbered = re.match(r"^(\d+)[.)]\s+(.*)$", stripped)
+        if numbered:
+            block = {"type": "number", "spans": code_inline_spans(numbered.group(2)), "indent": indent}
+            block["marker"] = f"{numbered.group(1)}."
+            blocks.append(block)
+            index += 1
+            continue
+        blocks.append({"type": "text", "spans": code_inline_spans(line.strip()), "indent": indent})
+        index += 1
+    if fence is not None and buffer:
+        blocks.append({"type": "code", "spans": [("\n".join(buffer), "codeblock")], "indent": 0, "lang": fence})
+    while blocks and blocks[-1]["type"] == "blank":
+        blocks.pop()
+    return blocks
+
+
+def code_activity_key(event):
+    """One stable id per tool call so start/update/finish share a single card.
+
+    Providers narrate the same command several times ("Run command", "Running",
+    "Ran command"). Without a stable key every phase became its own row.
+    """
+    activity_id = str(event.get("activity_id") or "").strip()
+    if activity_id:
+        return activity_id
+    for field in ("command", "detail", "title", "text"):
+        value = str(event.get(field) or "").strip()
+        if value:
+            normalized = re.sub(r"^\$\s*", "", value)
+            normalized = re.sub(r"^(?:run|ran|running|check|checked|checking)\s+", "", normalized, flags=re.I)
+            return f"{event.get('kind') or 'tool'}:{re.sub(r'\s+', ' ', normalized).casefold()[:160]}"
+    return f"{event.get('kind') or 'tool'}:{event.get('ts') or ''}"
 
 
 class HelperOverlay:
@@ -1774,6 +1959,22 @@ class HelperOverlay:
         self.codex_process = None
         self.quick_process = None
         self.codex_log = []
+        self.code_selected_id = ""
+        self.code_jobs = []
+        self.code_capabilities = {"providers": []}
+        self.code_log_size = 0
+        self.code_poll_after = None
+        self.code_view_token = 0
+        self._code_refresh_seq = 0
+        self._code_refresh_inflight = None
+        self._code_capabilities_busy = False
+        self._code_sessions_signature = None
+        self.code_last_notify_ts = 0.0
+        self.code_notify_started_at = time.time()
+        self.code_notify_offsets = {}
+        self.code_notify_busy = False
+        self.code_provider_images = {}
+        self.code_provider_buttons = {}
         self.chat_run_id = 0
         self._ui_queue = queue.Queue()
         self.thinking_step = 0
@@ -1782,6 +1983,7 @@ class HelperOverlay:
         self.thinking_label = None
         self._chat_embeds = []
         self._live_tool_count = 0
+        self._live_tool_call_ids = set()
         self._agent_turn_active = False
         self._stream_reply_frame = None
         self._stream_reply_var = None
@@ -1936,6 +2138,7 @@ class HelperOverlay:
         self.phone_control_log = "connected"
         self._operator_passive_window_styles = {}
         self._operator_capture_exclusion_ok = False
+        self._agent_capture_affinity_tokens = set()
         self._operator_input_passthrough = False
         self._root_native_wndproc = None
         self._root_original_wndproc = None
@@ -1981,8 +2184,9 @@ class HelperOverlay:
         self._ensure_voice_server()
         self._ensure_hotkeys()
         self.root.after(100, self._start_agent_operator_load)
-        self.root.after(400, self._protect_aios_windows_from_capture)
+        self.root.after(400, self._show_aios_windows_in_normal_capture)
         self.root.after(1200, self._ensure_phone_relay)
+        self.root.after(1800, self._poll_code_notifications)
         if not background:
             self.show_startup_screen()
 
@@ -2057,7 +2261,7 @@ class HelperOverlay:
 
     def _build_nav(self):
         self.clear(self.nav)
-        for tab in ("Dashboard", "Projects", "Codex", "Apps", "Drop", "AI Operator", "Settings"):
+        for tab in ("Dashboard", "Projects", "CODE", "Apps", "Drop", "AI Operator", "Settings"):
             label = "OPERATOR" if tab == "AI Operator" else tab
             button = self.button(
                 self.nav,
@@ -2184,6 +2388,14 @@ class HelperOverlay:
 
     def render_tab(self, tab):
         self._dash_flush_notes()
+        if str(tab).casefold() == "codex":
+            tab = "CODE"
+        if self.code_poll_after is not None:
+            try:
+                self.root.after_cancel(self.code_poll_after)
+            except tk.TclError:
+                pass
+            self.code_poll_after = None
         self.active_tab = tab
         self.page_view = None
         self._build_nav()
@@ -2192,8 +2404,8 @@ class HelperOverlay:
             self.render_dashboard()
         elif tab == "Projects":
             self.render_projects()
-        elif tab == "Codex":
-            self.render_codex()
+        elif tab == "CODE":
+            self.render_code()
         elif tab == "Apps":
             self.render_apps()
         elif tab == "Drop":
@@ -2445,7 +2657,7 @@ class HelperOverlay:
     def _dash_actions(self, parent):
         row = tk.Frame(parent, bg=self.c("panel"))
         actions = (
-            ("Codex", lambda: self.render_tab("Codex"), "Open the Codex tab"),
+            ("CODE", lambda: self.render_tab("CODE"), "Open Codex, Claude, and Cursor sessions"),
             ("OPERATOR", lambda: self.render_tab("AI Operator"), "Hand the mouse to the agent"),
             ("Drop", lambda: self.render_tab("Drop"), "Drop files in"),
             ("Phone \u2192 PC", self.open_phone_photos, "Send photos from your phone"),
@@ -5536,73 +5748,1469 @@ class HelperOverlay:
             self.muted(info_card, line).pack(anchor="w", padx=12, pady=(0, 4))
         self.muted(info_card, "Changes save automatically.").pack(anchor="w", padx=12, pady=(0, 12))
 
-    def render_codex(self):
-        self.page_title("Codex")
-        top = self.card(self.page)
-        top.pack(fill="x", pady=(0, 10))
+    def render_code(self):
+        """Native overview for persistent Codex, Claude, and Cursor jobs."""
+        self.code_view_token += 1
+        # This tab owns a new widget tree on every render. The previous tree's
+        # signature must not suppress drawing into the new session list.
+        self._code_sessions_signature = None
+        self.code_log_size = 0
+        self.code_last_rendered_kind = ""
+        self.code_activity_cards = {}
+        self.code_create_attachments = []
+        self.code_followup_attachments = []
+        token = self.code_view_token
 
-        self.codex_project_var = tk.StringVar(value=str(self.active_project or self.default_project_path()))
-        self.codex_model_var = tk.StringVar(value=self.config["codex_model"])
-        self.codex_reasoning_var = tk.StringVar(value=self.config["codex_reasoning"])
+        head = tk.Frame(self.page, bg=self.c("panel"))
+        head.pack(fill="x", pady=(0, 8))
+        tk.Label(head, text="CODE", bg=self.c("panel"), fg=self.c("text"), font=self.font(18, "bold")).pack(side="left")
+        tk.Label(
+            head,
+            text="Codex · Claude · Cursor",
+            bg=self.c("panel"),
+            fg=self.c("muted"),
+            font=self.font(9),
+        ).pack(side="left", padx=(10, 0))
+        self.header_btn(head, "↗", self._code_open_web, hint="Open the full phone/web CODE dashboard").pack(side="right")
+        self.header_btn(head, "↻", lambda: self._code_refresh_all(force=True), hint="Refresh agents and sessions").pack(side="right", padx=(0, 6))
 
-        row1 = tk.Frame(top, bg=self.c("surface"))
-        row1.pack(fill="x", padx=12, pady=(12, 6))
-        tk.Label(row1, text="Project", bg=self.c("surface"), fg=self.c("muted"), font=self.font(9, "bold")).pack(side="left")
-        self.codex_project_entry = self.single_line(row1, self.codex_project_var.get())
-        self.codex_project_entry.pack(side="left", fill="x", expand=True, padx=(8, 8))
-        self.button(row1, "Open App", self.codex_open_desktop, compact=True).pack(side="right", padx=(6, 0))
+        overview = tk.Frame(self.page, bg=self.c("panel"))
+        overview.pack(fill="x", pady=(0, 8))
+        self.code_active_var = tk.StringVar(value="0 active")
+        self.code_waiting_var = tk.StringVar(value="0 need you")
+        self.code_done_var = tk.StringVar(value="0 finished")
+        for index, (variable, color) in enumerate((
+            (self.code_active_var, self.c("success")),
+            (self.code_waiting_var, "#f0c85f"),
+            (self.code_done_var, self.c("muted")),
+        )):
+            tk.Label(
+                overview,
+                textvariable=variable,
+                bg=self.c("surface"),
+                fg=color,
+                font=self.font(9, "bold"),
+                padx=10,
+                pady=6,
+            ).pack(side="left", padx=(0 if index == 0 else 6, 0))
+        self.code_health_var = tk.StringVar(value="Checking local agent logins and models…")
+        self.code_speak_var = tk.BooleanVar(value=bool(self.config.get("code_speak_notifications", True)))
+        self.code_setup_button = self.button(overview, "Set up agent", self._code_setup_provider, compact=True)
+        self.code_setup_button.pack(side="right", padx=(8, 0))
+        tk.Checkbutton(
+            overview,
+            text="Speak milestones",
+            variable=self.code_speak_var,
+            command=self._code_set_speaking,
+            bg=self.c("panel"),
+            activebackground=self.c("panel"),
+            selectcolor=self.c("panel2"),
+            fg=self.c("muted"),
+            font=self.font(7),
+        ).pack(side="right", padx=(8, 0))
+        tk.Label(
+            overview,
+            textvariable=self.code_health_var,
+            bg=self.c("panel"),
+            fg=self.c("muted"),
+            font=self.font(8),
+            anchor="e",
+        ).pack(side="right", fill="x", expand=True)
 
-        row2 = tk.Frame(top, bg=self.c("surface"))
-        row2.pack(fill="x", padx=12, pady=(0, 12))
-        tk.Label(row2, text="Model", bg=self.c("surface"), fg=self.c("muted"), font=self.font(9, "bold")).pack(side="left")
-        self.codex_model_entry = self.single_line(row2, self.config["codex_model"])
-        self.codex_model_entry.pack(side="left", fill="x", expand=True, padx=(8, 8))
-        tk.Label(row2, text="Thinking", bg=self.c("surface"), fg=self.c("muted"), font=self.font(9, "bold")).pack(side="left")
-        self.codex_reason = tk.OptionMenu(row2, self.codex_reasoning_var, "none", "low", "medium", "high", "xhigh")
-        self.style_option(self.codex_reason)
-        self.codex_reason.pack(side="left", padx=(8, 8))
-        self.button(row2, "Save", self.save_codex_settings, compact=True).pack(side="right")
+        creator = self.card(self.page)
+        creator.pack(fill="x", pady=(0, 8))
+        row = tk.Frame(creator, bg=self.c("surface"))
+        row.pack(fill="x", padx=10, pady=(9, 5))
+        self.code_provider_var = tk.StringVar(value="codex")
+        self.code_model_var = tk.StringVar(value="gpt-5.6-sol")
+        self.code_reasoning_var = tk.StringVar(value="medium")
+        self.code_fast_var = tk.BooleanVar(value=False)
+        self.code_project_var = tk.StringVar(value=str(self.active_project or self.default_project_path()))
+        tk.Label(row, text="Agent", bg=self.c("surface"), fg=self.c("muted"), font=self.font(8, "bold")).pack(side="left", padx=(0, 6))
+        self._code_build_provider_picker(row)
+        for label, variable, values, width in (
+            ("Model", self.code_model_var, ("gpt-5.6-sol",), 18),
+            ("Intelligence", self.code_reasoning_var, ("medium",), 9),
+        ):
+            tk.Label(row, text=label, bg=self.c("surface"), fg=self.c("muted"), font=self.font(8, "bold")).pack(side="left", padx=(0, 5))
+            option = tk.OptionMenu(row, variable, *values)
+            self.style_option(option)
+            option.configure(width=width)
+            option.pack(side="left", padx=(0, 9))
+            if label == "Model":
+                self.code_model_menu = option
+            else:
+                self.code_reasoning_menu = option
+        self.code_fast_check = tk.Checkbutton(
+            row,
+            text="Fast",
+            variable=self.code_fast_var,
+            bg=self.c("surface"),
+            activebackground=self.c("surface"),
+            selectcolor=self.c("panel2"),
+            fg=self.c("text"),
+            font=self.font(8, "bold"),
+        )
+        self.code_fast_check.pack(side="left")
 
-        prompt_card = self.card(self.page)
-        prompt_card.pack(fill="x", pady=(0, 10))
-        self.codex_prompt = tk.Text(
-            prompt_card,
-            height=5,
+        folder_row = tk.Frame(creator, bg=self.c("surface"))
+        folder_row.pack(fill="x", padx=10, pady=(0, 5))
+        tk.Label(folder_row, text="Folder", bg=self.c("surface"), fg=self.c("muted"), font=self.font(8, "bold")).pack(side="left", padx=(0, 6))
+        self.code_project_entry = tk.Entry(
+            folder_row,
+            textvariable=self.code_project_var,
+            bg=self.c("panel2"),
+            fg=self.c("text"),
+            insertbackground=self.c("text"),
+            relief="flat",
+            font=self.font(9),
+        )
+        self.code_project_entry.pack(side="left", fill="x", expand=True, ipady=6)
+        self.button(folder_row, "Browse", self._code_browse_project, compact=True).pack(side="right", padx=(7, 0))
+
+        brief_row = tk.Frame(creator, bg=self.c("surface"))
+        brief_row.pack(fill="x", padx=10, pady=(0, 9))
+        self.code_brief = tk.Text(
+            brief_row,
+            height=3,
             bg=self.c("panel2"),
             fg=self.c("text"),
             insertbackground=self.c("text"),
             selectbackground="#29415d",
             relief="flat",
-            bd=0,
-            padx=12,
-            pady=10,
+            padx=9,
+            pady=7,
             wrap="word",
-            font=self.font(10),
+            font=self.font(9),
         )
-        self.codex_prompt.pack(side="left", fill="both", expand=True, padx=12, pady=12)
-        actions = tk.Frame(prompt_card, bg=self.c("surface"))
-        actions.pack(side="right", fill="y", padx=(0, 12), pady=12)
-        self.button(actions, "Run Codex", self.run_codex_from_tab, compact=True).pack(fill="x", pady=(0, 8))
-        self.button(actions, "Stop", self.stop_codex, compact=True).pack(fill="x")
+        self.code_brief.pack(side="left", fill="both", expand=True)
+        actions = tk.Frame(brief_row, bg=self.c("surface"))
+        actions.pack(side="right", fill="y", padx=(7, 0))
+        self.code_attach_button = self.button(actions, "Attach", self._code_attach_create, compact=True)
+        self.code_attach_button.pack(fill="x", pady=(0, 5))
+        self.button(actions, "Launch", self._code_start_job, compact=True, active=True).pack(fill="x")
 
-        output_card = self.card(self.page)
-        output_card.pack(fill="both", expand=True)
-        self.codex_output = tk.Text(
-            output_card,
-            bg="#080d14",
+        split = tk.PanedWindow(self.page, orient="horizontal", bg=self.c("panel"), sashwidth=5, bd=0, relief="flat")
+        split.pack(fill="both", expand=True)
+        left = self.card(split)
+        right = self.card(split)
+        split.add(left, minsize=190, width=220)
+        split.add(right, minsize=280)
+
+        list_head = tk.Frame(left, bg=self.c("surface"))
+        list_head.pack(fill="x", padx=9, pady=(8, 5))
+        tk.Label(list_head, text="SESSIONS", bg=self.c("surface"), fg=self.c("muted"), font=self.font(8, "bold")).pack(side="left")
+        self.code_sessions_frame = ScrollFrame(left, self.c("surface"))
+        self.code_sessions_frame.pack(fill="both", expand=True, padx=4, pady=(0, 6))
+
+        detail_head = tk.Frame(right, bg=self.c("surface"))
+        detail_head.pack(fill="x", padx=10, pady=(8, 5))
+        self.code_detail_title_var = tk.StringVar(value="Select a session")
+        self.code_detail_meta_var = tk.StringVar(value="Current conversation, questions, and tool outputs appear here.")
+        title_wrap = tk.Frame(detail_head, bg=self.c("surface"))
+        title_wrap.pack(side="left", fill="x", expand=True)
+        tk.Label(title_wrap, textvariable=self.code_detail_title_var, bg=self.c("surface"), fg=self.c("text"), font=self.font(10, "bold"), anchor="w").pack(fill="x")
+        tk.Label(title_wrap, textvariable=self.code_detail_meta_var, bg=self.c("surface"), fg=self.c("muted"), font=self.font(7), anchor="w").pack(fill="x")
+        self.code_stop_button = self.button(detail_head, "Stop", self._code_stop_job, compact=True)
+        self.code_stop_button.pack(side="right", padx=(5, 0))
+        self.code_delete_button = self.button(detail_head, "Delete", self._code_delete_job, compact=True)
+        self.code_delete_button.pack(side="right")
+
+        output_wrap = tk.Frame(right, bg=self.CODE_CHAT_BG)
+        output_wrap.pack(fill="both", expand=True, padx=9)
+        chat_scroll = tk.Scrollbar(output_wrap, orient="vertical", width=10)
+        chat_scroll.pack(side="right", fill="y")
+        self.code_chat = ScrollFrame(output_wrap, self.CODE_CHAT_BG)
+        self.code_chat.pack(side="left", fill="both", expand=True)
+        self.code_chat.canvas.configure(yscrollcommand=chat_scroll.set)
+        self.code_chat.on_user_scroll = self._code_chat_user_scrolled
+        chat_scroll.configure(command=self._code_chat_scrollbar)
+        self.code_chat_inner = self.code_chat.inner
+        self.code_chat.canvas.bind("<Configure>", self._code_chat_on_resize, add="+")
+        self._code_chat_reset()
+
+        compose = tk.Frame(right, bg=self.c("surface"))
+        compose.pack(fill="x", padx=9, pady=(6, 9))
+        self.code_followup = tk.Text(
+            compose,
+            height=2,
+            bg=self.c("panel2"),
             fg=self.c("text"),
             insertbackground=self.c("text"),
+            relief="flat",
+            padx=8,
+            pady=6,
+            wrap="word",
+            font=self.font(9),
+        )
+        self.code_followup.pack(side="left", fill="x", expand=True)
+        follow_actions = tk.Frame(compose, bg=self.c("surface"))
+        follow_actions.pack(side="right", padx=(6, 0))
+        self.code_urgent_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(
+            follow_actions,
+            text="Urgent",
+            variable=self.code_urgent_var,
+            bg=self.c("surface"),
+            activebackground=self.c("surface"),
+            selectcolor=self.c("panel2"),
+            fg=self.c("muted"),
+            font=self.font(7),
+        ).pack(anchor="w")
+        self.code_follow_attach_button = self.button(follow_actions, "+ File", self._code_attach_followup, compact=True)
+        self.code_follow_attach_button.pack(side="left", padx=(0, 5))
+        self.button(follow_actions, "Send", self._code_send_followup, compact=True, active=True).pack(side="left")
+
+        self.code_provider_var.trace_add("write", lambda *_args: self._code_on_provider_changed())
+        self.code_model_var.trace_add("write", lambda *_args: self._code_refresh_reasoning())
+        self._code_sync_provider_buttons()
+        self._code_render_summary()
+        self._code_render_sessions()
+        self._code_refresh_all(force=False, token=token)
+
+    def render_codex(self):
+        """Compatibility alias for commands saved before the CODE rename."""
+        self.render_code()
+
+    def _code_build_provider_picker(self, parent):
+        """Three logo buttons for Codex / Claude / Cursor instead of a dropdown."""
+        picker = tk.Frame(parent, bg=self.c("surface"))
+        picker.pack(side="left", padx=(0, 10))
+        icons = self._code_ensure_provider_icons()
+        self.code_provider_buttons = {}
+        for provider, _filename, label in CODE_PROVIDER_CHOICES:
+            shell = tk.Frame(
+                picker,
+                bg=self.c("panel2"),
+                highlightthickness=2,
+                highlightbackground=self.c("panel2"),
+                highlightcolor=self.c("accent"),
+                cursor="hand2",
+            )
+            shell.pack(side="left", padx=(0, 5))
+            image = icons.get(provider)
+            if image is not None:
+                face = tk.Label(
+                    shell,
+                    image=image,
+                    bg=self.c("panel2"),
+                    bd=0,
+                    padx=4,
+                    pady=4,
+                    cursor="hand2",
+                )
+            else:
+                face = tk.Label(
+                    shell,
+                    text=label.split()[0][:1],
+                    bg=self.c("panel2"),
+                    fg=self.c("text"),
+                    font=self.font(10, "bold"),
+                    width=3,
+                    padx=4,
+                    pady=4,
+                    cursor="hand2",
+                )
+            face.pack()
+            for widget in (shell, face):
+                widget.bind("<Button-1>", lambda _event, name=provider: self._code_select_provider(name))
+                self._bind_header_hint(widget, label)
+            self.code_provider_buttons[provider] = {"shell": shell, "face": face}
+
+    def _code_ensure_provider_icons(self):
+        if self.code_provider_images:
+            return self.code_provider_images
+        try:
+            from PIL import Image, ImageTk
+        except Exception:
+            return self.code_provider_images
+        size = max(24, min(36, int(self.c("font_size")) + 18))
+        for provider, filename, _label in CODE_PROVIDER_CHOICES:
+            path = CODE_PROVIDER_ICON_DIR / filename
+            hi = CODE_PROVIDER_ICON_DIR / filename.replace(".png", "@2x.png")
+            source = hi if hi.exists() else path
+            if not source.exists():
+                continue
+            try:
+                img = Image.open(source).convert("RGBA")
+                img = img.resize((size, size), Image.Resampling.LANCZOS)
+                photo = ImageTk.PhotoImage(img)
+                self.code_provider_images[provider] = photo
+            except Exception:
+                continue
+        return self.code_provider_images
+
+    def _code_select_provider(self, provider):
+        if self.code_provider_var.get() == provider:
+            self._code_sync_provider_buttons()
+            return
+        self.code_provider_var.set(provider)
+
+    def _code_on_provider_changed(self):
+        self._code_sync_provider_buttons()
+        self._code_refresh_selectors()
+
+    def _code_sync_provider_buttons(self):
+        selected = (self.code_provider_var.get() or "codex").strip().lower()
+        accent = self.c("accent")
+        idle = self.blend_color(self.c("panel2"), self.c("muted"), 0.22)
+        face_idle = self.c("panel2")
+        face_active = self.blend_color(self.c("panel2"), accent, 0.18)
+        for provider, widgets in (self.code_provider_buttons or {}).items():
+            active = provider == selected
+            shell = widgets.get("shell")
+            face = widgets.get("face")
+            if shell is None:
+                continue
+            try:
+                shell.configure(
+                    highlightbackground=accent if active else idle,
+                    highlightcolor=accent if active else idle,
+                    bg=face_active if active else face_idle,
+                )
+                if face is not None:
+                    face.configure(bg=face_active if active else face_idle)
+            except tk.TclError:
+                pass
+
+    def _code_api(self, path, method="GET", payload=None, timeout=20):
+        port = int(os.environ.get("AIOS_PHONE_BRIDGE_PORT", "5000"))
+        data = json.dumps(payload).encode("utf-8") if payload is not None else None
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{port}{path}",
+            data=data,
+            method=method,
+            headers={"Content-Type": "application/json"} if data is not None else {},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            raw = exc.read().decode("utf-8", "replace")
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError:
+                return {"ok": False, "error": raw or str(exc)}
+        except Exception as exc:
+            return {"ok": False, "error": f"CODE backend unavailable: {exc}"}
+
+    def _poll_code_notifications(self):
+        """Relay CODE milestones even when the CODE tab is not open."""
+        if self.code_notify_busy:
+            self.root.after(2500, self._poll_code_notifications)
+            return
+        self.code_notify_busy = True
+        offsets = dict(self.code_notify_offsets)
+        started_at = float(self.code_notify_started_at)
+
+        def worker():
+            listing = self._code_api("/api/code/jobs?limit=250", timeout=12)
+            notices = []
+            if listing.get("ok"):
+                for job in listing.get("jobs") or []:
+                    job_id = str(job.get("id") or "")
+                    if not job_id:
+                        continue
+                    known = job_id in offsets and int(offsets[job_id]) >= 0
+                    recent = float(job.get("updated_at") or 0) >= started_at - 5
+                    active = job.get("status") in {"queued", "running", "waiting_user"}
+                    if not known and not recent and not active:
+                        offsets[job_id] = -1
+                        continue
+                    since = max(0, int(offsets.get(job_id, 0)))
+                    log = self._code_api(f"/api/code/jobs/{job_id}/log?since={since}", timeout=12)
+                    if not log.get("ok"):
+                        continue
+                    offsets[job_id] = int(log.get("size") or since)
+                    for event in log.get("events") or []:
+                        if not event.get("notify"):
+                            continue
+                        if not known and float(event.get("ts") or 0) < started_at - 3:
+                            continue
+                        notices.append((job, event))
+            jobs = listing.get("jobs") or [] if listing.get("ok") else None
+            self.root.after(0, lambda: self._code_apply_notifications(offsets, notices, jobs))
+
+        threading.Thread(target=worker, daemon=True, name="aios-code-notifications").start()
+
+    def _code_apply_notifications(self, offsets, notices, jobs=None):
+        self.code_notify_busy = False
+        self.code_notify_offsets = offsets
+        # The notification poll doubles as a cheap session prefetch, so CODE
+        # can paint saved sessions immediately when the tab opens.
+        if jobs is not None and self.active_tab != "CODE":
+            self.code_jobs = jobs
+        for job, event in notices:
+            kind = str(event.get("kind") or "status")
+            provider = str(job.get("provider") or "CODE").title()
+            titles = {
+                "result": f"{provider} finished",
+                "question": f"{provider} needs your answer",
+                "error": f"{provider} failed",
+                "warning": f"{provider} is still working",
+                "status": f"{provider} CODE update",
+            }
+            if kind not in titles:
+                continue
+            message = str(event.get("text") or kind)
+            self._tray_notify(titles[kind], message, "error" if kind == "error" else "warning" if kind in {"question", "warning"} else "info")
+            if self.config.get("code_speak_notifications", True):
+                speaker = getattr(self, "agent_operator_tts", None)
+                if speaker:
+                    try:
+                        speaker.speak((titles[kind] + ". " + message)[:700])
+                    except Exception:
+                        pass
+        self.root.after(3000, self._poll_code_notifications)
+
+    def _code_open_web(self):
+        port = int(os.environ.get("AIOS_PHONE_BRIDGE_PORT", "5000"))
+        os.startfile(f"http://127.0.0.1:{port}/code")
+
+    def _code_setup_provider(self):
+        provider = self.code_provider_var.get().strip().lower()
+        self.code_health_var.set(f"Opening {provider.title()} sign-in…")
+
+        def worker():
+            result = self._code_api(f"/api/code/providers/{provider}/setup", "POST", {}, timeout=20)
+            self.root.after(0, lambda: self._code_setup_result(result))
+
+        threading.Thread(target=worker, daemon=True, name="aios-code-setup").start()
+
+    def _code_setup_result(self, result):
+        if not result.get("ok"):
+            messagebox.showerror("CODE setup", result.get("error") or "Could not open provider sign-in.")
+            return
+        messagebox.showinfo("CODE setup", result.get("message") or "Sign-in opened. Refresh CODE when it is complete.")
+
+    def _code_browse_project(self):
+        selected = filedialog.askdirectory(initialdir=self.code_project_var.get() or str(self.project_root))
+        if selected:
+            self.code_project_var.set(selected)
+
+    def _code_attach_create(self):
+        paths = list(filedialog.askopenfilenames(title="Attach files or images to the CODE job"))
+        if paths:
+            self.code_create_attachments.extend(path for path in paths if path not in self.code_create_attachments)
+        self.code_attach_button.configure(text=f"Attach ({len(self.code_create_attachments)})" if self.code_create_attachments else "Attach")
+
+    def _code_attach_followup(self):
+        paths = list(filedialog.askopenfilenames(title="Attach files or images to the follow-up"))
+        if paths:
+            self.code_followup_attachments.extend(path for path in paths if path not in self.code_followup_attachments)
+        self.code_follow_attach_button.configure(text=f"+ File ({len(self.code_followup_attachments)})" if self.code_followup_attachments else "+ File")
+
+    def _code_refresh_all(self, force=False, token=None):
+        if self.active_tab != "CODE":
+            return
+        token = self.code_view_token if token is None else token
+        selected = self.code_selected_id
+        since = self.code_log_size
+        scope = (token, selected, since)
+        inflight = getattr(self, "_code_refresh_inflight", None)
+        if not force and inflight and inflight.get("scope") == scope:
+            return
+
+        self._code_refresh_seq = getattr(self, "_code_refresh_seq", 0) + 1
+        request_id = self._code_refresh_seq
+        self._code_refresh_inflight = {"id": request_id, "scope": scope}
+
+        # Provider CLI discovery can take tens of seconds on a cold start. It
+        # must never sit in front of the tiny session-list request.
+        if force or not self.code_capabilities.get("providers"):
+            self._code_refresh_capabilities(force=force, token=token)
+
+        def worker():
+            listing = self._code_api("/api/code/jobs?limit=250", timeout=10)
+            log = self._code_api(f"/api/code/jobs/{selected}/log?since={since}", timeout=10) if selected else None
+            self.root.after(
+                0,
+                lambda: self._code_apply_refresh(
+                    token, request_id, selected, listing, log, since
+                ),
+            )
+
+        threading.Thread(target=worker, daemon=True, name="aios-code-refresh").start()
+
+    def _code_refresh_capabilities(self, *, force=False, token=None):
+        if getattr(self, "_code_capabilities_busy", False):
+            return
+        self._code_capabilities_busy = True
+        token = self.code_view_token if token is None else token
+
+        def worker():
+            suffix = "?refresh=1" if force else ""
+            caps = self._code_api(f"/api/code/capabilities{suffix}", timeout=45)
+            self.root.after(0, lambda: self._code_apply_capabilities(token, caps))
+
+        threading.Thread(target=worker, daemon=True, name="aios-code-capabilities").start()
+
+    def _code_apply_capabilities(self, token, caps):
+        self._code_capabilities_busy = False
+        if self.active_tab != "CODE" or token != self.code_view_token:
+            return
+        if caps.get("ok"):
+            self.code_capabilities = caps
+            self._code_refresh_selectors()
+            self._code_render_summary()
+
+    def _code_apply_refresh(self, token, request_id, selected, listing, log, requested_since):
+        inflight = getattr(self, "_code_refresh_inflight", None)
+        if not inflight or inflight.get("id") != request_id:
+            return
+        self._code_refresh_inflight = None
+        if self.active_tab != "CODE" or token != self.code_view_token:
+            return
+        if listing.get("ok"):
+            self.code_jobs = listing.get("jobs") or []
+            self._code_render_summary()
+            self._code_render_sessions()
+            current = next((job for job in self.code_jobs if job.get("id") == self.code_selected_id), None)
+            if current:
+                self._code_render_detail_meta(current)
+        else:
+            self.code_health_var.set(listing.get("error") or "CODE backend unavailable")
+        # A click can select another session while this request is in flight.
+        # Never append the old session's log to the newly selected chat.
+        if log and log.get("ok") and selected and selected == self.code_selected_id:
+            initial_render = bool(log.get("reset") or requested_since == 0)
+            if initial_render:
+                self._code_chat_reset()
+                self.code_auto_follow = False
+            for event in log.get("events") or []:
+                self._code_render_event(event, live=requested_since > 0)
+            if initial_render:
+                self.code_auto_follow = True
+                self._code_chat_scroll_end(force=True)
+            self.code_log_size = int(log.get("size") or self.code_log_size)
+            if log.get("job"):
+                self._code_render_detail_meta(log["job"])
+        self.code_poll_after = self.root.after(1500, self._code_refresh_all)
+
+    def _code_render_summary(self):
+        active = sum(job.get("status") in {"queued", "running"} for job in self.code_jobs)
+        waiting = sum(job.get("status") == "waiting_user" for job in self.code_jobs)
+        done = sum(job.get("status") == "completed" for job in self.code_jobs)
+        self.code_active_var.set(f"{active} active")
+        self.code_waiting_var.set(f"{waiting} need you")
+        self.code_done_var.set(f"{done} finished")
+        health = []
+        for provider in self.code_capabilities.get("providers") or []:
+            health.append(f"{provider.get('provider', '').title()} {'ready' if provider.get('ready') else 'setup needed'}")
+        self.code_health_var.set("  ·  ".join(health) or "Loading agent capabilities…")
+
+    def _code_render_sessions(self):
+        if not hasattr(self, "code_sessions_frame"):
+            return
+        signature = tuple((job.get("id"), job.get("title"), job.get("status"), job.get("updated_at")) for job in self.code_jobs)
+        if signature == getattr(self, "_code_sessions_signature", None):
+            return
+        self._code_sessions_signature = signature
+        self.clear(self.code_sessions_frame.inner)
+        if not self.code_jobs:
+            self.muted(self.code_sessions_frame.inner, "No sessions yet. Launch one here or ask the voice agent.").pack(fill="x", padx=8, pady=20)
+            return
+        colors = {"codex": "#65b8ff", "claude": "#dc795a", "cursor": "#b892ff"}
+        for job in self.code_jobs:
+            selected = job.get("id") == self.code_selected_id
+            item = tk.Frame(
+                self.code_sessions_frame.inner,
+                bg=self.c("panel2") if selected else self.c("surface"),
+                highlightthickness=1 if selected else 0,
+                highlightbackground=self.c("accent"),
+                cursor="hand2",
+            )
+            item.pack(fill="x", padx=4, pady=3)
+            dot = tk.Label(item, text="●", bg=item.cget("bg"), fg=colors.get(job.get("provider"), self.c("muted")), font=self.font(7))
+            dot.pack(side="left", padx=(7, 5), pady=8)
+            copy = tk.Frame(item, bg=item.cget("bg"))
+            copy.pack(side="left", fill="x", expand=True, pady=6)
+            title = tk.Label(copy, text=str(job.get("title") or "CODE job"), bg=item.cget("bg"), fg=self.c("text"), font=self.font(8, "bold"), anchor="w")
+            title.pack(fill="x")
+            meta = tk.Label(copy, text=f"{job.get('project_name', '')} · {job.get('status', '')}", bg=item.cget("bg"), fg=self.c("muted"), font=self.font(7), anchor="w")
+            meta.pack(fill="x")
+            for widget in (item, dot, copy, title, meta):
+                widget.bind("<Button-1>", lambda _event, value=job.get("id"): self._code_select_job(value))
+
+    def _code_select_job(self, job_id):
+        self.code_selected_id = str(job_id or "")
+        self.code_log_size = 0
+        self._code_sessions_signature = None
+        self._code_chat_reset()
+        self._code_render_sessions()
+        self._code_refresh_all()
+
+    def _code_render_detail_meta(self, job):
+        self.code_detail_title_var.set(str(job.get("title") or "CODE job"))
+        fast = " · fast" if job.get("fast") else ""
+        self.code_detail_meta_var.set(
+            f"{str(job.get('provider') or '').title()} · {job.get('status')} · {job.get('model')} / {job.get('reasoning')}{fast}\n{job.get('cwd', '')}"
+        )
+        active = job.get("status") in {"queued", "running", "waiting_user"}
+        self.code_stop_button.configure(state="normal" if active else "disabled")
+        self.code_delete_button.configure(state="disabled" if active else "normal")
+        self._code_set_busy(
+            job.get("status") in {"queued", "running"},
+            f"{str(job.get('provider') or 'Agent').title()} is working",
+        )
+
+    # ---- CODE session chat -------------------------------------------------
+
+    CODE_CHAT_BG = "#080c0e"
+
+    def _code_chat_live(self):
+        inner = getattr(self, "code_chat_inner", None)
+        try:
+            return inner is not None and inner.winfo_exists()
+        except tk.TclError:
+            return False
+
+    def _code_chat_reset(self):
+        self.code_last_rendered_kind = ""
+        self.code_activity_cards = {}
+        self.code_stream = None
+        self.code_turn_assistant_text = ""
+        self.code_busy_row = None
+        self.code_busy_label = None
+        self.code_auto_follow = True
+        if not self._code_chat_live():
+            return
+        for child in list(self.code_chat_inner.winfo_children()):
+            try:
+                child.destroy()
+            except tk.TclError:
+                pass
+        self._code_spin_start()
+
+    def _code_chat_width(self):
+        try:
+            width = int(self.code_chat.canvas.winfo_width())
+        except (AttributeError, tk.TclError, TypeError, ValueError):
+            width = 0
+        return max(220, (width or 520) - 26)
+
+    def _code_chat_on_resize(self, _event=None):
+        """Re-wrap every message when the pane width changes."""
+        if not self._code_chat_live():
+            return
+        for widget in self._code_chat_text_widgets():
+            self._code_fit_text(widget)
+
+    def _code_chat_text_widgets(self, parent=None):
+        found = []
+        parent = parent if parent is not None else self.code_chat_inner
+        try:
+            children = parent.winfo_children()
+        except tk.TclError:
+            return found
+        for child in children:
+            if isinstance(child, tk.Text) and getattr(child, "_code_autofit", False):
+                found.append(child)
+            found.extend(self._code_chat_text_widgets(child))
+        return found
+
+    def _code_chat_near_bottom(self):
+        if not self._code_chat_live():
+            return True
+        try:
+            _first, last = self.code_chat.canvas.yview()
+            return float(last) >= 0.999
+        except (tk.TclError, TypeError, ValueError):
+            return True
+
+    def _code_chat_user_scrolled(self, wheel_delta=None):
+        # Freeze following immediately; otherwise a streaming event arriving
+        # before after_idle can snap the user back to the bottom.
+        self.code_auto_follow = False
+        if wheel_delta is not None and float(wheel_delta or 0) > 0:
+            return
+
+        def update():
+            self.code_auto_follow = self._code_chat_near_bottom()
+        try:
+            self.root.after_idle(update)
+        except tk.TclError:
+            pass
+
+    def _code_chat_scrollbar(self, *args):
+        try:
+            self.code_chat.canvas.yview(*args)
+        finally:
+            self._code_chat_user_scrolled()
+
+    def _code_chat_scroll_end(self, force=False):
+        if not self._code_chat_live() or (not force and not getattr(self, "code_auto_follow", True)):
+            return
+
+        def apply():
+            try:
+                if not force and not getattr(self, "code_auto_follow", True):
+                    return
+                self.code_chat.canvas.update_idletasks()
+                bounds = self.code_chat.canvas.bbox("all")
+                if bounds:
+                    self.code_chat.canvas.configure(scrollregion=bounds)
+                self.code_chat.canvas.yview_moveto(1.0)
+                self.code_auto_follow = True
+            except tk.TclError:
+                pass
+
+        apply()
+        try:
+            self.root.after_idle(apply)
+        except tk.TclError:
+            pass
+
+    def _code_chat_row(self):
+        """One transcript row, always kept above the live spinner line."""
+        row = tk.Frame(self.code_chat_inner, bg=self.CODE_CHAT_BG)
+        row.pack(fill="x", padx=8, pady=(6, 0))
+        busy = getattr(self, "code_busy_row", None)
+        try:
+            if busy is not None and busy.winfo_exists():
+                busy.pack_forget()
+                busy.pack(fill="x", padx=8, pady=(6, 0))
+        except tk.TclError:
+            pass
+        return row
+
+    def _code_fit_text(self, widget):
+        """Size a read-only Text to its wrapped content so rows never scroll.
+
+        Tk only knows how many display lines the text needs once the widget has
+        a real width, so the fit also runs from ``<Configure>``; before the
+        first layout the width is 1 char and the count is meaningless.
+        """
+        def apply(_event=None):
+            if getattr(widget, "_code_fitting", False):
+                return
+            widget._code_fitting = True
+            try:
+                def measure(what):
+                    value = widget.count("1.0", "end", what)
+                    if isinstance(value, tuple):
+                        value = value[0] if value else 0
+                    return max(0, int(value or 0))
+
+                if not widget.winfo_exists() or widget.winfo_width() <= 1:
+                    return
+                # Tk lays out only the lines that currently fit, so start from
+                # the wrapped line count and then top up in pixels: headings and
+                # code blocks are taller than the widget's base line height.
+                height = max(1, measure("displaylines"))
+                if int(widget.cget("height")) != height:
+                    widget.configure(height=height)
+                    widget.update_idletasks()
+                for _ in range(12):
+                    if measure("ypixels") <= widget.winfo_height():
+                        break
+                    height += 1
+                    widget.configure(height=height)
+                    widget.update_idletasks()
+            except (tk.TclError, TypeError, ValueError):
+                pass
+            finally:
+                widget._code_fitting = False
+
+        if not getattr(widget, "_code_fit_bound", False):
+            widget._code_fit_bound = True
+            widget.bind("<Configure>", apply, add="+")
+        apply()
+        try:
+            self.root.after_idle(apply)
+        except tk.TclError:
+            pass
+
+    def _code_text_widget(self, parent, *, bg, fg, mono=False):
+        body_font = self.font(9)
+        size = max(8, int(body_font[1]))
+        widget = tk.Text(
+            parent,
+            bg=bg,
+            fg=fg,
+            insertbackground=fg,
             selectbackground="#29415d",
             relief="flat",
             bd=0,
-            padx=12,
-            pady=10,
+            padx=0,
+            pady=0,
+            height=1,
             wrap="word",
-            font=("Consolas", max(8, int(self.c("font_size")) - 1)),
-            state="disabled",
+            cursor="arrow",
+            font=("Cascadia Code", max(7, size - 1)) if mono else body_font,
         )
-        self.codex_output.pack(fill="both", expand=True, padx=10, pady=10)
-        self.refresh_codex_output()
+        widget._code_autofit = True
+        mono_font = ("Cascadia Code", max(7, size - 1))
+        widget.tag_configure("bold", font=self.font(9, "bold"))
+        widget.tag_configure("italic", font=(body_font[0], size, "italic"))
+        widget.tag_configure("code", font=mono_font, background=self.blend_color(bg, "#ffffff", 0.09), foreground="#d7e6ff")
+        widget.tag_configure("codeblock", font=mono_font, background=self.blend_color(bg, "#ffffff", 0.06), foreground="#d7e6ff", lmargin1=10, lmargin2=10, spacing1=3, spacing3=3)
+        widget.tag_configure("link", foreground=self.c("accent"), underline=True)
+        widget.tag_configure("muted", foreground=self.c("muted"))
+        widget.tag_configure("h1", font=self.font(12, "bold"), spacing1=6, spacing3=3)
+        widget.tag_configure("h2", font=self.font(11, "bold"), spacing1=5, spacing3=2)
+        widget.tag_configure("h3", font=self.font(10, "bold"), spacing1=4, spacing3=2)
+        widget.tag_configure("quote", foreground=self.c("muted"), lmargin1=12, lmargin2=12)
+        widget.tag_configure("bullet", lmargin1=6, lmargin2=20)
+        widget.tag_configure("table", font=mono_font, background=self.blend_color(bg, "#ffffff", 0.045), foreground="#dbe4e8", lmargin1=6, lmargin2=6, spacing1=3, spacing3=3)
+        return widget
+
+    @staticmethod
+    def _code_table_text(rows):
+        if not rows:
+            return ""
+        column_count = max(len(row) for row in rows)
+        normalized = [(list(row) + [""] * column_count)[:column_count] for row in rows]
+        widths = [min(26, max(3, max(len(str(row[column])) for row in normalized))) for column in range(column_count)]
+
+        def cell(value, width):
+            value = str(value)
+            if len(value) > width:
+                value = value[: max(1, width - 1)] + "…"
+            return value.ljust(width)
+
+        def row_text(row):
+            return "│ " + " │ ".join(cell(row[column], widths[column]) for column in range(column_count)) + " │"
+
+        separator = "├─" + "─┼─".join("─" * width for width in widths) + "─┤"
+        return "\n".join([row_text(normalized[0]), separator, *(row_text(row) for row in normalized[1:])])
+
+    def _code_open_markdown_link(self, target):
+        value = str(target or "").strip()
+        try:
+            parsed = urllib.parse.urlparse(value)
+            if parsed.scheme in {"http", "https"}:
+                os.startfile(value)
+                return
+            if parsed.scheme == "file":
+                path = urllib.parse.unquote(parsed.path)
+                match = re.match(r"^/mnt/([a-zA-Z])/(.*)$", path)
+                if match:
+                    path = f"{match.group(1).upper()}:\\{match.group(2).replace('/', os.sep)}"
+                os.startfile(path)
+        except OSError:
+            pass
+
+    def _code_write_markdown(self, widget, text):
+        widget.configure(state="normal")
+        widget.delete("1.0", "end")
+        blocks = code_markdown_blocks(text)
+        for index, block in enumerate(blocks):
+            kind = block["type"]
+            if kind == "blank":
+                if index:
+                    widget.insert("end", "\n")
+                continue
+            if index:
+                widget.insert("end", "\n")
+            if kind == "rule":
+                widget.insert("end", "─" * 24, "muted")
+                continue
+            if kind == "code":
+                widget.insert("end", block["spans"][0][0], "codeblock")
+                continue
+            if kind == "table":
+                widget.insert("end", self._code_table_text(block.get("rows") or []), "table")
+                continue
+            prefix_tag = kind if kind in {"h1", "h2", "h3", "quote"} else ""
+            indent = "  " * int(block.get("indent") or 0)
+            if kind == "bullet":
+                widget.insert("end", f"{indent}•  ", "bullet")
+            elif kind == "task":
+                widget.insert("end", f"{indent}{'☑' if block.get('checked') else '☐'}  ", "bullet")
+            elif kind == "number":
+                widget.insert("end", f"{indent}{block.get('marker', '1.')}  ", "bullet")
+            elif indent:
+                widget.insert("end", indent)
+            for span in block["spans"]:
+                span_text, style = span[:2]
+                if style == "link" and len(span) > 2:
+                    target = span[2]
+                    style = f"link_{abs(hash(target))}"
+                    widget.tag_configure(style, foreground=self.c("accent"), underline=True)
+                    widget.tag_bind(style, "<Button-1>", lambda _event, url=target: self._code_open_markdown_link(url))
+                    widget.tag_bind(style, "<Enter>", lambda _event, item=widget: item.configure(cursor="hand2"))
+                    widget.tag_bind(style, "<Leave>", lambda _event, item=widget: item.configure(cursor="arrow"))
+                tags = tuple(tag for tag in (prefix_tag, style, "bullet" if kind in {"bullet", "number", "task"} else "") if tag)
+                widget.insert("end", span_text, tags or None)
+        widget.configure(state="disabled")
+        self._code_fit_text(widget)
+
+    def _code_add_user_bubble(self, text):
+        row = self._code_chat_row()
+        bg = self.blend_color(self.CODE_CHAT_BG, self.c("accent"), 0.26)
+        bubble = tk.Frame(row, bg=bg, highlightthickness=1, highlightbackground=self.blend_color(bg, "#ffffff", 0.12))
+        bubble.pack(side="right", anchor="e", padx=(60, 2))
+        tk.Label(
+            bubble,
+            text=str(text or "").strip(),
+            bg=bg,
+            fg=self.c("text"),
+            font=self.font(9),
+            justify="left",
+            anchor="w",
+            wraplength=max(160, int(self._code_chat_width() * 0.72)),
+            padx=11,
+            pady=8,
+        ).pack(anchor="w")
+        self._code_chat_scroll_end()
+
+    def _code_add_message(self, text, kind):
+        """Agent prose: no bubble, just readable markdown with a soft label."""
+        row = self._code_chat_row()
+        accents = {
+            "error": self.c("danger"),
+            "question": "#f0c85f",
+            "warning": "#f0c85f",
+        }
+        holder = tk.Frame(row, bg=self.CODE_CHAT_BG)
+        holder.pack(side="left", anchor="w", fill="x", expand=True, padx=(2, 40))
+        if kind in accents:
+            labels = {"error": "ERROR", "question": "QUESTION", "warning": "WARNING"}
+            tk.Label(
+                holder,
+                text=labels.get(kind, kind.upper()),
+                bg=self.CODE_CHAT_BG,
+                fg=accents[kind],
+                font=self.font(7, "bold"),
+                anchor="w",
+            ).pack(fill="x", pady=(0, 3))
+        # The label already carries the colour; a whole report in accent green
+        # is hard to read, so only errors and questions tint their body text.
+        widget = self._code_text_widget(
+            holder,
+            bg=self.CODE_CHAT_BG,
+            fg=accents.get(kind, self.c("text")) if kind in {"error", "question", "warning"} else self.c("text"),
+        )
+        widget.pack(fill="x")
+        self._code_write_markdown(widget, text)
+        self._code_chat_scroll_end()
+        return widget
+
+    def _code_add_status(self, text):
+        row = self._code_chat_row()
+        tk.Label(
+            row,
+            text=str(text or "").strip(),
+            bg=self.CODE_CHAT_BG,
+            fg=self.c("muted"),
+            font=self.font(7),
+            anchor="center",
+            wraplength=self._code_chat_width(),
+        ).pack(fill="x")
+        self._code_chat_scroll_end()
+
+    def _code_add_handoff(self, event):
+        row = self._code_chat_row()
+        bg = self.blend_color(self.CODE_CHAT_BG, "#8f72d8", 0.16)
+        card = tk.Frame(
+            row,
+            bg=bg,
+            highlightthickness=1,
+            highlightbackground=self.blend_color(bg, "#b892ff", 0.34),
+        )
+        card.pack(fill="x", padx=(2, 20))
+        tk.Label(
+            card,
+            text="PROVIDER HANDOFF",
+            bg=bg,
+            fg="#d9c6ff",
+            font=self.font(7, "bold"),
+            anchor="w",
+        ).pack(fill="x", padx=11, pady=(8, 2))
+        tk.Label(
+            card,
+            text=str(event.get("text") or "CODE provider switched"),
+            bg=bg,
+            fg=self.c("text"),
+            font=self.font(9, "bold"),
+            anchor="w",
+            justify="left",
+            wraplength=self._code_chat_width() - 70,
+        ).pack(fill="x", padx=11)
+        tk.Label(
+            card,
+            text="New native provider session · aiOS transferred context and working-tree state",
+            bg=bg,
+            fg=self.c("muted"),
+            font=self.font(7),
+            anchor="w",
+            justify="left",
+            wraplength=self._code_chat_width() - 70,
+        ).pack(fill="x", padx=11, pady=(2, 8))
+        self._code_chat_scroll_end()
+
+    def _code_stream_assistant(self, delta):
+        """Codex streams word-sized deltas; keep one growing markdown block."""
+        stream = getattr(self, "code_stream", None)
+        if stream is None or not stream["widget"].winfo_exists():
+            stream = {"widget": self._code_add_message("", "assistant"), "text": ""}
+            self.code_stream = stream
+        addition = str(delta or "")
+        stream["text"] += addition
+        self.code_turn_assistant_text = f"{getattr(self, 'code_turn_assistant_text', '')}{addition}"
+        self._code_write_markdown(stream["widget"], stream["text"])
+        self._code_chat_scroll_end()
+
+    def _code_close_stream(self):
+        self.code_stream = None
+
+    # ---- activity cards ----------------------------------------------------
+
+    def _code_activity_from_event(self, event):
+        """Normalize legacy tool/thinking rows into the same card shape."""
+        kind = str(event.get("kind") or "tool")
+        if kind == "activity":
+            return dict(event)
+        raw = str(event.get("text") or "Working").strip()
+        activity_type = "thinking" if kind == "thinking" else "tool"
+        if raw.startswith("$ ") or event.get("tool") == "command":
+            activity_type = "command"
+        elif re.match(r"^Edited\b", raw, flags=re.I) or event.get("tool") == "files":
+            activity_type = "files"
+        titles = {"thinking": "Thought through the approach", "command": "Ran command", "files": raw.split("\n")[0]}
+        return {
+            "kind": "activity",
+            "activity_id": code_activity_key(event),
+            "activity_type": activity_type,
+            "phase": "completed",
+            "title": titles.get(activity_type, "Approved permission" if kind == "approval" else raw.split(":")[0][:80]),
+            "detail": "" if activity_type == "command" else raw,
+            "command": re.sub(r"^\$\s*", "", raw) if activity_type == "command" else "",
+            "summary": raw if activity_type == "thinking" else "",
+            "ts": event.get("ts"),
+        }
+
+    def _code_upsert_activity(self, event):
+        key = code_activity_key(event)
+        cards = getattr(self, "code_activity_cards", None)
+        if cards is None:
+            cards = self.code_activity_cards = {}
+        card = cards.get(key)
+        if card is None or not self._card_alive(card):
+            card = self._code_build_activity_card(key)
+            cards[key] = card
+        state = card["state"]
+        phase = str(event.get("phase") or state.get("phase") or "started").casefold()
+        state["phase"] = {
+            "complete": "completed", "success": "completed", "succeeded": "completed", "done": "completed",
+            "error": "failed", "declined": "failed", "cancelled": "failed", "canceled": "failed",
+            "in_progress": "started", "running": "started", "pending": "started",
+        }.get(phase, phase if phase in {"started", "update", "completed", "failed"} else "completed")
+        for field in ("activity_type", "title", "detail", "command", "cwd", "output", "summary", "diff", "error"):
+            value = event.get(field)
+            if value not in (None, ""):
+                state[field] = str(value)
+        if event.get("delta"):
+            stream = str(event.get("stream") or "output")
+            target = {"summary": "summary", "plan": "detail"}.get(stream, "output")
+            state[target] = f"{state.get(target, '')}{event['delta']}"
+        for field in ("files", "steps"):
+            if isinstance(event.get(field), list) and event[field]:
+                state[field] = event[field]
+        if isinstance(event.get("changes"), list) and event["changes"]:
+            state["files"] = [str(change.get("path") or "") for change in event["changes"] if change.get("path")]
+            state["diff"] = "\n".join(str(change.get("diff") or "") for change in event["changes"] if change.get("diff"))
+        if event.get("exit_code") is not None:
+            state["exit_code"] = event["exit_code"]
+        if event.get("duration_ms") is not None:
+            state["duration_ms"] = event["duration_ms"]
+        self._code_paint_activity(card)
+        self._code_chat_scroll_end()
+        return card
+
+    def _card_alive(self, card):
+        try:
+            return bool(card.get("frame")) and card["frame"].winfo_exists()
+        except (AttributeError, tk.TclError):
+            return False
+
+    def _code_build_activity_card(self, key):
+        row = self._code_chat_row()
+        bg = self.blend_color(self.CODE_CHAT_BG, "#ffffff", 0.05)
+        frame = tk.Frame(row, bg=bg, highlightthickness=1, highlightbackground=self.blend_color(bg, "#ffffff", 0.09))
+        frame.pack(fill="x", anchor="w", padx=(2, 40))
+        header = tk.Frame(frame, bg=bg, cursor="hand2")
+        header.pack(fill="x", padx=9, pady=7)
+        icon_var = tk.StringVar(master=self.root, value=CODE_SPINNER_FRAMES[0])
+        title_var = tk.StringVar(master=self.root, value="Working")
+        preview_var = tk.StringVar(master=self.root, value="")
+        meta_var = tk.StringVar(master=self.root, value="")
+        chevron = tk.Label(header, text="▸", bg=bg, fg=self.c("muted"), font=self.font(8, "bold"), cursor="hand2")
+        chevron.pack(side="left")
+        icon = tk.Label(header, textvariable=icon_var, bg=bg, fg=self.c("muted"), font=self.font(9, "bold"), width=2, cursor="hand2")
+        icon.pack(side="left", padx=(5, 6))
+        copy = tk.Frame(header, bg=bg, cursor="hand2")
+        copy.pack(side="left", fill="x", expand=True)
+        title = tk.Label(copy, textvariable=title_var, bg=bg, fg=self.c("text"), font=self.font(8, "bold"), anchor="w", cursor="hand2")
+        title.pack(fill="x")
+        preview = tk.Label(copy, textvariable=preview_var, bg=bg, fg=self.c("muted"), font=("Cascadia Code", max(7, int(self.c("font_size")) - 3)), anchor="w", cursor="hand2")
+        preview.pack(fill="x")
+        meta = tk.Label(header, textvariable=meta_var, bg=bg, fg=self.c("muted"), font=self.font(7), cursor="hand2")
+        meta.pack(side="right")
+        body = tk.Frame(frame, bg=bg)
+        card = {
+            "key": key,
+            "frame": frame,
+            "header": header,
+            "bg": bg,
+            "icon": icon,
+            "icon_var": icon_var,
+            "title_var": title_var,
+            "preview_var": preview_var,
+            "meta_var": meta_var,
+            "chevron": chevron,
+            "body": body,
+            "open": False,
+            "state": {"phase": "started", "activity_type": "tool", "title": "Working", "files": [], "steps": []},
+        }
+        for widget in (header, chevron, icon, copy, title, preview, meta):
+            widget.bind("<Button-1>", lambda _event, item=card: self._code_toggle_activity(item))
+        return card
+
+    def _code_toggle_activity(self, card):
+        try:
+            self.code_chat.canvas.update_idletasks()
+            bounds = self.code_chat.canvas.bbox("all")
+            old_top = float(self.code_chat.canvas.canvasy(0)) - float(bounds[1] if bounds else 0)
+        except (tk.TclError, TypeError, ValueError):
+            old_top = 0.0
+        card["open"] = not card["open"]
+        card["chevron"].configure(text="▾" if card["open"] else "▸")
+        if card["open"]:
+            self._code_fill_activity_body(card)
+            card["body"].pack(fill="x", padx=9, pady=(0, 8))
+        else:
+            card["body"].pack_forget()
+        # Expanding details is a reading action. Preserve the viewport instead
+        # of snapping to the newest output at the bottom.
+        try:
+            self.code_chat.canvas.update_idletasks()
+            bounds = self.code_chat.canvas.bbox("all")
+            height = max(1.0, float(bounds[3] - bounds[1])) if bounds else 1.0
+            self.code_chat.canvas.configure(scrollregion=bounds)
+            self.code_chat.canvas.yview_moveto(max(0.0, min(1.0, old_top / height)))
+            self.code_auto_follow = self._code_chat_near_bottom()
+        except (tk.TclError, TypeError, ValueError):
+            pass
+
+    def _code_paint_activity(self, card):
+        state = card["state"]
+        phase = state.get("phase", "started")
+        colors = {"completed": self.c("success"), "failed": self.c("danger")}
+        card["icon"].configure(fg=colors.get(phase, self.c("accent")))
+        if phase == "completed":
+            card["icon_var"].set("✓")
+        elif phase == "failed":
+            card["icon_var"].set("×")
+        card["title_var"].set(state.get("title") or "Working")
+        preview = state.get("command") or state.get("detail") or ", ".join(state.get("files") or []) or state.get("summary") or ""
+        preview = re.sub(r"\s+", " ", str(preview)).strip()
+        card["preview_var"].set(preview[:110] + ("…" if len(preview) > 110 else ""))
+        label = {"command": "terminal", "files": "file edit", "thinking": "reasoning"}.get(state.get("activity_type"), state.get("activity_type") or "tool")
+        bits = []
+        if state.get("duration_ms") is not None:
+            bits.append(f"{max(0, int(state['duration_ms'])) / 1000:.1f}s")
+        if state.get("exit_code") is not None:
+            bits.append(f"exit {state['exit_code']}")
+        bits.append(label)
+        card["meta_var"].set(" · ".join(bits))
+        if card["open"]:
+            self._code_fill_activity_body(card)
+
+    def _code_fill_activity_body(self, card):
+        body = card["body"]
+        for child in list(body.winfo_children()):
+            try:
+                child.destroy()
+            except tk.TclError:
+                pass
+        state = card["state"]
+        bg = card["bg"]
+        sections = [
+            ("Command", state.get("command"), True),
+            ("Folder", state.get("cwd"), True),
+            ("Files", "\n".join(state.get("files") or []), True),
+            ("Reasoning", state.get("summary") or (state.get("detail") if state.get("activity_type") == "thinking" else ""), False),
+            ("Error" if state.get("phase") == "failed" else "Output", state.get("output"), True),
+            ("Error detail", state.get("error"), True),
+            ("Diff", state.get("diff"), True),
+        ]
+        shown = 0
+        for label, value, mono in sections:
+            text = str(value or "").strip()
+            if not text:
+                continue
+            shown += 1
+            tk.Label(body, text=label.upper(), bg=bg, fg=self.c("muted"), font=self.font(7, "bold"), anchor="w").pack(fill="x", pady=(6, 2))
+            if len(text) > 8000:
+                text = "…\n" + text[-8000:]
+            block_bg = self.blend_color(bg, "#000000", 0.35)
+            widget = self._code_text_widget(body, bg=block_bg, fg="#d3dee6" if mono else self.c("text"), mono=mono)
+            widget.configure(padx=8, pady=6)
+            widget.pack(fill="x")
+            if mono:
+                widget.configure(state="normal")
+                widget.insert("1.0", text)
+                widget.configure(state="disabled")
+                self._code_fit_text(widget)
+            else:
+                self._code_write_markdown(widget, text)
+        for step in state.get("steps") or []:
+            if not shown:
+                tk.Label(body, text="PLAN", bg=bg, fg=self.c("muted"), font=self.font(7, "bold"), anchor="w").pack(fill="x", pady=(6, 2))
+                shown += 1
+            status = str(step.get("status") or "pending") if isinstance(step, dict) else "pending"
+            glyph = {"completed": "✓", "in_progress": "◌", "inProgress": "◌"}.get(status, "○")
+            label = str(step.get("step") or step.get("text") or "") if isinstance(step, dict) else str(step)
+            tk.Label(body, text=f"{glyph}  {label}", bg=bg, fg=self.c("muted"), font=self.font(8), anchor="w", justify="left", wraplength=self._code_chat_width() - 60).pack(fill="x")
+        if not shown and not (state.get("steps") or []):
+            tk.Label(
+                body,
+                text="Live details will appear here." if state.get("phase") in {"started", "update"} else "No additional output.",
+                bg=bg,
+                fg=self.c("muted"),
+                font=self.font(7),
+                anchor="w",
+            ).pack(fill="x", pady=(4, 2))
+
+    # ---- live spinner ------------------------------------------------------
+
+    def _code_set_busy(self, active, label="Working"):
+        if not self._code_chat_live():
+            return
+        row = getattr(self, "code_busy_row", None)
+        alive = False
+        try:
+            alive = row is not None and row.winfo_exists()
+        except tk.TclError:
+            alive = False
+        if not active:
+            if alive:
+                row.destroy()
+            self.code_busy_row = None
+            self.code_busy_label = None
+            return
+        if not alive:
+            row = tk.Frame(self.code_chat_inner, bg=self.CODE_CHAT_BG)
+            row.pack(fill="x", padx=8, pady=(6, 8))
+            self.code_busy_row = row
+            self.code_busy_icon = tk.StringVar(master=self.root, value=CODE_SPINNER_FRAMES[0])
+            tk.Label(row, textvariable=self.code_busy_icon, bg=self.CODE_CHAT_BG, fg=self.c("accent"), font=self.font(9, "bold")).pack(side="left", padx=(2, 7))
+            self.code_busy_label = tk.Label(row, text=label, bg=self.CODE_CHAT_BG, fg=self.c("muted"), font=self.font(8, "italic"), anchor="w")
+            self.code_busy_label.pack(side="left")
+            self._code_spin_start()
+        else:
+            try:
+                self.code_busy_label.configure(text=label)
+            except (AttributeError, tk.TclError):
+                pass
+
+    def _code_spin_start(self):
+        if getattr(self, "code_spin_after", None) is not None:
+            return
+        self.code_spin_step = 0
+        self._code_spin()
+
+    def _code_spin(self):
+        self.code_spin_after = None
+        if not self._code_chat_live():
+            return
+        self.code_spin_step = (getattr(self, "code_spin_step", 0) + 1) % len(CODE_SPINNER_FRAMES)
+        glyph = CODE_SPINNER_FRAMES[self.code_spin_step]
+        try:
+            if getattr(self, "code_busy_row", None) is not None and self.code_busy_row.winfo_exists():
+                self.code_busy_icon.set(glyph)
+        except (AttributeError, tk.TclError):
+            pass
+        for card in list(getattr(self, "code_activity_cards", {}).values()):
+            if card["state"].get("phase") in {"started", "update"} and self._card_alive(card):
+                try:
+                    card["icon_var"].set(glyph)
+                except tk.TclError:
+                    pass
+        try:
+            self.code_spin_after = self.root.after(110, self._code_spin)
+        except tk.TclError:
+            self.code_spin_after = None
+
+    def _code_render_event(self, event, live=False):
+        if not self._code_chat_live():
+            return
+        kind = str(event.get("kind") or "status")
+        text = str(event.get("text") or kind)
+
+        if kind == "result":
+            assistant_text = re.sub(r"\s+", "", getattr(self, "code_turn_assistant_text", ""))
+            result_text = re.sub(r"\s+", "", text)
+            if assistant_text and result_text == assistant_text:
+                self._code_close_stream()
+                self.code_last_rendered_kind = "result"
+                return
+            # Some providers only emit a result. Show it as ordinary agent prose,
+            # never as a second, specially labelled final-report card.
+            kind = "assistant"
+
+        if kind in {"activity", "tool", "thinking", "approval"}:
+            self._code_close_stream()
+            self._code_upsert_activity(self._code_activity_from_event(event))
+            self.code_last_rendered_kind = "activity"
+            return
+        if kind == "provider_switch":
+            self._code_close_stream()
+            self._code_add_handoff(event)
+            self.code_last_rendered_kind = kind
+            return
+        if kind in {"assistant", "assistant_delta"}:
+            self._code_stream_assistant(str(event.get("delta") or text))
+            self.code_last_rendered_kind = "assistant"
+            return
+
+        self._code_close_stream()
+        if kind == "user":
+            self.code_turn_assistant_text = ""
+            self._code_add_user_bubble(text)
+        elif kind == "status":
+            self._code_add_status(text)
+        else:
+            self._code_add_message(text, kind)
+        self.code_last_rendered_kind = kind
+
+    def _code_set_speaking(self):
+        self.config["code_speak_notifications"] = bool(self.code_speak_var.get())
+        save_config(self.config)
+
+    def _code_refresh_selectors(self):
+        if not hasattr(self, "code_model_menu"):
+            return
+        provider = self.code_provider_var.get()
+        info = next((row for row in self.code_capabilities.get("providers") or [] if row.get("provider") == provider), {})
+        models = info.get("models") or []
+        ids = [str(model.get("id")) for model in models if model.get("id")]
+        if not ids:
+            ids = {"codex": ["gpt-5.6-sol"], "claude": ["sonnet"], "cursor": ["composer-2.5"]}.get(provider, [])
+        menu = self.code_model_menu["menu"]
+        menu.delete(0, "end")
+        for model_id in ids:
+            menu.add_command(label=model_id, command=tk._setit(self.code_model_var, model_id))
+        if self.code_model_var.get() not in ids and ids:
+            self.code_model_var.set(ids[0])
+        self._code_refresh_reasoning()
+
+    def _code_refresh_reasoning(self):
+        if not hasattr(self, "code_reasoning_menu"):
+            return
+        provider = self.code_provider_var.get()
+        info = next((row for row in self.code_capabilities.get("providers") or [] if row.get("provider") == provider), {})
+        model = next((row for row in info.get("models") or [] if row.get("id") == self.code_model_var.get()), {})
+        efforts = [str(value) for value in model.get("reasoning") or ["medium"]]
+        menu = self.code_reasoning_menu["menu"]
+        menu.delete(0, "end")
+        for effort in efforts:
+            menu.add_command(label=effort, command=tk._setit(self.code_reasoning_var, effort))
+        preferred = str(model.get("default_reasoning") or "medium")
+        if self.code_reasoning_var.get() not in efforts:
+            self.code_reasoning_var.set(preferred if preferred in efforts else efforts[0])
+        self.code_fast_check.configure(state="normal" if model.get("fast") else "disabled")
+        if not model.get("fast"):
+            self.code_fast_var.set(False)
+        if hasattr(self, "code_setup_button"):
+            self.code_setup_button.configure(
+                text="Ready" if info.get("ready") else f"Sign in {provider.title()}",
+                state="disabled" if info.get("ready") else "normal",
+            )
+
+    def _code_start_job(self):
+        brief = self.code_brief.get("1.0", "end").strip()
+        if not brief:
+            messagebox.showinfo("CODE", "Describe what the agent should build first.")
+            return
+        provider = self.code_provider_var.get()
+        info = next((row for row in self.code_capabilities.get("providers") or [] if row.get("provider") == provider), {})
+        if info and not info.get("ready"):
+            messagebox.showerror("CODE", info.get("message") or f"{provider.title()} is not ready.")
+            return
+        attachments = [{"path": path, "label": Path(path).name} for path in self.code_create_attachments]
+        attachments.extend({"url": url, "label": url} for url in re.findall(r"https?://[^\s)]+", brief))
+        payload = {
+            "provider": provider,
+            "cwd": self.code_project_var.get().strip(),
+            "brief": brief,
+            "model": self.code_model_var.get(),
+            "reasoning": self.code_reasoning_var.get(),
+            "fast": self.code_fast_var.get(),
+            "attachments": attachments,
+        }
+        self.code_health_var.set(f"Launching {provider.title()}…")
+
+        def worker():
+            result = self._code_api("/api/code/jobs", "POST", payload, timeout=40)
+            self.root.after(0, lambda: self._code_started(result))
+
+        threading.Thread(target=worker, daemon=True, name="aios-code-start").start()
+
+    def _code_started(self, result):
+        if not result.get("ok"):
+            messagebox.showerror("CODE", result.get("error") or "Could not start the CODE job.")
+            return
+        self.code_brief.delete("1.0", "end")
+        self.code_create_attachments = []
+        self.code_attach_button.configure(text="Attach")
+        self.code_selected_id = str((result.get("job") or {}).get("id") or "")
+        self.code_log_size = 0
+        self._code_sessions_signature = None
+        self._code_refresh_all()
+
+    def _code_send_followup(self):
+        if not self.code_selected_id:
+            messagebox.showinfo("CODE", "Select a session first.")
+            return
+        text = self.code_followup.get("1.0", "end").strip()
+        if not text:
+            return
+        payload = {
+            "text": text,
+            "urgent": self.code_urgent_var.get(),
+            "attachments": [{"path": path, "label": Path(path).name} for path in self.code_followup_attachments],
+        }
+        self.code_followup.delete("1.0", "end")
+        self.code_followup_attachments = []
+        self.code_follow_attach_button.configure(text="+ File")
+        self.code_urgent_var.set(False)
+        job_id = self.code_selected_id
+
+        def worker():
+            result = self._code_api(f"/api/code/jobs/{job_id}/messages", "POST", payload)
+            if not result.get("ok"):
+                self.root.after(0, lambda: messagebox.showerror("CODE", result.get("error") or "Could not send the follow-up."))
+
+        threading.Thread(target=worker, daemon=True, name="aios-code-followup").start()
+
+    def _code_stop_job(self):
+        if not self.code_selected_id:
+            return
+        job_id = self.code_selected_id
+        threading.Thread(target=lambda: self._code_api(f"/api/code/jobs/{job_id}/stop", "POST", {}), daemon=True).start()
+
+    def _code_delete_job(self):
+        if not self.code_selected_id or not messagebox.askyesno("Delete CODE session", "Delete this session and transcript? Project files stay untouched."):
+            return
+        job_id = self.code_selected_id
+
+        def worker():
+            result = self._code_api(f"/api/code/jobs/{job_id}", "DELETE", {"confirm": job_id})
+            def finish():
+                if not result.get("ok"):
+                    messagebox.showerror("CODE", result.get("error") or "Could not delete the session.")
+                    return
+                if self.code_selected_id == job_id:
+                    self.code_selected_id = ""
+                    self.code_log_size = 0
+                self._code_refresh_all()
+
+            self.root.after(0, finish)
+
+        threading.Thread(target=worker, daemon=True, name="aios-code-delete").start()
 
     def render_apps(self):
         self.page_title("Apps")
@@ -6363,19 +7971,31 @@ class HelperOverlay:
         except (AttributeError, OSError, tk.TclError, ValueError):
             self._root_native_wndproc = None
 
-    def _protect_aios_windows_from_capture(self, passive=False):
-        """Exclude every aiOS top-level window and optionally make it input-transparent."""
+    def _set_aios_agent_capture_hidden(self, hidden):
+        """Toggle capture affinity only while aiOS itself grabs an agent frame."""
         if not sys.platform.startswith("win"):
             return False
         user32 = ctypes.windll.user32
-        protected = False
+        applied = False
+        affinity = WDA_EXCLUDEFROMCAPTURE if hidden else WDA_NONE
         for hwnd in self._aios_top_level_windows():
             try:
-                excluded = bool(user32.SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE))
-                if not excluded:
-                    excluded = bool(user32.SetWindowDisplayAffinity(hwnd, WDA_MONITOR))
-                protected = protected or excluded
-                if passive:
+                changed = bool(user32.SetWindowDisplayAffinity(hwnd, affinity))
+                if hidden and not changed:
+                    changed = bool(user32.SetWindowDisplayAffinity(hwnd, WDA_MONITOR))
+                applied = applied or changed
+            except (OSError, ValueError):
+                continue
+        self._operator_capture_exclusion_ok = applied if hidden else False
+        return applied
+
+    def _show_aios_windows_in_normal_capture(self, passive=False):
+        """Keep aiOS visible to screenshots/sharing; optionally pass agent input through."""
+        visible = self._set_aios_agent_capture_hidden(False)
+        if passive and sys.platform.startswith("win"):
+            user32 = ctypes.windll.user32
+            for hwnd in self._aios_top_level_windows():
+                try:
                     style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
                     self._operator_passive_window_styles.setdefault(int(hwnd), int(style))
                     user32.SetWindowLongW(
@@ -6383,10 +8003,24 @@ class HelperOverlay:
                         GWL_EXSTYLE,
                         style | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
                     )
-            except (OSError, ValueError):
-                continue
-        self._operator_capture_exclusion_ok = protected
-        return protected
+                except (OSError, ValueError):
+                    continue
+        return visible
+
+    def _agent_capture_affinity_begin(self, token):
+        self._agent_capture_affinity_tokens.add(str(token))
+        return self._set_aios_agent_capture_hidden(True)
+
+    def _agent_capture_affinity_end(self, token):
+        self._agent_capture_affinity_tokens.discard(str(token))
+        if not self._agent_capture_affinity_tokens:
+            self._set_aios_agent_capture_hidden(False)
+
+    def _remote_agent_capture_begin(self, token):
+        """Start a short remote capture lease with automatic crash cleanup."""
+        token = str(token)
+        self._agent_capture_affinity_begin(token)
+        self.root.after(5000, lambda value=token: self._agent_capture_affinity_end(value))
 
     def _restore_aios_window_input(self):
         if not sys.platform.startswith("win"):
@@ -6401,13 +8035,13 @@ class HelperOverlay:
         self._operator_passive_window_styles.clear()
 
     def _agent_operator_capture_clean(self, monitor):
-        # WDA_EXCLUDEFROMCAPTURE lets the user keep seeing aiOS while the model
-        # receives the real desktop underneath it. The hide/show fallback is
-        # only used on Windows builds where capture exclusion is unavailable.
+        # Scope WDA_EXCLUDEFROMCAPTURE to this frame only. Normal screenshots
+        # and screen sharing see aiOS before and immediately after the grab.
+        token = f"operator:{threading.get_ident()}:{time.time_ns()}"
         protected = [False]
 
         def prepare():
-            protected[0] = self._protect_aios_windows_from_capture(passive=False)
+            protected[0] = self._agent_capture_affinity_begin(token)
             if not protected[0]:
                 self._agent_operator_control_hide(temporary=True)
                 try:
@@ -6420,11 +8054,13 @@ class HelperOverlay:
         try:
             return self.agent_operator_raw_capture(monitor)
         finally:
-            if not protected[0] and self.agent_operator_loop and self.agent_operator_loop.is_running():
-                self._agent_operator_ui_sync(
-                    lambda m=monitor: (self.root.deiconify(), self._agent_operator_control_show(m)),
-                    timeout=0.05,
-                )
+            def restore():
+                self._agent_capture_affinity_end(token)
+                if not protected[0] and self.agent_operator_loop and self.agent_operator_loop.is_running():
+                    self.root.deiconify()
+                    self._agent_operator_control_show(monitor)
+
+            self._agent_operator_ui_sync(restore, timeout=0.1)
 
     def _agent_operator_model(self):
         return self.agent_operator_model_var.get().strip() or self.agent_operator_default_model
@@ -7623,10 +9259,10 @@ class HelperOverlay:
     def _agent_operator_control_show(self, monitor):
         if not monitor:
             return
-        # aiOS remains visible and clickable for the user. Its capture is
-        # excluded, and only OPERATOR-tagged mouse packets pass through it.
+        # aiOS remains visible/clickable and appears in normal screen sharing.
+        # Only OPERATOR's own frame grabs temporarily exclude it.
         self._operator_input_passthrough = True
-        self._protect_aios_windows_from_capture(passive=False)
+        self._show_aios_windows_in_normal_capture(passive=False)
         self.agent_operator_control_monitor = monitor
         self.agent_operator_control_visible = True
         if self.agent_operator_native_overlay:
@@ -7711,8 +9347,7 @@ class HelperOverlay:
                 style | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
             )
             top_hwnd = user32.GetAncestor(hwnd, GA_ROOT) or hwnd
-            if not user32.SetWindowDisplayAffinity(top_hwnd, WDA_EXCLUDEFROMCAPTURE):
-                user32.SetWindowDisplayAffinity(top_hwnd, WDA_MONITOR)
+            user32.SetWindowDisplayAffinity(top_hwnd, WDA_NONE)
         except (tk.TclError, OSError):
             pass
 
@@ -7771,7 +9406,8 @@ class HelperOverlay:
         self._agent_operator_control_hide(temporary=False)
         self._operator_input_passthrough = False
         self._restore_aios_window_input()
-        self._protect_aios_windows_from_capture(passive=False)
+        self._agent_capture_affinity_tokens.clear()
+        self._show_aios_windows_in_normal_capture(passive=False)
 
     def _agent_operator_redraw_preview(self):
         if self.agent_operator_current_image is None or self.agent_operator_canvas is None:
@@ -8304,7 +9940,7 @@ class HelperOverlay:
             lambda text: self._commit_voice_text("whisper_model", text),
             hint="large-v3-turbo is the best pick on a GPU: near-large accuracy at small speed. "
             "Also: tiny, base, small, medium, large-v3, distil-large-v3, and .en variants. "
-            "Restart dictation to load a new model.",
+            "Changes preload in the background; large models can take about a minute to become ready.",
         )
         self.voice_language_var = tk.StringVar(value=voice_cfg.get("language", "auto"))
         self.auto_option(
@@ -9225,7 +10861,7 @@ class HelperOverlay:
 
     def codex_task_for_project(self, project_path):
         self.active_project = project_path
-        self.render_tab("Codex")
+        self.render_tab("CODE")
 
     def open_code(self, project_path):
         code = shutil.which("code") or shutil.which("code.cmd")
@@ -9246,8 +10882,8 @@ class HelperOverlay:
         text = prompt.strip()
         lower = text.casefold()
 
-        if lower in {"dashboard", "projects", "codex", "apps", "drop", "ai operator", "aioperator", "operator", "settings"}:
-            tab = "AI Operator" if lower in {"ai operator", "aioperator", "operator"} else lower.title()
+        if lower in {"dashboard", "projects", "code", "codex", "apps", "drop", "ai operator", "aioperator", "operator", "settings"}:
+            tab = "AI Operator" if lower in {"ai operator", "aioperator", "operator"} else "CODE" if lower in {"code", "codex"} else lower.title()
             self.root.after(0, lambda value=tab: self.render_tab(value))
             return f"Switched to {tab}."
 
@@ -9525,16 +11161,11 @@ class HelperOverlay:
         return projects[0] if projects else self.project_root
 
     def run_codex_from_tab(self):
-        project = Path(self.codex_project_entry.get("1.0", "end").strip())
-        prompt = self.codex_prompt.get("1.0", "end").strip()
-        if not prompt:
-            self.append_codex_output("Enter a Codex task first.\n")
-            return
-        self.save_codex_settings()
-        self.run_codex_task(project, prompt)
+        if self.active_tab == "CODE" and hasattr(self, "code_brief"):
+            self._code_start_job()
 
     def codex_open_desktop(self):
-        project = Path(self.codex_project_entry.get("1.0", "end").strip())
+        project = Path(self.code_project_var.get().strip() if hasattr(self, "code_project_var") else self.default_project_path())
         self._launch_codex_app(project)
         self.local_reply(f"Opened Codex Desktop:\n{project}")
 
@@ -9551,15 +11182,23 @@ class HelperOverlay:
         project_path.mkdir(parents=True, exist_ok=True)
         self.ensure_project_memory(project_path)
         self.active_project = project_path
-        self.render_tab("Codex")
-        if self.codex_process and self.codex_process.poll() is None:
-            self.append_codex_output("Codex is already running. Stop it first.\n")
-            return
+        self.render_tab("CODE")
+        model = str(self.config.get("codex_model") or "gpt-5.6-sol")
+        reasoning = str(self.config.get("codex_reasoning") or "medium")
+        payload = {
+            "provider": "codex",
+            "cwd": str(project_path),
+            "brief": str(prompt),
+            "model": model,
+            "reasoning": reasoning,
+            "fast": bool(self.config.get("codex_fast", False)),
+        }
 
-        self.codex_log = []
-        self.refresh_codex_output()
-        self.append_codex_output(f"> {prompt}\n\n")
-        threading.Thread(target=self._run_codex_worker, args=(project_path, prompt), daemon=True).start()
+        def worker():
+            result = self._code_api("/api/code/jobs", "POST", payload, timeout=40)
+            self.root.after(0, lambda: self._code_started(result))
+
+        threading.Thread(target=worker, daemon=True, name="aios-code-legacy-start").start()
 
     def _run_codex_worker(self, project_path, prompt):
         codex = find_codex()
@@ -10688,6 +12327,7 @@ class HelperOverlay:
             return
         self.hide_thinking()
         self._live_tool_count = 0
+        self._live_tool_call_ids = set()
         self._agent_turn_active = True
         self._stream_reply_frame = None
         self._stream_reply_var = None
@@ -10881,6 +12521,15 @@ class HelperOverlay:
         """Insert an expandable tool-call card into the agent chat transcript."""
         if not hasattr(self, "chat_inner") or not isinstance(detail, dict):
             return
+        call_id = str(detail.get("call_id") or "").strip()
+        if before_thinking and call_id:
+            seen = getattr(self, "_live_tool_call_ids", None)
+            if not isinstance(seen, set):
+                seen = set()
+                self._live_tool_call_ids = seen
+            if call_id in seen:
+                return
+            seen.add(call_id)
         name = str(detail.get("name") or "tool")
         label = str(detail.get("label") or name)
         summary = str(detail.get("summary") or label)
@@ -12038,6 +13687,22 @@ class HelperOverlay:
         except (AttributeError, OSError, tk.TclError):
             pass
 
+    def _tray_notify(self, title, message, level="info"):
+        if not self._tray_added or self._tray_nid is None or not sys.platform.startswith("win"):
+            return
+        try:
+            nid = self._tray_nid
+            nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_INFO
+            nid.szInfoTitle = str(title or "aiOS CODE")[:63]
+            nid.szInfo = re.sub(r"\s+", " ", str(message or ""))[:255]
+            nid.dwInfoFlags = {
+                "error": NIIF_ERROR,
+                "warning": NIIF_WARNING,
+            }.get(level, NIIF_INFO)
+            ctypes.windll.shell32.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(nid))
+        except (AttributeError, OSError, ValueError):
+            pass
+
     def _subclass_tray_window(self, hwnd):
         user32 = ctypes.windll.user32
         lresult = ctypes.c_ssize_t
@@ -12600,6 +14265,7 @@ class HelperOverlay:
             "phone_start", "phone_stop", "reload_operator_settings",
             "operator_stop", "operator_clear", "operator_clear_attachments",
             "operator_followup", "voice_event", "voice_log",
+            "agent_capture_begin", "agent_capture_end",
         }:
             return
         if action == "chat":
@@ -12626,6 +14292,12 @@ class HelperOverlay:
             self.root.after(0, lambda value=text, opts=options: self._remote_voice_event(value, opts or {}))
         elif action == "voice_log":
             self.root.after(0, lambda value=text, opts=options: self._remote_voice_log(value, opts or {}))
+        elif action == "agent_capture_begin":
+            token = text or str((options or {}).get("token") or "voice-agent")
+            self.root.after(0, lambda value=token: self._remote_agent_capture_begin(value))
+        elif action == "agent_capture_end":
+            token = text or str((options or {}).get("token") or "voice-agent")
+            self.root.after(0, lambda value=token: self._agent_capture_affinity_end(value))
 
     def _ensure_agent_turn_ui(self, status="Thinking"):
         if self._agent_turn_active:
