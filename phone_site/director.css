@@ -1151,7 +1151,7 @@ button { border: 0; background: none; cursor: pointer; }
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 6px;
 }
-.blob-grid.eyes { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.blob-grid.eyes { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .blob-choice {
   height: 52px;
   padding: 4px;

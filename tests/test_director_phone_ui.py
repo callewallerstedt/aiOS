@@ -121,3 +121,24 @@ def test_homepage_settings_has_universal_instructions():
     assert "instructions: houseInput.value" in body
     assert "Every agent sees this" in body
     assert "Save instructions" in body
+
+
+def test_supplied_eye_sheet_is_selectable_and_rotates_on_active_blobs():
+    supplied = [
+        "frustrated", "annoyed", "thinking",
+        "focused", "sleepy", "confused",
+        "skeptical", "worried", "mischievous",
+    ]
+    emotions = _block(JS, "const BLOB_EMOTIONS", "function blobSpec")
+    eye_art = _block(JS, "function blobEyes", "function activeBlobEmotion")
+    rotation = _block(JS, "function activeBlobEmotion", "function blobBody")
+    picker = _block(JS, 'const eyeRow = el("div", "blob-row")', "const shuffle")
+    for name in supplied:
+        assert f'"{name}"' in emotions
+        assert f'case "{name}"' in eye_art
+    assert "ACTIVE_EYE_ROTATION" in rotation
+    assert 'mood !== "working" && mood !== "waiting"' in rotation
+    assert "ACTIVE_EYE_INTERVAL = 4500" in JS
+    assert "setInterval(rotateActiveBlobEyes, ACTIVE_EYE_INTERVAL)" in JS
+    assert 'btn.setAttribute("aria-label", btn.title)' in picker
+    assert ".blob-grid.eyes { grid-template-columns: repeat(3" in CSS
