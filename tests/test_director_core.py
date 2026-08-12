@@ -344,6 +344,7 @@ def test_chrome_flags_paint_on_a_virtual_screen(director, monkeypatch):
 
     monkeypatch.setattr(display_mod, "chrome_binary", lambda: "/usr/bin/google-chrome-stable")
     argv = display_mod.chrome_argv("https://example.com")
+    assert "--ozone-platform=x11" in argv
     assert "--use-angle=swiftshader" in argv
     assert "--no-sandbox" in argv
     assert argv[-1] == "https://example.com"

@@ -138,6 +138,7 @@ def chrome_argv(url: str = "", settings: dict[str, Any] | None = None) -> list[s
         "--use-angle=swiftshader",
         "--disable-dev-shm-usage",
         "--no-sandbox",
+        "--ozone-platform=x11",
         f"--window-size={width},{height}",
         "--window-position=0,0",
         "--start-maximized",
