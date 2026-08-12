@@ -1679,6 +1679,33 @@ async function openSettings() {
   alerts.append(pushRow);
   body.append(alerts);
 
+  const house = el("div", "group");
+  house.append(el("h3", null, "Instructions"));
+  house.append(el("div", "hint",
+    "Every agent sees this on every turn — Director, Operator, Coder, and any "
+    + "chat you add. Standing rules: language, tone, what never to do."));
+  const houseField = el("div", "field");
+  const houseInput = el("textarea");
+  houseInput.rows = 6;
+  houseInput.placeholder = "e.g. Always reply in Swedish. Never buy anything.";
+  houseInput.value = data.settings.instructions || "";
+  houseField.append(houseInput);
+  house.append(houseField);
+  const saveHouse = el("button", "btn primary", "Save instructions");
+  saveHouse.addEventListener("click", async () => {
+    try {
+      await api("/api/settings", {
+        method: "PATCH",
+        body: JSON.stringify({ instructions: houseInput.value }),
+      });
+      saveHouse.textContent = "Saved";
+    } catch (error) {
+      saveHouse.textContent = String(error.message || error);
+    }
+  });
+  house.append(saveHouse);
+  body.append(house);
+
   // permissions
   const permissions = el("div", "group");
   permissions.append(el("h3", null, "Permissions"));

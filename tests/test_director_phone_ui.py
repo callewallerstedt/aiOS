@@ -111,3 +111,13 @@ def test_returning_to_list_does_not_refetch_or_resize_the_selected_avatar():
     blob = _block(JS, "function blobSvg", "function fillAvatar")
     assert 'viewBox="0 0 64 64"' in blob
     assert 'mood === "sleeping" ?' not in blob
+
+
+def test_homepage_settings_has_universal_instructions():
+    """The agent-list Settings sheet is where standing instructions are edited.
+    PATCH /api/settings {instructions} is what every agent prompt reads."""
+    body = _block(JS, "async function openSettings()", "// permissions")
+    assert 'el("h3", null, "Instructions")' in body
+    assert "instructions: houseInput.value" in body
+    assert "Every agent sees this" in body
+    assert "Save instructions" in body

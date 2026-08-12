@@ -237,6 +237,21 @@ def identity_block(agent: dict) -> str:
     return "\n".join(lines)
 
 
+def house_instructions(settings: dict[str, Any] | None = None) -> str:
+    """Calle's standing instructions, applied to every agent."""
+    cfg = settings if settings is not None else config.load_settings()
+    return str(cfg.get("instructions") or "").strip()[:8000]
+
+
+def _with_house_instructions(parts: list[str], settings: dict[str, Any] | None = None) -> None:
+    text = house_instructions(settings)
+    if text:
+        parts.append(
+            "Calle's standing instructions for every agent. Follow these unless "
+            "they conflict with the hard rules above:\n" + text
+        )
+
+
 def system_prompt(agent: dict, settings: dict[str, Any] | None = None) -> str:
     custom = str(agent.get("system_prompt") or "").strip()
     parts = [BASE_PROMPT.strip(), identity_block(agent)]
@@ -251,6 +266,7 @@ def system_prompt(agent: dict, settings: dict[str, Any] | None = None) -> str:
     elif custom:
         parts.append(custom)
 
+    _with_house_instructions(parts, settings)
     environment = environment_block(settings)
     if environment:
         parts.append(f"Context:\n{environment}")

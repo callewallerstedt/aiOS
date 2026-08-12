@@ -129,6 +129,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         # off again there. Per-agent and per-run grants live elsewhere.
         "approve_all": False,
     },
+    # Standing instructions every agent sees. Edited from the phone Settings
+    # screen; empty means none.
+    "instructions": "",
     "push": {
         "enabled": True,
         "public_key": "",

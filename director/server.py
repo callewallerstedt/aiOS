@@ -565,6 +565,8 @@ async def patch_settings(request: web.Request) -> web.Response:
     voice = body.get("voice") or {}
     if str(voice.get("openai_api_key") or "").startswith("••••"):
         voice.pop("openai_api_key")
+    if "instructions" in body:
+        body["instructions"] = str(body.get("instructions") or "")[:8000]
     config.update_settings(body)
     return json_response({"ok": True})
 

@@ -397,6 +397,26 @@ def test_every_agent_gets_the_slack_coworker_base_prompt(director):
     assert "You are part of aiOS Director" in operator
 
 
+def test_house_instructions_reach_every_agent(director):
+    from director import agents, config
+
+    assert config.DEFAULT_SETTINGS["instructions"] == ""
+    agents.ensure_seeded()
+    settings = {"instructions": "Always reply in Swedish. Never buy anything."}
+    for agent_id in ("agt_director", "agt_operator", "agt_coder"):
+        prompt = agents.system_prompt(director.get_agent(agent_id), settings)
+        assert "Always reply in Swedish. Never buy anything." in prompt
+        assert "standing instructions for every agent" in prompt
+    empty = agents.system_prompt(director.get_agent("agt_director"), {})
+    assert "standing instructions for every agent" not in empty
+    custom = director.create_agent(name="Shop", kind="custom", agent_id="agt_shop")
+    assert "Always reply in Swedish" in agents.system_prompt(custom, settings)
+    config.update_settings({"instructions": "Speak like a pirate."})
+    loaded = agents.system_prompt(director.get_agent("agt_director"))
+    assert "Speak like a pirate." in loaded
+    assert len(agents.house_instructions({"instructions": "x" * 9000})) == 8000
+
+
 def test_funnel_prefix_is_stripped_so_vnc_routes_match():
     from director.server import strip_funnel_prefix
 
