@@ -1,0 +1,17 @@
+[Unit]
+Description=aiOS Director window manager (openbox on the virtual screen)
+After=aios-director-xvfb.service
+Requires=aios-director-xvfb.service
+
+[Service]
+Type=simple
+Environment=DISPLAY=:99
+# Without a window manager, Chrome renders but nothing maximises, nothing takes
+# focus, and _NET_CLIENT_LIST is never published — the operator ends up driving
+# a screen it cannot reason about.
+ExecStart=/usr/bin/openbox
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target

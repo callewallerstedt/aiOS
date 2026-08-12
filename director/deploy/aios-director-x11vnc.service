@@ -1,0 +1,15 @@
+[Unit]
+Description=aiOS Director screen export (x11vnc)
+After=aios-director-xvfb.service
+Requires=aios-director-xvfb.service
+
+[Service]
+Type=simple
+# Loopback only: Director bridges this to the phone over its own authenticated
+# WebSocket, so the RFB port is never reachable from the network.
+ExecStart=/usr/bin/x11vnc -display :99 -localhost -rfbport 5999 -forever -shared -nopw -noxdamage -quiet
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target

@@ -28,9 +28,22 @@ agent_self/*
 !agent_self/SOUL.md
 
 helper_config.json
+helper_config.json.bak
 phone-bridge-url.txt
 phone-relay-state.json
 phone_operator_events/
+code_jobs/
+# Benchmark runs: throwaway agent workspaces, transcripts and results. The
+# tasks that produced them are in bench/suites.py, which is what matters.
+bench/runs/
+# Public benchmark downloads are immutable, verified caches rebuilt from the
+# pins in bench/*.py; keep the source tree small.
+bench/data/
+# Harness-owned language servers are reproducible from these manifests; never
+# commit the downloaded npm dependency tree.
+.tools/lsp/node_modules/
+# Saved custom prompts are local user data, not part of the harness suite.
+bench/custom/
 tools/cloudflared.exe
 debug_runs/
 agent_clicker/debug_runs/
@@ -56,3 +69,7 @@ aios-phone-v*.tar.gz
 .aios_update_staging/
 .aios_update_pending_sha
 .aios_sha
+
+# aiOS Director
+aios_director_client.json
+.aios-director-client.log

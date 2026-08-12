@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1" />
+<title>Operator screen</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  #screen { position: absolute; inset: 0; }
+  #screen > div { width: 100% !important; height: 100% !important; }
+  canvas { display: block; }
+  #status {
+    position: absolute; left: 12px; top: 12px; z-index: 2;
+    color: #fff8; font: 12px/1.4 -apple-system, system-ui, sans-serif;
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<div id="status">Connecting…</div>
+<div id="screen"></div>
+<script type="module">
+import RFB from "./core/rfb.js";
+
+const params = new URLSearchParams(location.search);
+const token = params.get("token") || "";
+const proto = location.protocol === "https:" ? "wss" : "ws";
+const prefix = location.pathname.replace(/\/vnc\/.*$/, "");
+const url = `${proto}://${location.host}${prefix}/vnc/ws?token=${encodeURIComponent(token)}`;
+
+const status = document.getElementById("status");
+const rfb = new RFB(document.getElementById("screen"), url);
+rfb.scaleViewport = true;
+rfb.clipViewport = false;
+rfb.resizeSession = false;
+rfb.background = "#000";
+rfb.addEventListener("connect", () => { status.remove(); });
+rfb.addEventListener("disconnect", (event) => {
+  const node = document.getElementById("status") || Object.assign(document.createElement("div"), { id: "status" });
+  node.textContent = event.detail?.clean ? "Disconnected" : "Failed to connect";
+  document.body.append(node);
+});
+</script>
+</body>
+</html>

@@ -1,400 +1,195 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
-  <meta name="theme-color" content="#08080a">
-  <meta name="description" content="Talk to your aiOS agent or control your PC from anywhere.">
-  <meta property="og:title" content="aiOS Remote">
-  <meta property="og:description" content="Ask your computer to do things — from anywhere.">
-  <meta property="og:type" content="website">
-  <meta property="og:image" content="og-aios-remote.png">
-  <meta name="twitter:card" content="summary_large_image">
-  <meta name="mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-  <link rel="manifest" href="manifest.webmanifest">
-  <link rel="apple-touch-icon" href="icons/aios-icon-180.png">
-  <link rel="icon" href="icons/aios-icon-192.png">
-  <link rel="stylesheet" href="phone.css">
-  <title>aiOS Remote</title>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1" />
+<meta name="theme-color" content="#1c1d1f" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Director" />
+<meta name="description" content="aiOS Director — your agents, from anywhere." />
+<title>aiOS Director</title>
+<link rel="manifest" href="/manifest.webmanifest" />
+<link rel="apple-touch-icon" href="/icons/aios-icon-180.png" />
+<link rel="icon" href="/icons/aios-icon-192.png" />
+<link rel="stylesheet" href="/director.css" />
 </head>
 <body>
 
-<svg class="sprite" aria-hidden="true" focusable="false">
-  <symbol id="i-mic" viewBox="0 0 24 24"><path d="M12 3a3 3 0 0 1 3 3v6a3 3 0 0 1-6 0V6a3 3 0 0 1 3-3Z"/><path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v3"/></symbol>
-  <symbol id="i-send" viewBox="0 0 24 24"><path d="M12 20V5"/><path d="m5.5 11.5 6.5-6.5 6.5 6.5"/></symbol>
-  <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6.5" y="6.5" width="11" height="11" rx="2.5"/></symbol>
-  <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2.2"/><circle cx="9" cy="17" r="2.2"/></symbol>
-  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
-  <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m7 10 5 5 5-5"/></symbol>
-  <symbol id="i-back" viewBox="0 0 24 24"><path d="M14 6l-6 6 6 6"/></symbol>
-  <symbol id="i-expand" viewBox="0 0 24 24"><path d="M9 4H4v5M15 4h5v5M15 20h5v-5M9 20H4v-5"/></symbol>
-  <symbol id="i-shrink" viewBox="0 0 24 24"><path d="M4 9h5V4M20 9h-5V4M20 15h-5v5M4 15h5v5"/></symbol>
-  <symbol id="i-monitor" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12.5" rx="2"/><path d="M9 20h6M12 16.5V20"/></symbol>
-  <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7"/></symbol>
-  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2.5"/><path d="M15 5.5A2.5 2.5 0 0 0 12.5 4h-6A2.5 2.5 0 0 0 4 6.5v6A2.5 2.5 0 0 0 5.5 15"/></symbol>
-  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4.5 7h15M9.5 7V5h5v2M6.5 7l.9 12.1A2 2 0 0 0 9.4 21h5.2a2 2 0 0 0 2-1.9L17.5 7"/></symbol>
-  <symbol id="i-zoom-out" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M8.5 11h5M16 16l4 4"/></symbol>
-  <symbol id="i-cursor" viewBox="0 0 24 24"><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/><circle cx="12" cy="12" r="3.2"/></symbol>
-  <symbol id="i-spark" viewBox="0 0 24 24"><path fill="currentColor" stroke="none" d="M12 3.5 13.8 9l5.7 1.8-5.7 1.8L12 20.5l-1.8-5.9L4.5 12.8 10.2 11 12 3.5Z"/></symbol>
-  <symbol id="i-bolt" viewBox="0 0 24 24"><path fill="currentColor" stroke="none" d="M13.5 3 5.8 13.4h5.2L10.5 21l7.7-10.4H13L13.5 3Z"/></symbol>
-  <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v11M7.5 10.5 12 15l4.5-4.5M5 20h14"/></symbol>
-  <symbol id="i-power" viewBox="0 0 24 24"><path d="M12 4v8"/><path d="M6.8 7.2a7.5 7.5 0 1 0 10.4 0"/></symbol>
-  <symbol id="i-arrow-down" viewBox="0 0 24 24"><path d="M12 5v14M6 13.5l6 6 6-6"/></symbol>
-  <symbol id="i-pc" viewBox="0 0 24 24"><rect x="4" y="3.5" width="16" height="17" rx="2.5"/><path d="M8 8h8M8 12h8M8 16h4"/></symbol>
-  <symbol id="i-warn" viewBox="0 0 24 24"><path d="M12 8v5M12 16.5v.01"/><circle cx="12" cy="12" r="8.5"/></symbol>
-  <symbol id="i-edit" viewBox="0 0 24 24"><path d="M5 19h3l9.5-9.5a2.1 2.1 0 0 0-3-3L5 16v3Z"/></symbol>
-  <symbol id="i-history" viewBox="0 0 24 24"><path d="M12 8v4.5l3 1.8"/><path d="M3.6 9.2A8.6 8.6 0 1 1 3 12.6"/><path d="M3.2 4.8v4.6h4.6"/></symbol>
-  <symbol id="i-close" viewBox="0 0 24 24"><path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/></symbol>
-  <symbol id="i-file" viewBox="0 0 24 24"><path d="M13.5 3.5H7a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9l-5.5-5.5Z"/><path d="M13.5 3.5V9H19"/></symbol>
-  <symbol id="i-image" viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="14" rx="2.5"/><path d="m5 16.5 4.2-4.2a2 2 0 0 1 2.8 0l3.5 3.5"/><path d="m14 14.5 1.6-1.6a2 2 0 0 1 2.8 0l1.6 1.6"/><circle cx="9" cy="9.5" r="1.4"/></symbol>
-</svg>
+<div id="app">
 
-<!-- ───────────────────────── AUTH ───────────────────────── -->
-<section id="authView" class="auth">
-  <div class="auth-card">
-    <div class="brand">
-      <div class="brand-mark"><img src="icons/aios-icon-192.png" alt=""></div>
-      <div class="brand-text"><strong>aiOS</strong><span>Remote</span></div>
-    </div>
-
-    <div id="welcomePane" class="pane">
-      <h1>Ask your computer<br>to do things.</h1>
-      <p class="lede">Talk to your resident agent, or send a full task to OPERATOR and watch it work live.</p>
-      <div class="auth-actions">
-        <button id="createAccountBtn" class="btn btn-primary btn-block">Create my remote</button>
-        <button id="showLoginBtn" class="btn btn-quiet btn-block">I have a private code</button>
+  <!-- ---------- pairing ---------- -->
+  <section id="screen-pair" class="screen">
+    <form class="pair-card" id="pair-form">
+      <div class="brand">
+        <div class="mark blob" id="pair-mark"></div>
+        <div>
+          <h2>aiOS Director</h2>
+          <p class="hint">Your agents, from anywhere.</p>
+        </div>
       </div>
-    </div>
-
-    <form id="loginForm" class="pane hidden">
-      <button type="button" id="loginBackBtn" class="linkback"><svg class="ic"><use href="#i-back"/></svg> Back</button>
-      <h2>Enter your private code</h2>
-      <p class="sub">The code you saved when you created your remote.</p>
-      <input id="loginCode" class="code-input" autocomplete="one-time-code" autocapitalize="characters" autocorrect="off" spellcheck="false" placeholder="AIOS-XXXXX-XXXXX-XXXXX-XXXXX" required>
-      <p id="loginError" class="form-error"></p>
-      <button class="btn btn-primary btn-block" type="submit">Unlock</button>
+      <p class="hint">
+        Get a pairing code on the Linux box:<br />
+        <code>cd ~/aios-director &amp;&amp; .venv/bin/python -m director.cli pair</code>
+      </p>
+      <div class="field">
+        <label for="pair-url">Director address</label>
+        <input id="pair-url" type="url" inputmode="url" autocomplete="off"
+               spellcheck="false" placeholder="https://…/director" />
+      </div>
+      <div class="field">
+        <label for="pair-code">Pairing code</label>
+        <input id="pair-code" class="code" maxlength="6" autocomplete="one-time-code"
+               autocapitalize="characters" spellcheck="false" placeholder="A1B2C3" />
+      </div>
+      <div class="field">
+        <label for="pair-name">This device</label>
+        <input id="pair-name" autocomplete="off" placeholder="iPhone" />
+      </div>
+      <button class="btn primary" type="submit" id="pair-submit">Connect</button>
+      <div id="pair-error" class="notice hidden"></div>
     </form>
-
-    <div id="createdPane" class="pane hidden">
-      <h2>Save this code</h2>
-      <p class="sub">It links your phone to your computers. Anyone with it can pair a PC — keep it safe.</p>
-      <button id="privateCode" class="code-chip" type="button" aria-label="Copy private code"></button>
-      <div class="auth-actions">
-        <button id="copyCodeBtn" class="btn btn-quiet btn-block"><svg class="ic"><use href="#i-copy"/></svg> Copy code</button>
-        <button id="enterRemoteBtn" class="btn btn-primary btn-block">Open my remote</button>
-      </div>
-    </div>
-  </div>
-</section>
-
-<!-- ───────────────────────── APP ───────────────────────── -->
-<main id="appView" class="app hidden">
-
-  <header class="appbar">
-    <button id="machineBtn" class="machine-btn" type="button">
-      <span id="machineDot" class="dot"></span>
-      <span class="machine-btn-text">
-        <strong id="machineName">Computer</strong>
-        <small id="machineMeta">Connecting…</small>
-      </span>
-      <svg class="ic chev"><use href="#i-chevron"/></svg>
-    </button>
-    <div class="appbar-actions">
-      <button id="installBtn" class="iconbtn hidden" aria-label="Install app"><svg class="ic"><use href="#i-download"/></svg></button>
-      <button id="settingsBtn" class="iconbtn" aria-label="Settings"><svg class="ic"><use href="#i-sliders"/></svg></button>
-    </div>
-  </header>
-
-  <section id="emptyState" class="empty hidden">
-    <div class="empty-icon"><svg class="ic"><use href="#i-pc"/></svg></div>
-    <h2>Connect your first computer</h2>
-    <p>Open aiOS on your PC, go to <strong>Settings → Mobile remote</strong>, and paste your private code.</p>
-    <button id="emptyAddBtn" class="btn btn-primary">Show pairing steps</button>
   </section>
 
-  <div id="workspace" class="workspace hidden">
+  <div id="workspace" class="hidden">
 
-    <!-- Live screen -->
-    <section id="viewer" class="viewer">
-      <div id="viewerScroll" class="viewer-scroll">
-        <div id="viewerCanvas" class="viewer-canvas">
-          <img id="screenImage" alt="Live screen" draggable="false">
-          <div id="markerLayer" class="markers"></div>
+    <!-- ---------- agent list / left sidebar ---------- -->
+    <section id="screen-agents" class="screen hidden">
+      <header class="topbar">
+        <div class="title">
+          <h1>Director</h1>
+          <div class="sub" id="agents-sub">Connecting…</div>
         </div>
+        <button class="icon-btn mobile-only" id="btn-new-agent-mobile" aria-label="New agent">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+               stroke-linecap="round"><path d="M12 5v14M5 12h14" /></svg>
+        </button>
+        <button class="icon-btn mobile-only" id="btn-settings-mobile" aria-label="Settings">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
+            <circle cx="12" cy="12" r="3" />
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0 1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l-.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+          </svg>
+        </button>
+      </header>
+      <div class="sidebar-search">
+        <svg class="search-glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+             stroke-linecap="round"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></svg>
+        <input id="agent-search" type="search" placeholder="Search" autocomplete="off" />
+        <button class="icon-btn" id="btn-new-agent" aria-label="New agent" title="New agent">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+               stroke-linecap="round"><path d="M12 5v14M5 12h14" /></svg>
+        </button>
       </div>
-
-      <div id="screenPlaceholder" class="viewer-empty">
-        <div class="spinner"></div>
-        <span>Waiting for the first screenshot</span>
-      </div>
-
-      <!-- Cinema overlay: only drawn in fullscreen. Sits on top of the live
-           picture at low opacity so the screen stays readable underneath. -->
-      <div id="cinema" class="cinema" hidden>
-        <div class="cinema-rail">
-          <div class="cinema-head">
-            <span id="cinemaState" class="cinema-state">Idle</span>
-            <span id="cinemaStep" class="cinema-step"></span>
-          </div>
-          <p id="cinemaTask" class="cinema-task"></p>
-          <div id="cinemaFeed" class="cinema-feed"></div>
-        </div>
-        <div id="cinemaRotate" class="cinema-rotate">Turn your phone sideways</div>
-      </div>
-
-      <div class="hud hud-top">
-        <button id="monitorBtn" class="chip" type="button"><svg class="ic"><use href="#i-monitor"/></svg><span id="monitorLabel">Display</span></button>
-        <div class="hud-right">
-          <span id="zoomChip" class="chip chip-static hidden">100%</span>
-          <button id="zoomResetBtn" class="chip hidden" type="button"><svg class="ic"><use href="#i-zoom-out"/></svg>Fit</button>
-          <button id="expandBtn" class="chip" type="button" aria-label="Fullscreen"><svg class="ic"><use href="#i-expand"/></svg></button>
-        </div>
-      </div>
-
-      <div class="hud hud-bottom">
-        <span id="livePill" class="live"><i></i><span id="liveText">CONNECTING</span></span>
-        <span id="lastClickPill" class="chip chip-static hidden"></span>
-      </div>
-    </section>
-
-    <button id="screenToggle" class="screen-toggle" type="button">
-      <svg class="ic"><use href="#i-chevron"/></svg><span>Hide screen</span>
-    </button>
-
-    <!-- Timeline -->
-    <section class="timeline-wrap">
-      <div class="timeline-head">
-        <div class="run">
-          <span id="runDot" class="run-dot"></span>
-          <div>
-            <strong id="runTitle">aiOS Agent</strong>
-            <small id="runMeta">Ready</small>
+      <div class="agent-list" id="agent-list"></div>
+      <footer class="sidebar-foot">
+        <button class="foot-btn" id="btn-settings" type="button">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
+            <circle cx="12" cy="12" r="3" />
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0 1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l-.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+          </svg>
+          <span>Settings</span>
+        </button>
+        <div class="device-chip">
+          <div class="avatar tiny blob" id="device-blob"></div>
+          <div class="device-meta">
+            <div id="device-name">This device</div>
+            <div class="sub" id="device-sub">Director</div>
           </div>
         </div>
-        <div class="run-actions">
-          <button id="historyBtn" class="iconbtn sm" type="button" aria-label="Previous runs"><svg class="ic"><use href="#i-history"/></svg></button>
-          <button id="filterBtn" class="ghostbtn hidden" type="button" tabindex="-1" aria-hidden="true">All</button>
-          <button id="clearChatBtn" class="iconbtn sm" type="button" aria-label="New chat"><svg class="ic"><use href="#i-plus"/></svg></button>
-          <button id="stopBtn" class="stopbtn hidden" type="button"><svg class="ic"><use href="#i-stop"/></svg>Stop</button>
+      </footer>
+    </section>
+
+    <!-- ---------- chat ---------- -->
+    <section id="screen-chat" class="screen hidden">
+      <div class="chat-empty hidden" id="chat-empty">
+        <div class="avatar big blob" id="empty-blob"></div>
+        <h2>Pick a chat</h2>
+        <p>Your agents live in the sidebar. Open one to keep talking.</p>
+      </div>
+      <header class="topbar">
+        <button class="icon-btn" id="btn-back" aria-label="Back">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
+               stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6" /></svg>
+        </button>
+        <div class="avatar small" id="chat-avatar"></div>
+        <div class="title">
+          <h1 id="chat-name">Director</h1>
+          <div class="sub" id="chat-sub"></div>
+        </div>
+        <button class="icon-btn" id="btn-screen" aria-label="Operator screen" title="Operator screen">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
+            <rect x="2.5" y="4" width="19" height="13" rx="2" /><path d="M8 20h8M12 17v3" />
+          </svg>
+        </button>
+        <button class="icon-btn" id="btn-chat-menu" aria-label="Conversation options">
+          <svg viewBox="0 0 24 24" fill="currentColor">
+            <circle cx="12" cy="5" r="1.7" /><circle cx="12" cy="12" r="1.7" /><circle cx="12" cy="19" r="1.7" />
+          </svg>
+        </button>
+      </header>
+
+      <div class="transcript" id="transcript">
+        <div class="transcript-spacer" id="transcript-spacer"></div>
+      </div>
+
+      <div class="composer">
+        <div class="attach-tray hidden" id="attach-tray"></div>
+        <div class="attach-menu hidden" id="attach-menu">
+          <button type="button" data-kind="camera">Camera</button>
+          <button type="button" data-kind="gallery">Photos</button>
+          <button type="button" data-kind="files">Files</button>
+        </div>
+        <div class="composer-pill">
+          <button class="pill-btn" id="btn-attach" type="button" aria-label="Attach">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
+                 stroke-linecap="round"><path d="M12 5v14M5 12h14" /></svg>
+          </button>
+          <textarea id="composer-input" rows="1" placeholder="Message Director…"
+                    enterkeyhint="send" autocomplete="off"></textarea>
+          <button class="pill-btn" id="btn-mic" type="button" aria-label="Voice">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+                 stroke-linecap="round">
+              <rect x="9" y="2.5" width="6" height="11" rx="3" />
+              <path d="M5 11a7 7 0 0 0 14 0M12 18v3.5" />
+            </svg>
+          </button>
+          <button class="pill-btn send" id="btn-send" type="button" aria-label="Send">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
+                 stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7" /></svg>
+          </button>
+          <button class="pill-btn stop hidden" id="btn-stop" type="button" aria-label="Stop">
+            <svg viewBox="0 0 24 24" fill="currentColor"><rect x="7" y="7" width="10" height="10" rx="2"/></svg>
+          </button>
         </div>
       </div>
-      <div id="historyBanner" class="history-banner hidden">
-        <span id="historyBannerText">Viewing a past run</span>
-        <button id="backToLiveBtn" class="chip" type="button">Back to live</button>
-      </div>
-      <div id="timeline" class="timeline">
-        <div class="timeline-empty">
-          <svg class="ic"><use href="#i-spark"/></svg>
-          <p>Ask your aiOS agent anything.</p>
+      <input class="hidden" type="file" id="file-camera" accept="image/*" capture="environment" />
+      <input class="hidden" type="file" id="file-gallery" accept="image/*" multiple />
+      <input class="hidden" type="file" id="file-files" multiple />
+    </section>
+
+    <!-- ---------- right context (desktop / iPad) ---------- -->
+    <aside id="screen-context" class="context-pane">
+      <button type="button" class="screen-card" id="context-screen">
+        <img id="context-screen-img" alt="" />
+        <div class="screen-card-fallback" id="context-screen-fallback">No screen yet</div>
+        <div class="screen-card-label" id="context-screen-label">Operator screen</div>
+      </button>
+      <div class="context-section">
+        <div class="context-head">
+          <h2>Routines</h2>
+          <button class="icon-btn" id="btn-new-routine" type="button" aria-label="New routine">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+                 stroke-linecap="round"><path d="M12 5v14M5 12h14" /></svg>
+          </button>
         </div>
+        <div id="context-routines"></div>
       </div>
-      <button id="jumpBtn" class="jump hidden" type="button"><svg class="ic"><use href="#i-arrow-down"/></svg>Jump to latest</button>
-    </section>
+    </aside>
+
   </div>
 
-  <!-- Composer -->
-  <form id="promptForm" class="dock hidden">
-    <div id="suggestions" class="suggestions">
-      <button type="button" class="sugg">Summarise what's on my screen</button>
-      <button type="button" class="sugg">Open my email and read the latest</button>
-      <button type="button" class="sugg">Find the file I worked on last</button>
-    </div>
-    <section id="clarifier" class="clarifier hidden" aria-live="polite" aria-label="Intent check">
-      <div class="clarifier-head">
-        <span class="clarifier-title"><span class="clarifier-spark">✦</span> Intent check</span>
-        <span id="clarifierStatus" class="clarifier-status">Reading your draft…</span>
-      </div>
-      <div id="clarifierQuestions" class="clarifier-questions"></div>
-    </section>
-    <div class="composer">
-      <div id="attachTray" class="attach-tray hidden" aria-label="Attachments"></div>
-      <textarea id="promptInput" rows="1" maxlength="8000" placeholder="Message your aiOS agent…"></textarea>
-      <div class="composer-bar">
-        <button id="attachBtn" class="roundbtn attach hidden" type="button" tabindex="-1" aria-hidden="true" aria-label="Add photos or files"><svg class="ic"><use href="#i-plus"/></svg></button>
-        <button id="runSettingsBtn" class="pill run-settings-pill hidden" type="button" tabindex="-1" aria-hidden="true" aria-label="Choose run models"><svg class="ic"><use href="#i-sliders"/></svg><span id="runSettingsLabel">Luna · Plan Sol</span></button>
-        <button id="voiceReplyBtn" class="pill voice-reply hidden" type="button" tabindex="-1" aria-hidden="true" aria-label="Legacy spoken replies"><span>Speak</span></button>
-        <button id="voiceModeBtn" class="pill voice-mode-launch" type="button" aria-label="Start Voice Mode"><svg class="ic"><use href="#i-mic"/></svg><span>Voice Mode</span></button>
-        <div class="composer-spacer"></div>
-        <button id="micBtn" class="roundbtn" type="button" aria-label="Transcribe a voice note"><svg class="ic"><use href="#i-mic"/></svg></button>
-        <button id="sendBtn" class="roundbtn send" type="submit" aria-label="Send"><svg class="ic"><use href="#i-send"/></svg></button>
-      </div>
-      <input id="fileInput" class="file-input" type="file" multiple tabindex="-1" aria-hidden="true"
-             accept="image/*,.txt,.md,.markdown,.csv,.tsv,.json,.log,.yml,.yaml,.xml,.html,.py,.js,.ts,.css,.ini,.cfg,.sql">
-    </div>
-    <div id="dropHint" class="drop-hint hidden">Drop files to attach</div>
-    <div id="listening" class="listening hidden">
-      <span class="wave"><i></i><i></i><i></i><i></i><i></i></span>
-      <span id="listeningText">Listening…</span>
-      <button type="button" id="micStopBtn" class="ghostbtn">Done</button>
-    </div>
-  </form>
-</main>
-
-<section id="voiceMode" class="voice-mode hidden" role="dialog" aria-modal="true" aria-label="aiOS Voice Mode">
-  <audio id="voiceAudio" autoplay></audio>
-  <div class="voice-mode-top">
-    <div class="voice-mode-brand"><svg class="ic"><use href="#i-spark"/></svg><span>aiOS Voice</span></div>
-    <button id="voiceModeClose" class="iconbtn" type="button" aria-label="Close Voice Mode">×</button>
-  </div>
-  <div class="voice-stage">
-    <div id="voiceOrb" class="voice-orb connecting" aria-hidden="true"><i></i><i></i><i></i></div>
-    <strong id="voiceModeStatus">Connecting…</strong>
-    <p id="voiceModeCaption">Starting a live conversation with your aiOS agent.</p>
-  </div>
-  <button id="voiceModeEnd" class="voice-mode-end" type="button">End Voice Mode</button>
-</section>
-
-<!-- ───────────────────────── SHEETS ───────────────────────── -->
-<div id="backdrop" class="backdrop hidden"></div>
-
-<div id="lightbox" class="lightbox hidden" role="dialog" aria-modal="true" aria-label="Screenshot">
-  <figure id="lightboxFigure" class="lightbox-shot">
-    <img id="lightboxImage" alt="Screenshot OPERATOR worked from">
-    <span id="lightboxDot" class="shot-dot hidden"></span>
-  </figure>
-  <div class="lightbox-bar">
-    <span id="lightboxLabel"></span>
-    <button id="lightboxClose" class="chip" type="button">Close</button>
-  </div>
 </div>
 
-<section id="machineSheet" class="sheet" role="dialog" aria-modal="true" aria-hidden="true">
-  <div class="grabber"></div>
-  <h3>Your computers</h3>
-  <div id="machineOptions" class="options"></div>
-  <button id="renameBtn" class="btn btn-quiet btn-block"><svg class="ic"><use href="#i-edit"/></svg> Rename this computer</button>
-  <button id="addMachineBtn" class="btn btn-quiet btn-block"><svg class="ic"><use href="#i-plus"/></svg> Pair another PC</button>
-</section>
-
-<section id="historySheet" class="sheet" role="dialog" aria-modal="true" aria-hidden="true">
-  <div class="grabber"></div>
-  <h3>History</h3>
-  <p class="sheet-copy">Runs from this computer. Your timeline starts clean each time you come back.</p>
-  <div id="historyList" class="history-list"></div>
-  <button id="clearHistoryBtn" class="btn btn-quiet btn-block"><svg class="ic"><use href="#i-trash"/></svg> Clear history</button>
-</section>
-
-<section id="monitorSheet" class="sheet" role="dialog" aria-modal="true" aria-hidden="true">
-  <div class="grabber"></div>
-  <h3>Display</h3>
-  <div id="monitorOptions" class="options"></div>
-</section>
-
-<section id="runSettingsSheet" class="sheet" role="dialog" aria-modal="true" aria-hidden="true">
-  <div class="grabber"></div>
-  <h3>Run setup</h3>
-  <div class="model-section">
-    <div class="model-section-head"><strong>Clicking model</strong><span id="runModelValue">Luna</span></div>
-    <p>Controls the computer step by step.</p>
-    <div id="runModelOptions" class="choice-chips"></div>
-  </div>
-  <div class="model-section">
-    <div class="model-section-head"><strong>Clicking effort</strong><span id="runEffortValue">Low</span></div>
-    <div id="runEffortOptions" class="choice-chips"></div>
-  </div>
-  <div class="model-section planner-section">
-    <label class="planner-toggle"><span><strong>Plan before clicking</strong><small>Use a stronger model once, then execute cheaply</small></span><input id="plannerToggle" class="switch" type="checkbox" checked></label>
-    <div id="plannerModelGroup">
-      <div class="model-section-head"><strong>Planning model</strong><span id="runPlannerValue">Sol</span></div>
-      <div id="runPlannerOptions" class="choice-chips"></div>
-    </div>
-  </div>
-  <div class="model-section">
-    <label class="planner-toggle"><span><strong>PowerShell &amp; cmd</strong><small>Let it run commands instead of only clicking — much faster</small></span><input id="shellToggle" class="switch" type="checkbox" checked></label>
-  </div>
-</section>
-
-<section id="pairSheet" class="sheet" role="dialog" aria-modal="true" aria-hidden="true">
-  <div class="grabber"></div>
-  <h3>Pair another PC</h3>
-  <ol class="steps">
-    <li>Open aiOS on the Windows computer.</li>
-    <li>Go to <strong>Settings → Mobile remote</strong>.</li>
-    <li>Paste this code and press <strong>Connect</strong>.</li>
-  </ol>
-  <button id="pairCode" class="code-chip" type="button"></button>
-  <button id="pairCopyBtn" class="btn btn-primary btn-block"><svg class="ic"><use href="#i-copy"/></svg> Copy private code</button>
-  <p class="note">Treat this like a password. Every PC gets its own revocable key.</p>
-</section>
-
-<section id="settingsSheet" class="sheet" role="dialog" aria-modal="true" aria-hidden="true">
-  <div class="grabber"></div>
-  <h3>Settings</h3>
-  <div class="rows">
-    <button id="settingsRunRow" class="row" type="button"><span>Run models</span><em id="settingsRunValue">Luna · Plan Sol</em><svg class="ic"><use href="#i-chevron"/></svg></button>
-    <button id="appearanceRow" class="row" type="button"><span>Appearance</span><em id="appearanceValue">Black</em><svg class="ic"><use href="#i-chevron"/></svg></button>
-    <button id="aiProviderRow" class="row" type="button"><span>AI provider</span><em id="aiProviderValue">Codex</em><svg class="ic"><use href="#i-chevron"/></svg></button>
-    <button id="codexAccountRow" class="row" type="button"><span>Codex account</span><em id="codexAccountValue">Default</em><svg class="ic"><use href="#i-chevron"/></svg></button>
-    <div class="row"><span>Software</span><em id="updateValue">Auto-update on</em></div>
-    <div class="row"><span>Version deployed</span><em id="versionValue">Loading…</em></div>
-    <div class="row"><span>Relay server</span><em id="relayValue">Checking…</em></div>
-    <label class="row"><span>Maximum steps</span><input id="stepsInput" class="row-input" type="number" inputmode="numeric" min="1" max="100" value="30"></label>
-    <label class="row"><span>Detailed activity</span><input id="detailsToggle" class="switch" type="checkbox" checked></label>
-    <label class="row"><span>Keep screen awake</span><input id="wakeToggle" class="switch" type="checkbox"></label>
-    <label class="row"><span>Haptics</span><input id="hapticToggle" class="switch" type="checkbox" checked></label>
-    <label class="row"><span>Notifications</span><input id="notifyToggle" class="switch" type="checkbox"></label>
-    <p class="sheet-copy" style="margin:-4px 0 8px">Alert when OPERATOR needs help, runs out of steps, or finishes — even with the app closed. On iPhone, add aiOS Remote to your Home Screen first.</p>
-    <button id="notifyTestBtn" class="row row-action hidden" type="button"><span>Send a test notification</span></button>
-  </div>
-  <button id="updateBtn" class="btn btn-quiet btn-block"><svg class="ic"><use href="#i-spark"/></svg> Check and update now</button>
-  <button id="logoutBtn" class="btn btn-danger btn-block"><svg class="ic"><use href="#i-power"/></svg> Lock this phone</button>
-</section>
-
-<section id="appearanceSheet" class="sheet" role="dialog" aria-modal="true" aria-hidden="true">
-  <div class="grabber"></div>
-  <h3>Appearance</h3>
-  <p class="sheet-copy">Choose the background that feels best on your phone.</p>
-  <div id="appearanceOptions" class="theme-options">
-    <button class="theme-option" type="button" data-background="black">
-      <span class="theme-swatch black"><i></i></span>
-      <strong>Black</strong>
-      <small>Focused and discreet</small>
-    </button>
-    <button class="theme-option" type="button" data-background="red">
-      <span class="theme-swatch red"><i></i></span>
-      <strong>Red</strong>
-      <small>Bold aiOS look</small>
-    </button>
-  </div>
-</section>
-
-<section id="aiProviderSheet" class="sheet" role="dialog" aria-modal="true" aria-hidden="true">
-  <div class="grabber"></div>
-  <h3>AI provider</h3>
-  <p class="sheet-copy">This controls OPERATOR and the live intent questions.</p>
-  <div id="aiProviderOptions" class="options"></div>
-  <form id="apiKeyForm" class="api-key-card">
-    <div class="api-key-head">
-      <span><strong>OpenAI API key</strong><small id="apiKeyStatus">Not saved on this PC</small></span>
-      <button id="clearApiKeyBtn" class="text-action hidden" type="button">Remove</button>
-    </div>
-    <div class="secret-row">
-      <input id="apiKeyInput" class="text-input secret-input" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="sk-…">
-      <button id="saveApiKeyBtn" class="btn btn-primary" type="submit">Save</button>
-    </div>
-    <p class="note">Saved only in aiOS on the selected computer. The phone never displays it again.</p>
-  </form>
-</section>
-
-<section id="codexAccountSheet" class="sheet" role="dialog" aria-modal="true" aria-hidden="true">
-  <div class="grabber"></div>
-  <h3>Codex account</h3>
-  <p class="note">Choose an account already signed in on this computer. Add another account from aiOS on the PC once, then switch here instantly.</p>
-  <div id="codexAccountOptions" class="options"></div>
-</section>
-
-<section id="renameSheet" class="sheet" role="dialog" aria-modal="true" aria-hidden="true">
-  <div class="grabber"></div>
-  <h3>Rename computer</h3>
-  <form id="renameForm">
-    <input id="renameInput" class="text-input" maxlength="80" placeholder="Studio PC">
-    <button class="btn btn-primary btn-block" type="submit">Save name</button>
-  </form>
-</section>
-
-<div id="toast" class="toast" role="status"></div>
-<script src="phone.js" defer></script>
+<script src="/director.js" type="module"></script>
 </body>
 </html>

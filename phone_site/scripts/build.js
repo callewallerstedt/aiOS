@@ -11,13 +11,12 @@ const serverDir = path.join(distDir, 'server');
 fs.rmSync(publicDir, { recursive: true, force: true });
 fs.mkdirSync(publicDir, { recursive: true });
 
+// The Director client. The old aiOS Remote pages (phone.*, coding.*) are still
+// in the repo but are no longer deployed — Director replaces them.
 for (const name of [
   'index.html',
-  'phone.css',
-  'phone.js',
-  'coding.html',
-  'coding.css',
-  'coding.js',
+  'director.css',
+  'director.js',
   'manifest.webmanifest',
   'sw.js',
   'og-aios-remote.png',

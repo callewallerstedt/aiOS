@@ -1,0 +1,17 @@
+[Unit]
+Description=aiOS Director coordinator
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/aios-director
+ExecStart=%h/aios-director/.venv/bin/python -m director.server
+Restart=always
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=%h/aios-director
+StandardOutput=append:%h/.local/share/aios-director/director.log
+StandardError=append:%h/.local/share/aios-director/director.log
+
+[Install]
+WantedBy=default.target
