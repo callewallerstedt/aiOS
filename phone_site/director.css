@@ -310,8 +310,8 @@ button { border: 0; background: none; cursor: pointer; }
 .avatar.small { width: 32px; height: 32px; border-radius: 10px; font-size: 16px; }
 .avatar.big { width: 76px; height: 76px; border-radius: 22px; font-size: 34px; }
 .avatar.tiny { width: 34px; height: 34px; border-radius: 11px; }
-.avatar.blob { background: transparent; box-shadow: none; }
-.avatar.blob svg, .avatar.photo svg { width: 100%; height: 100%; display: block; }
+.avatar.blob { background: transparent; box-shadow: none; overflow: visible; }
+.avatar.blob svg { width: 100%; height: 100%; display: block; overflow: visible; }
 .avatar.photo { background-size: cover; background-position: center; }
 
 .agent-row .meta { min-width: 0; display: grid; gap: 2px; }
@@ -814,6 +814,10 @@ button { border: 0; background: none; cursor: pointer; }
   animation: sheet-up 320ms var(--ease) both;
 }
 @keyframes sheet-up { from { transform: translateY(100%); } to { transform: none; } }
+@keyframes dialog-in {
+  from { opacity: 0; transform: translate(-50%, calc(-50% + 14px)) scale(.97); }
+  to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+}
 
 .sheet-head {
   display: flex;
@@ -1228,19 +1232,6 @@ button { border: 0; background: none; cursor: pointer; }
     width: 100%;
     margin-inline: auto;
   }
-
-  .sheet {
-    left: 50%;
-    right: auto;
-    bottom: auto;
-    top: 50%;
-    width: min(460px, calc(100vw - 48px));
-    max-height: min(86dvh, 740px);
-    border-radius: 18px;
-    transform: translate(-50%, -50%);
-    animation: fade-up 280ms var(--ease) both;
-    box-shadow: 0 24px 80px #000c;
-  }
 }
 
 @media (min-width: 1180px) {
@@ -1256,4 +1247,87 @@ button { border: 0; background: none; cursor: pointer; }
     border-left: 1px solid var(--line);
     overflow: hidden;
   }
+}
+
+/* desktop dialogs — keep translate in the animation or they jump to the corner */
+.sheet.dialog {
+  left: 50%;
+  right: auto;
+  bottom: auto;
+  top: 50%;
+  width: min(520px, calc(100vw - 64px));
+  max-height: min(86dvh, 780px);
+  border-radius: 18px;
+  transform: translate(-50%, -50%);
+  animation: dialog-in 280ms var(--ease) both;
+  box-shadow: 0 24px 80px #000c;
+  overflow: hidden;
+}
+.sheet.dialog .sheet-body {
+  padding: 16px 18px 20px;
+}
+.sheet-backdrop {
+  backdrop-filter: blur(8px);
+}
+
+@media (min-width: 860px) {
+  #takeover {
+    inset: 24px;
+    border-radius: 16px;
+    overflow: hidden;
+    box-shadow: 0 24px 80px #000c;
+  }
+  #takeover .bar {
+    padding-top: 10px;
+    border-radius: 16px 16px 0 0;
+  }
+}
+
+/* adaptive blobs */
+.blob-z {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: blob-z 2.15s ease-out infinite;
+  opacity: 0;
+}
+.blob-spin-ring {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: spin 1.05s linear infinite;
+}
+.blob-z:nth-of-type(2) { animation-delay: .38s; }
+.blob-z:nth-of-type(3) { animation-delay: .76s; }
+@keyframes blob-z {
+  0% { opacity: 0; transform: translate(0, 8px) scale(.45); }
+  16% { opacity: .95; }
+  100% { opacity: 0; transform: translate(10px, -20px) scale(1.2); }
+}
+.avatar.mood-working svg { animation: blob-work .55s ease-in-out infinite; }
+@keyframes blob-work {
+  0%, 100% { transform: translateY(0) rotate(0deg); }
+  30% { transform: translateY(-2px) rotate(-4deg); }
+  70% { transform: translateY(1px) rotate(4deg); }
+}
+.avatar.mood-waiting svg { animation: blob-wait 1.5s ease-in-out infinite; }
+@keyframes blob-wait {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.07); }
+}
+.avatar.mood-idle svg { animation: blob-breathe 3.4s ease-in-out infinite; }
+@keyframes blob-breathe {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.04); }
+}
+.avatar.mood-sleeping svg { animation: blob-snooze 3.8s ease-in-out infinite; }
+@keyframes blob-snooze {
+  0%, 100% { transform: translateY(1px); }
+  50% { transform: translateY(3px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .blob-spin-ring, .blob-z,
+  .avatar.mood-working svg,
+  .avatar.mood-waiting svg,
+  .avatar.mood-idle svg,
+  .avatar.mood-sleeping svg { animation: none; }
 }
