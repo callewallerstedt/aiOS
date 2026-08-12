@@ -192,10 +192,11 @@ button { border: 0; background: none; cursor: pointer; }
 .history-toggle {
   flex: none;
   width: 24px;
-  height: 32px;
+  height: 24px;
   display: grid;
   place-items: center;
-  margin-right: -5px;
+  align-self: center;
+  margin: -8px auto -4px;
   border-radius: 8px;
   color: var(--ink-3);
   transition: color 120ms ease, background 120ms ease;
@@ -208,6 +209,11 @@ button { border: 0; background: none; cursor: pointer; }
   transition: transform 180ms var(--ease);
 }
 .history-toggle[aria-expanded="true"] svg { transform: rotate(180deg); }
+
+.transcript > .history-toggle {
+  width: 24px;
+  max-width: 24px;
+}
 
 .conn-dot {
   width: 8px;

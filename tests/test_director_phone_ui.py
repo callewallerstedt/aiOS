@@ -81,9 +81,20 @@ def test_app_boots_without_the_code_transcript_module():
 def test_compacted_history_has_a_small_disclosure_control():
     assert 'id="btn-history-toggle"' in HTML
     assert 'aria-expanded="false"' in HTML
+    transcript = _block(HTML, '<div class="transcript" id="transcript">', '</div>\n\n      <div class="composer">')
+    assert 'id="btn-history-toggle"' in transcript
+    header = _block(HTML, '<header class="topbar">', '</header>')
+    assert 'id="btn-history-toggle"' not in header
     assert "compacted_through" in JS
     assert "togglePreviousMessages" in JS
     assert 'message.sequence' in JS
+
+
+def test_user_bubbles_keep_the_selected_background_on_live_and_restored_messages():
+    add_user = _block(JS, "function addUser", "function addAssistant")
+    assert 'el("div", "bubble-user")' in add_user
+    assert "node.style.backgroundColor = state.appearance?.user_bubble" in add_user
+    assert "node.style.color = state.appearance?.user_text" in add_user
 
 
 def test_left_edge_swipe_and_browser_back_share_navigation():

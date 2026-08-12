@@ -598,6 +598,11 @@ function addUser(text, attachments, at) {
   stampIfNeeded(at);
   const row = el("div", "row-user");
   const node = el("div", "bubble-user");
+  // Keep the selected appearance on the actual bubble as well as in CSS.
+  // Mobile WebKit can briefly lose the custom-property paint when the PWA
+  // restores or incrementally inserts a message, leaving only its text.
+  node.style.backgroundColor = state.appearance?.user_bubble || "#3a5a8c";
+  node.style.color = state.appearance?.user_text || "#f2f3f4";
   const thumbs = attachThumbs(attachments);
   if (thumbs) node.append(thumbs);
   if (text) node.append(document.createTextNode(text));
@@ -946,6 +951,7 @@ function renderMessages(messages, thread = state.currentThread) {
     : state.currentMessages;
   const node = transcriptEl();
   node.textContent = "";
+  if (historyButton) node.append(historyButton);
   const spacer = el("div", "transcript-spacer");
   spacer.id = "transcript-spacer";
   node.append(spacer);
