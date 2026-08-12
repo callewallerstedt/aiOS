@@ -30,6 +30,7 @@ const state = {
   openGen: 0,
   shot: { image: "", at: 0 },
   working: null,
+  lastStampAt: 0,
   busy: false,
   recorder: null,
   chunks: [],
@@ -507,7 +508,43 @@ function attachThumbs(attachments) {
   return wrap;
 }
 
-function addUser(text, attachments) {
+const STAMP_GAP_MS = 10 * 60 * 1000;
+
+function messageTime(value) {
+  const n = Number(value);
+  if (!n) return Date.now();
+  return n > 1e12 ? n : n * 1000;
+}
+
+function formatChatStamp(ms) {
+  const date = new Date(ms);
+  const now = new Date();
+  const time = date.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  const start = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  const dayDelta = Math.round((start(now) - start(date)) / 86400000);
+  if (dayDelta === 0) return time;
+  if (dayDelta === 1) return `Yesterday ${time}`;
+  if (dayDelta > 1 && dayDelta < 7) {
+    return `${date.toLocaleDateString(undefined, { weekday: "short" })} ${time}`;
+  }
+  const day = date.toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: date.getFullYear() === now.getFullYear() ? undefined : "numeric",
+  });
+  return `${day} ${time}`;
+}
+
+function stampIfNeeded(at) {
+  const ms = messageTime(at);
+  if (!state.lastStampAt || ms - state.lastStampAt >= STAMP_GAP_MS) {
+    appendTranscript(el("div", "chat-stamp", formatChatStamp(ms)));
+  }
+  if (!state.lastStampAt || ms >= state.lastStampAt) state.lastStampAt = ms;
+}
+
+function addUser(text, attachments, at) {
+  stampIfNeeded(at);
   const row = el("div", "row-user");
   const node = el("div", "bubble-user");
   const thumbs = attachThumbs(attachments);
@@ -519,7 +556,8 @@ function addUser(text, attachments) {
   return node;
 }
 
-function addAssistant(text) {
+function addAssistant(text, at) {
+  stampIfNeeded(at);
   const row = el("div", "row-agent");
   const node = el("div", "bubble-agent assistant");
   node.innerHTML = markdown(text);
@@ -822,11 +860,12 @@ function renderMessages(messages) {
   state.streaming = null;
   state.thinking = null;
   state.working = null;
+  state.lastStampAt = 0;
 
   const pendingTools = new Map();
   for (const message of messages) {
-    if (message.role === "user") addUser(message.content, message.meta?.attachments);
-    else if (message.role === "assistant") addAssistant(message.content);
+    if (message.role === "user") addUser(message.content, message.meta?.attachments, message.created_at);
+    else if (message.role === "assistant") addAssistant(message.content, message.created_at);
     else if (message.role === "system") addStatus(message.content.split("\n")[0]);
     else if (message.role === "tool_call") {
       let args = {};
@@ -868,7 +907,7 @@ function handleEvent(event) {
       // Echoed by the sender already; only render when it came from elsewhere.
       if (!document.querySelector(`[data-user-pending="${payload.id}"]`)) {
         if (!state.lastSentText || state.lastSentText !== payload.text) {
-          addUser(payload.text, payload.attachments);
+          addUser(payload.text, payload.attachments, event.created_at);
         }
       }
       state.lastSentText = "";
@@ -883,6 +922,7 @@ function handleEvent(event) {
     case "message.delta": {
       settleThinking();
       if (!state.streaming) {
+        stampIfNeeded(event.created_at);
         const row = el("div", "row-agent");
         state.streaming = el("div", "bubble-agent assistant streaming");
         state.streaming.dataset.raw = "";
@@ -902,7 +942,7 @@ function handleEvent(event) {
         state.streaming.innerHTML = markdown(payload.text || state.streaming.dataset.raw || "");
         state.streaming = null;
       } else {
-        addAssistant(payload.text || "");
+        addAssistant(payload.text || "", event.created_at);
       }
       scrollDown();
       break;
