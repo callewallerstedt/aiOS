@@ -134,6 +134,52 @@ def test_system_messages_become_user_items(director):
     assert "found it" in items[0]["content"][0]["text"]
 
 
+def test_compacted_context_replaces_only_the_model_facing_past(director):
+    from director import runtime
+
+    agent = director.create_agent(name="T", agent_id="agt_compact")
+    thread = director.create_thread(agent["id"])
+    first = director.add_message(thread["id"], "user", "the old request")
+    director.add_message(thread["id"], "assistant", "the old answer")
+    through = director.latest_message_sequence(thread["id"])
+    director.save_compaction(thread["id"], "The user made an old request and it was answered.", through)
+    director.add_message(thread["id"], "user", "the new request")
+
+    # Full history remains available to the disclosure UI.
+    assert [row["content"] for row in director.list_messages(thread["id"])] == [
+        "the old request", "the old answer", "the new request"]
+    items = runtime.build_items(thread["id"])
+    text = [part["text"] for item in items for part in item.get("content", [])
+            if part.get("type") == "text"]
+    assert any("Compacted conversation context" in value for value in text)
+    assert "the new request" in text
+    assert "the old request" not in text
+    assert first["id"]
+
+
+def test_idle_compaction_is_due_once_until_new_activity(director):
+    import time
+
+    agent = director.create_agent(name="T", agent_id="agt_due")
+    thread = director.create_thread(agent["id"])
+    director.add_message(thread["id"], "user", "hello")
+    director._exec("UPDATE threads SET updated_at = ? WHERE id = ?",
+                   (time.time() - 3700, thread["id"]))
+    due = director.threads_due_for_compaction(before=time.time() - 3600)
+    assert [row["id"] for row in due] == [thread["id"]]
+
+    through = director.latest_message_sequence(thread["id"])
+    director.save_compaction(thread["id"], "hello", through)
+    assert director.threads_due_for_compaction(before=time.time() - 3600) == []
+
+    director.add_message(thread["id"], "assistant", "new reply")
+    director.touch_thread(thread["id"])
+    director._exec("UPDATE threads SET updated_at = ? WHERE id = ?",
+                   (time.time() - 3700, thread["id"]))
+    assert [row["id"] for row in director.threads_due_for_compaction(
+        before=time.time() - 3600)] == [thread["id"]]
+
+
 def test_memory_survives_and_renders(director):
     from director.tools import memory as memory_tools
 
@@ -374,6 +420,7 @@ def test_chrome_flags_paint_on_a_virtual_screen(director, monkeypatch):
     assert "--ozone-platform=x11" in argv
     assert "--use-angle=swiftshader" in argv
     assert "--no-sandbox" in argv
+    assert "--restore-last-session" in argv
     assert argv[-1] == "https://example.com"
 
 
@@ -468,13 +515,52 @@ def test_ensure_running_skips_probes_when_the_display_is_already_ready(monkeypat
     monkeypatch.setattr(display_mod, "chrome_running", fake_chrome)
     monkeypatch.setattr(display_mod, "launch_chrome", fake_launch)
 
+    async def fake_alive(settings=None):
+        return True
+
+    monkeypatch.setattr(display_mod, "display_alive", fake_alive)
+
     first = asyncio.run(display_mod.ensure_running({"operator": {}}))
     second = asyncio.run(display_mod.ensure_running({"operator": {}}))
     display_mod.reset_ready_cache()
     assert first["ready"] is True
     assert second is first
-    assert calls["active"] == len(display_mod.DISPLAY_KEYS)
+    assert calls["active"] == 2  # wm + vnc; xvfb skipped because the display is up
     assert calls["chrome"] == 0
     assert calls["run"] == 0
     assert calls["launch"] == 0
 
+
+def test_ensure_running_starts_chrome_when_asked(monkeypatch):
+    """Opening the operator screen must bring Chrome up on that display.
+    Screenshot polls must not, or they relaunch it over the live session."""
+    import asyncio
+
+    from director.operator import display as display_mod
+
+    display_mod.reset_ready_cache()
+    calls = {"chrome": 0, "launch": 0}
+
+    async def fake_alive(settings=None):
+        return True
+
+    async def fake_active(unit):
+        return True
+
+    async def fake_chrome(settings=None):
+        calls["chrome"] += 1
+        return False
+
+    async def fake_launch(url="", settings=None):
+        calls["launch"] += 1
+        return "opened"
+
+    monkeypatch.setattr(display_mod, "display_alive", fake_alive)
+    monkeypatch.setattr(display_mod, "unit_active", fake_active)
+    monkeypatch.setattr(display_mod, "chrome_running", fake_chrome)
+    monkeypatch.setattr(display_mod, "launch_chrome", fake_launch)
+
+    asyncio.run(display_mod.ensure_running({"operator": {}}, with_chrome=True))
+    display_mod.reset_ready_cache()
+    assert calls["chrome"] == 1
+    assert calls["launch"] == 1

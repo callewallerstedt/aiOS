@@ -28,6 +28,8 @@ from . import routines as routines_mod
 MAX_TOOL_ROUNDS = 24
 TURN_TIMEOUT = 900.0
 SCHEDULER_TICK = 20.0
+COMPACTION_IDLE_SECONDS = 60 * 60
+COMPACTION_INPUT_CHARS = 120_000
 
 
 class Runtime:
@@ -44,6 +46,8 @@ class Runtime:
         self._pending_calls: dict[str, asyncio.Future] = {}
         self._queued: dict[str, list[dict]] = {}
         self._scheduler: asyncio.Task | None = None
+        self._compactions: dict[str, asyncio.Task] = {}
+        self._compaction_retry_at: dict[str, float] = {}
         # agent_id -> "yes to everything for the rest of this run"
         self._run_approval: dict[str, bool] = {}
         # Threads a client currently has open, so a reply the user is watching
@@ -325,10 +329,109 @@ class Runtime:
                 await asyncio.sleep(SCHEDULER_TICK)
                 for routine in store.due_routines():
                     await self.fire_routine(routine)
+                self.start_due_compactions()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 await self.emit("routine.error", {"error": f"{type(exc).__name__}: {exc}"})
+
+    def start_due_compactions(self) -> None:
+        """Start bounded idle compactions without delaying scheduled routines."""
+        available = max(0, 2 - len(self._compactions))
+        if not available:
+            return
+        due = store.threads_due_for_compaction(
+            before=time.time() - COMPACTION_IDLE_SECONDS, limit=available)
+        for thread in due:
+            thread_id = str(thread["id"])
+            if (thread_id in self._compactions or self.busy(thread_id)
+                    or self._compaction_retry_at.get(thread_id, 0) > time.time()):
+                continue
+
+            async def run_compaction(tid: str = thread_id) -> None:
+                try:
+                    await self.compact_thread(tid)
+                    self._compaction_retry_at.pop(tid, None)
+                except Exception as exc:
+                    self._compaction_retry_at[tid] = time.time() + 300
+                    await self.emit("thread.compaction_error",
+                                    {"error": f"{type(exc).__name__}: {exc}"},
+                                    thread_id=tid)
+
+            task = asyncio.create_task(run_compaction())
+            self._compactions[thread_id] = task
+            task.add_done_callback(lambda _done, tid=thread_id: self._compactions.pop(tid, None))
+
+    async def compact_due_threads(self, *, force: bool = False) -> dict:
+        """Compact every eligible chat once; used by maintenance and tests."""
+        rows = store.threads_due_for_compaction(
+            before=time.time() - COMPACTION_IDLE_SECONDS, force=force, limit=5000)
+        compacted, failed = [], []
+        for thread in rows:
+            thread_id = str(thread["id"])
+            if self.busy(thread_id):
+                continue
+            try:
+                if await self.compact_thread(thread_id):
+                    compacted.append(thread_id)
+            except Exception as exc:
+                failed.append({"thread_id": thread_id,
+                               "error": f"{type(exc).__name__}: {exc}"})
+        return {"compacted": compacted, "failed": failed}
+
+    async def compact_thread(self, thread_id: str) -> bool:
+        """Replace the model-facing past with one durable summary boundary.
+
+        Stored messages are deliberately untouched: the phone can disclose the
+        complete transcript, while future model turns see the summary followed
+        only by messages written after this exact rowid.
+        """
+        thread = store.get_thread(thread_id)
+        if not thread:
+            return False
+        through = store.latest_message_sequence(thread_id)
+        previous = int(thread.get("compacted_through") or 0)
+        if not through or through <= previous:
+            return False
+        agent = store.get_agent(str(thread.get("agent_id") or ""))
+        if not agent:
+            return False
+
+        lines = []
+        old_summary = str(thread.get("summary") or "").strip()
+        for row in store.list_messages(thread_id, after_sequence=previous,
+                                       through_sequence=through):
+            role = str(row.get("role") or "message").upper()
+            meta = row.get("meta") or {}
+            content = str(row.get("content") or "")
+            if role == "TOOL_CALL":
+                content = f"{meta.get('name', 'tool')}({meta.get('arguments', '{}')})"
+            elif role == "TOOL_RESULT":
+                content = f"{meta.get('name', 'tool')}: {meta.get('output', '')}"
+            lines.append(f"{role}: {content[:6000]}")
+        fresh = "\n\n".join(lines)
+        prefix = "PREVIOUS COMPACTED CONTEXT:\n" + old_summary + "\n\n" if old_summary else ""
+        room = max(10_000, COMPACTION_INPUT_CHARS - len(prefix))
+        transcript = prefix + fresh[-room:]
+
+        settings = config.load_settings()
+        reply = await models.complete(
+            backend=str(agent.get("backend") or ""),
+            model=str(agent.get("model") or ""),
+            reasoning="low",
+            instructions=(
+                "Compact the conversation into a factual continuation summary. Preserve user goals, "
+                "decisions, constraints, names, exact identifiers, unfinished work, results, and errors. "
+                "Do not add commentary, greetings, or facts not present. Write concise plain text."),
+            items=[models.user_message(transcript)], tools=[], timeout=180.0,
+            settings=settings)
+        summary = str(reply.get("text") or "").strip()
+        if not summary:
+            raise models.ModelError("the compaction model returned no summary")
+        store.save_compaction(thread_id, summary, through)
+        await self.emit("thread.compacted", {"through": through},
+                        thread_id=thread_id, agent_id=str(agent["id"]))
+        return True
 
     async def fire_routine(self, routine: dict) -> None:
         """Drop a routine's prompt into its agent's thread and run a turn."""
@@ -586,7 +689,7 @@ class Runtime:
 
     async def _finish_tool(self, thread_id: str, agent: dict, call_id: str, name: str,
                            output: str, card: dict, *, image: str = "") -> None:
-        meta = {"call_id": call_id, "name": name, "output": output}
+        meta = {"call_id": call_id, "name": name, "output": output, "card": card}
         if image:
             meta["image"] = image
         store.add_message(thread_id, "tool_result", "", meta)
@@ -597,7 +700,13 @@ class Runtime:
 def build_items(thread_id: str) -> list[dict]:
     """Rebuild the model's item list from stored messages."""
     items: list[dict] = []
-    for row in store.list_messages(thread_id):
+    thread = store.get_thread(thread_id) or {}
+    summary = str(thread.get("summary") or "").strip()
+    compacted_through = int(thread.get("compacted_through") or 0)
+    if summary and compacted_through:
+        items.append(models.user_message(
+            "[Compacted conversation context]\n" + summary))
+    for row in store.list_messages(thread_id, after_sequence=compacted_through):
         role = row["role"]
         meta = row.get("meta") or {}
         if role == "user":

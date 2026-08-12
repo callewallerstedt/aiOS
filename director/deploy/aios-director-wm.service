@@ -1,7 +1,7 @@
 [Unit]
 Description=aiOS Director window manager (openbox on the virtual screen)
 After=aios-director-xvfb.service
-Requires=aios-director-xvfb.service
+Wants=aios-director-xvfb.service
 
 [Service]
 Type=simple
@@ -11,7 +11,7 @@ Environment=DISPLAY=:99
 # a screen it cannot reason about.
 ExecStart=/usr/bin/openbox
 ExecStartPost=/usr/bin/xsetroot -solid #2b2c2f
-Restart=always
+Restart=on-failure
 RestartSec=2
 
 [Install]

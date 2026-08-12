@@ -1,7 +1,7 @@
 [Unit]
 Description=aiOS Director screen export (x11vnc)
 After=aios-director-xvfb.service
-Requires=aios-director-xvfb.service
+Wants=aios-director-xvfb.service
 
 [Service]
 Type=simple

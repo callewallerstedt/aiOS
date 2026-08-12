@@ -6,7 +6,8 @@
    through a run catches up by asking for everything after the last id it saw
    instead of refetching the conversation.
 
-   No framework, no bundler: this is served as three static files. */
+   CODE job cards open the real aiOS CODE transcript renderer
+   (aios_ui/web/js/transcript.js), fed by events proxied through Director. */
 
 const STORE_KEY = "aios-director";
 
@@ -26,6 +27,7 @@ const state = {
   thinking: null,       // live reasoning element
   tools: new Map(),     // call_id -> element
   jobs: new Map(),      // job_id -> element
+  jobMeta: new Map(),   // job_id -> { session_id, title, ... }
   threads: new Map(),   // agentId -> last thread payload
   openGen: 0,
   shot: { image: "", at: 0 },
@@ -36,6 +38,11 @@ const state = {
   chunks: [],
   pending: [],          // files waiting to send with the next message
   appearance: null,
+  codeView: null,       // { jobId, sessionId, since, view }
+  historyExpanded: false,
+  currentThread: null,
+  currentMessages: [],
+  screen: "agents",
 };
 
 /* ---------------- storage ---------------- */
@@ -208,8 +215,9 @@ function blobExtras(mood) {
 function blobSvg(specOrSeed, mood = "idle") {
   const spec = specOrSeed && specOrSeed.color ? specOrSeed : blobSpec(specOrSeed);
   const shine = `<ellipse cx="22" cy="18" rx="9" ry="5.5" fill="#fff" opacity=".22"/>`;
-  const box = mood === "sleeping" ? "-4 -16 76 84" : "0 0 64 64";
-  return `<svg viewBox="${box}" aria-hidden="true">${blobBody(spec)}${shine}${blobMoodEyes(mood, spec.emotion)}${blobExtras(mood)}</svg>`;
+  // Keep a fixed viewport across selection changes. The old sleeping viewport
+  // made the chat icon visibly shrink when returning to the list.
+  return `<svg viewBox="0 0 64 64" aria-hidden="true">${blobBody(spec)}${shine}${blobMoodEyes(mood, spec.emotion)}${blobExtras(mood)}</svg>`;
 }
 
 function fillAvatar(node, agent, mood) {
@@ -240,7 +248,7 @@ function markdown(source) {
   const blocks = [];
   let text = escaped.replace(/```([\w-]*)\n?([\s\S]*?)```/g, (_m, _lang, code) => {
     blocks.push(code.replace(/\n$/, ""));
-    return ` BLOCK${blocks.length - 1} `;
+    return `AIOS_CODE_BLOCK_SENTINEL_${blocks.length - 1}_END`;
   });
 
   text = text
@@ -278,7 +286,8 @@ function markdown(source) {
   closeList();
 
   return out.join("")
-    .replace(/ BLOCK(\d+) /g, (_m, i) => `<pre><code>${blocks[Number(i)]}</code></pre>`);
+    .replace(/AIOS_CODE_BLOCK_SENTINEL_(\d+)_END/g,
+             (_m, i) => `<pre><code>${blocks[Number(i)]}</code></pre>`);
 }
 
 function relativeTime(seconds) {
@@ -313,7 +322,8 @@ function glyphFor(name) {
     read_file: "read", write_file: "write", list_dir: "ls",
     remember: "remember", recall: "remember", forget: "remember",
     operator: "operator", operator_screenshot: "screen", operator_takeover: "screen",
-    code_session: "code", code_status: "code", machines: "machines",
+    code_session: "code", code_status: "code", code_configs: "code",
+    machines: "machines",
   };
   return ICONS[map[name] || "default"] || ICONS.default;
 }
@@ -357,15 +367,19 @@ async function api(path, options = {}) {
 /* ---------------- screens ---------------- */
 
 function show(screen) {
+  state.screen = screen;
   const pair = screen === "pair";
   $("screen-pair").classList.toggle("hidden", !pair);
   $("workspace").classList.toggle("hidden", pair);
   if (pair) return;
   const wide = isWide();
+  const code = screen === "code";
   $("screen-agents").classList.toggle("hidden", !wide && screen !== "agents");
-  $("screen-chat").classList.toggle("hidden", !wide && screen !== "chat");
+  $("screen-chat").classList.toggle("hidden", code || (!wide && screen !== "chat"));
+  $("screen-code")?.classList.toggle("hidden", !code);
+  document.body.classList.toggle("code-open", code);
   const empty = $("chat-empty");
-  if (empty) empty.classList.toggle("hidden", !!state.agentId);
+  if (empty) empty.classList.toggle("hidden", !!state.agentId || code);
   document.body.classList.toggle("has-chat", !!state.agentId);
 }
 
@@ -676,12 +690,22 @@ function toolCard({ callId, name, args, card, running }) {
     `<span class="meta">${escapeHtml(meta)}</span>` +
     svg('<path d="M6 9l6 6 6-6"/>', "card-chevron");
   const body = el("div", "tool-body", card?.body || "");
-  chip.addEventListener("click", () => {
+  chip.addEventListener("click", (event) => {
+    if (card?.job_id) {
+      event.preventDefault();
+      openCodeSession(card.job_id, card.session_id || "", card.preview || detail);
+      return;
+    }
     if (!body.textContent) return;
     wrap.classList.toggle("expanded");
   });
   wrap.append(chip, body);
   if (card?.tone) wrap.classList.add(card.tone);
+  if (card?.job_id) {
+    wrap.classList.add("code-job");
+    wrap.dataset.jobId = card.job_id;
+    if (card.session_id) wrap.dataset.sessionId = card.session_id;
+  }
   if (callId) state.tools.set(callId, wrap);
   appendTranscript(wrap);
   scrollDown();
@@ -716,6 +740,15 @@ function finishTool(callId, name, card) {
   chip.querySelector(".meta").textContent = card?.meta || "";
   const body = wrap.querySelector(".tool-body");
   body.textContent = card?.body || "";
+  if (card?.job_id) {
+    wrap.classList.add("code-job");
+    wrap.dataset.jobId = card.job_id;
+    if (card.session_id) wrap.dataset.sessionId = card.session_id;
+    chip.onclick = (event) => {
+      event.preventDefault();
+      openCodeSession(card.job_id, card.session_id || "", card.preview || "");
+    };
+  }
   if (card?.takeover) {
     const open = el("button", "btn ghost", "Open the screen");
     open.addEventListener("click", () => openTakeover(card.takeover));
@@ -863,28 +896,54 @@ function shotCard(payload) {
   scrollDown();
 }
 
-function taskRow(jobId, label, stateText) {
+function taskRow(jobId, label, stateText, sessionId = "") {
   let wrap = state.jobs.get(jobId);
+  const meta = state.jobMeta.get(jobId) || {};
+  if (sessionId) meta.session_id = sessionId;
+  if (label) meta.title = label;
+  state.jobMeta.set(jobId, meta);
   if (!wrap) {
-    wrap = el("div", "task-row");
+    wrap = el("button", "task-row code-job");
+    wrap.type = "button";
+    wrap.dataset.jobId = jobId;
+    if (meta.session_id) wrap.dataset.sessionId = meta.session_id;
     const pixels = el("div", "task-pixels");
     pixels.innerHTML = loadingPixels();
     wrap.append(pixels);
     wrap.append(el("div", "label", label));
     wrap.append(el("div", "state", stateText || "running"));
+    wrap.append(el("div", "open-hint", "Open"));
+    wrap.addEventListener("click", () => {
+      openCodeSession(jobId, wrap.dataset.sessionId || meta.session_id || "", label);
+    });
     state.jobs.set(jobId, wrap);
     appendTranscript(wrap);
     scrollDown();
   } else {
     wrap.querySelector(".label").textContent = label;
     wrap.querySelector(".state").textContent = stateText || "";
+    if (meta.session_id) wrap.dataset.sessionId = meta.session_id;
   }
   return wrap;
 }
 
 /* ---------------- rendering stored history ---------------- */
 
-function renderMessages(messages) {
+function renderMessages(messages, thread = state.currentThread) {
+  state.currentThread = thread || null;
+  state.currentMessages = Array.isArray(messages) ? messages : [];
+  const through = Number(thread?.compacted_through || 0);
+  const hidden = through
+    ? state.currentMessages.filter((message) => Number(message.sequence || 0) <= through).length
+    : 0;
+  const historyButton = $("btn-history-toggle");
+  historyButton?.classList.toggle("hidden", hidden === 0);
+  historyButton?.setAttribute("aria-expanded", state.historyExpanded ? "true" : "false");
+  historyButton?.setAttribute("aria-label", state.historyExpanded
+    ? "Hide previous messages" : `Show ${hidden} previous messages`);
+  const shown = hidden && !state.historyExpanded
+    ? state.currentMessages.filter((message) => Number(message.sequence || 0) > through)
+    : state.currentMessages;
   const node = transcriptEl();
   node.textContent = "";
   const spacer = el("div", "transcript-spacer");
@@ -892,13 +951,14 @@ function renderMessages(messages) {
   node.append(spacer);
   state.tools.clear();
   state.jobs.clear();
+  state.jobMeta.clear();
   state.streaming = null;
   state.thinking = null;
   state.working = null;
   state.lastStampAt = 0;
 
   const pendingTools = new Map();
-  for (const message of messages) {
+  for (const message of shown) {
     if (message.role === "user") addUser(message.content, message.meta?.attachments, message.created_at);
     else if (message.role === "assistant") addAssistant(message.content, message.created_at);
     else if (message.role === "system") addStatus(message.content.split("\n")[0]);
@@ -909,16 +969,17 @@ function renderMessages(messages) {
     } else if (message.role === "tool_result") {
       const pending = pendingTools.get(message.meta?.call_id) || {};
       const output = message.meta?.output || "";
+      const card = message.meta?.card || {
+        title: pending.name || message.meta?.name || "tool",
+        preview: summariseArgs(pending.args),
+        meta: output.split("\n")[0].slice(0, 40),
+        body: output,
+      };
       toolCard({
         callId: null,
         name: pending.name || message.meta?.name || "tool",
         args: pending.args,
-        card: {
-          title: pending.name || "tool",
-          preview: summariseArgs(pending.args),
-          meta: output.split("\n")[0].slice(0, 40),
-          body: output,
-        },
+        card,
       });
     }
   }
@@ -1038,11 +1099,19 @@ function handleEvent(event) {
       break;
 
     case "code.started":
-      taskRow(payload.job_id, `CODE on ${payload.machine}: ${payload.task || ""}`, "running");
+      taskRow(payload.job_id,
+              `CODE on ${payload.machine}: ${payload.task || ""}`,
+              "running",
+              payload.session_id || "");
       break;
 
     case "code.progress":
-      taskRow(payload.job_id, payload.title || "CODE session", payload.status || "running");
+      taskRow(payload.job_id, payload.title || "CODE session",
+              payload.status || "running", payload.session_id || "");
+      break;
+
+    case "code.events":
+      ingestCodeEvents(payload);
       break;
 
     case "job.finished": {
@@ -1050,6 +1119,11 @@ function handleEvent(event) {
       if (wrap) {
         wrap.classList.add(payload.status === "done" ? "done" : "failed");
         wrap.querySelector(".state").textContent = payload.status || "";
+      }
+      if (payload.session_id) {
+        const meta = state.jobMeta.get(payload.id) || {};
+        meta.session_id = payload.session_id;
+        state.jobMeta.set(payload.id, meta);
       }
       break;
     }
@@ -1066,6 +1140,10 @@ function handleEvent(event) {
 
     case "thread.steered":
       addStatus("Sent — Director will pick this up in the current run.");
+      break;
+
+    case "thread.compacted":
+      refreshOpenThread();
       break;
 
     case "routine.fired":
@@ -1222,22 +1300,28 @@ function paintChatHeader(agent) {
   if (label) label.textContent = `${agent.name || "Operator"}'s screen`;
 }
 
-async function openAgent(agentId) {
+async function openAgent(agentId, { pushHistory = true } = {}) {
   const gen = ++state.openGen;
   if (state.threadId) markWatching(state.threadId, false);
   state.agentId = agentId;
+  state.historyExpanded = false;
   save();
   const agent = state.agents.find((row) => row.id === agentId) || {};
   paintChatHeader(agent);
   markActiveAgent(agentId);
   show("chat");
+  if (pushHistory && history.state?.directorScreen !== "chat") {
+    history.pushState({ directorScreen: "chat", agentId }, "");
+  } else if (pushHistory && history.state?.agentId !== agentId) {
+    history.replaceState({ directorScreen: "chat", agentId }, "");
+  }
   refreshContext();
 
   const cached = state.threads.get(agentId);
   if (cached) {
     state.threadId = cached.thread.id;
     state.cursor = Math.max(state.cursor, cached.cursor || 0);
-    renderMessages(cached.messages || []);
+    renderMessages(cached.messages || [], cached.thread);
     setBusy(cached.thread.status === "running" || cached.thread.status === "waiting");
     markWatching(state.threadId, true);
   } else {
@@ -1256,7 +1340,7 @@ async function openAgent(agentId) {
     });
     state.threadId = data.thread.id;
     state.cursor = Math.max(state.cursor, data.cursor || 0);
-    renderMessages(data.messages || []);
+    renderMessages(data.messages || [], data.thread);
     setBusy(data.thread.status === "running" || data.thread.status === "waiting");
     markWatching(state.threadId, true);
     if (!(data.messages || []).length) {
@@ -1266,6 +1350,58 @@ async function openAgent(agentId) {
     if (gen !== state.openGen) return;
     if (!cached) addStatus(String(error.message || error), true);
   }
+}
+
+async function refreshOpenThread() {
+  const threadId = state.threadId;
+  const agentId = state.agentId;
+  if (!threadId || !agentId) return;
+  try {
+    const data = await api(`/api/threads/${threadId}`);
+    if (state.threadId !== threadId) return;
+    state.threads.set(agentId, {
+      thread: data.thread,
+      messages: data.messages || [],
+      cursor: data.cursor || state.cursor,
+      at: Date.now(),
+    });
+    renderMessages(data.messages || [], data.thread);
+  } catch {
+    /* The next normal refresh will retry. */
+  }
+}
+
+function leaveChat() {
+  if (state.threadId) markWatching(state.threadId, false);
+  state.openGen += 1;
+  state.agentId = "";
+  state.threadId = "";
+  state.historyExpanded = false;
+  state.currentThread = null;
+  state.currentMessages = [];
+  save();
+  markActiveAgent("");
+  $("btn-history-toggle")?.classList.add("hidden");
+  show("agents");
+}
+
+function navigateBack() {
+  if (state.screen === "code") {
+    if (history.state?.directorScreen === "code") history.back();
+    else closeCodeSession();
+    return;
+  }
+  if (state.screen === "chat") {
+    if (history.state?.directorScreen === "chat") history.back();
+    else leaveChat();
+  }
+}
+
+async function togglePreviousMessages() {
+  state.historyExpanded = !state.historyExpanded;
+  const button = $("btn-history-toggle");
+  button?.setAttribute("aria-expanded", state.historyExpanded ? "true" : "false");
+  await refreshOpenThread();
 }
 
 async function send() {
@@ -2440,6 +2576,135 @@ async function refreshScreenPreview() {
   }
 }
 
+/* ---------------- CODE session viewer ---------------- */
+
+function ingestCodeEvents(payload) {
+  const jobId = String(payload.job_id || "");
+  if (!jobId) return;
+  if (payload.session_id) {
+    const meta = state.jobMeta.get(jobId) || {};
+    meta.session_id = payload.session_id;
+    state.jobMeta.set(jobId, meta);
+  }
+  const view = state.codeView;
+  if (!view || view.jobId !== jobId || !view.view) return;
+  if (payload.reset) {
+    view.view.reset();
+    view.since = 0;
+  }
+  const events = payload.events || [];
+  if (events.length) view.view.push(events);
+  if (payload.size != null) view.since = Number(payload.size) || view.since;
+}
+
+async function openCodeSession(jobId, sessionId = "", title = "", { pushHistory = true } = {}) {
+  if (!jobId) return;
+  const screen = $("screen-code");
+  const mount = $("code-session-transcript");
+  const jump = $("code-session-jump");
+  if (!screen || !mount) return;
+
+  const meta = state.jobMeta.get(jobId) || {};
+  if (sessionId) meta.session_id = sessionId;
+  if (title) meta.title = title;
+  state.jobMeta.set(jobId, meta);
+
+  $("code-session-title").textContent = meta.title || title || "CODE session";
+  $("code-session-sub").textContent = meta.session_id
+    ? `session ${meta.session_id}`
+    : jobId;
+
+  if (state.codeView?.view) {
+    try { state.codeView.view.reset(); } catch {}
+  }
+  mount.textContent = "";
+  let Transcript;
+  try {
+    ({ Transcript } = await import("/code/transcript.js"));
+  } catch (error) {
+    mount.textContent = String(error.message || error);
+    show("code");
+    return;
+  }
+  const view = new Transcript(mount, {
+    jump,
+    isActive: () => !$("screen-code")?.classList.contains("hidden"),
+    onReveal: null,
+    onAnswer: null,
+  });
+  state.codeView = { jobId, sessionId: meta.session_id || "", since: 0, view };
+  show("code");
+  if (pushHistory) {
+    history.pushState({ directorScreen: "code", agentId: state.agentId,
+                        jobId, sessionId: meta.session_id || "", title: meta.title || title }, "");
+  }
+
+  let data = null;
+  let lastError = "";
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    try {
+      data = await api(`/api/jobs/${encodeURIComponent(jobId)}/code-events?since=0`);
+      break;
+    } catch (error) {
+      lastError = String(error.message || error);
+      if (!/no CODE session yet|409/.test(lastError) || attempt === 9) break;
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      if (state.codeView?.jobId !== jobId) return;
+    }
+  }
+  if (state.codeView?.jobId !== jobId) return;
+  if (!data) {
+    const note = el("div", "status-row",
+                    `Could not load CODE chat: ${lastError || "unknown error"}`);
+    mount.append(note);
+    return;
+  }
+  if (data.session_id) {
+    state.codeView.sessionId = data.session_id;
+    meta.session_id = data.session_id;
+    state.jobMeta.set(jobId, meta);
+    $("code-session-sub").textContent = `session ${data.session_id}`;
+  }
+  if (data.reset) view.reset();
+  if (data.events?.length) view.push(data.events);
+  state.codeView.since = Number(data.size || 0);
+}
+
+function closeCodeSession() {
+  if (state.codeView?.view) {
+    try { state.codeView.view.reset(); } catch {}
+  }
+  state.codeView = null;
+  if (state.agentId) show("chat");
+  else show("agents");
+}
+
+function installEdgeSwipe() {
+  let gesture = null;
+  document.addEventListener("touchstart", (event) => {
+    if (event.touches.length !== 1 || event.touches[0].clientX > 24) {
+      gesture = null;
+      return;
+    }
+    const touch = event.touches[0];
+    gesture = { x: touch.clientX, y: touch.clientY, done: false };
+  }, { passive: true });
+  document.addEventListener("touchmove", (event) => {
+    if (!gesture || gesture.done || event.touches.length !== 1) return;
+    const touch = event.touches[0];
+    const dx = touch.clientX - gesture.x;
+    const dy = Math.abs(touch.clientY - gesture.y);
+    if (dx > 72 && dx > dy * 1.35) {
+      gesture.done = true;
+      navigateBack();
+    } else if (dy > 44 || dx < -16) {
+      gesture = null;
+    }
+  }, { passive: true });
+  document.addEventListener("touchend", () => { gesture = null; }, { passive: true });
+  document.addEventListener("touchcancel", () => { gesture = null; }, { passive: true });
+}
+
 /* ---------------- boot ---------------- */
 
 async function boot() {
@@ -2457,6 +2722,7 @@ async function boot() {
   show("agents");
   try {
     await loadAgents();
+    history.replaceState({ directorScreen: "agents" }, "");
     const settings = await api("/api/settings").catch(() => null);
     if (settings?.settings?.appearance) {
       applyAppearance(settings.settings.appearance);
@@ -2512,13 +2778,34 @@ function wire() {
     if (agent) routinesSheet(agent);
   });
   $("context-screen")?.addEventListener("click", () => openTakeover());
-  $("btn-back").addEventListener("click", () => {
-    state.agentId = "";
-    show("agents");
-    loadAgents().catch(() => {});
+  $("btn-back").addEventListener("click", navigateBack);
+  $("btn-code-back")?.addEventListener("click", navigateBack);
+  $("btn-history-toggle")?.addEventListener("click", togglePreviousMessages);
+  installEdgeSwipe();
+  window.addEventListener("popstate", (event) => {
+    const target = event.state || { directorScreen: "agents" };
+    if (target.directorScreen === "code" && target.jobId) {
+      openCodeSession(target.jobId, target.sessionId || "", target.title || "",
+                      { pushHistory: false }).catch(() => {});
+      return;
+    }
+    if (state.codeView?.view) {
+      try { state.codeView.view.reset(); } catch {}
+      state.codeView = null;
+    }
+    if (target.directorScreen === "chat" && target.agentId) {
+      if (state.agentId === target.agentId) show("chat");
+      else openAgent(target.agentId, { pushHistory: false }).catch(() => leaveChat());
+      return;
+    }
+    leaveChat();
   });
   window.addEventListener("resize", () => {
     if (!state.token) return;
+    if (state.codeView) {
+      show("code");
+      return;
+    }
     show(state.agentId ? "chat" : "agents");
   });
   $("btn-chat-menu").addEventListener("click", chatMenu);

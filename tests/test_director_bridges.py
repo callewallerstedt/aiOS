@@ -218,7 +218,8 @@ def test_code_bridge_rejects_an_unknown_provider(monkeypatch):
 
 def test_code_bridge_passes_the_harness_defaults(tmp_path, monkeypatch):
     """create_job requires an explicit model and reasoning; omitting either is
-    rejected by the harness, so the bridge must fill them in."""
+    rejected by the harness, so the bridge must fill them in when no saved
+    CODE configuration is available."""
     import director_client
 
     seen = {}
@@ -234,11 +235,101 @@ def test_code_bridge_passes_the_harness_defaults(tmp_path, monkeypatch):
 
     bridge = director_client.CodeBridge()
     monkeypatch.setattr(bridge, "harness", lambda: FakeJobs)
+    monkeypatch.setattr(bridge, "list_configs", lambda: {
+        "ok": True, "configs": [],
+        "default_id": director_client.DEFAULT_CODE_CONFIG_ID,
+        "default_name": director_client.DEFAULT_CODE_CONFIG_NAME,
+    })
     got = bridge.start({"task": "fix the bug", "project": str(tmp_path)})
     assert got["ok"] and got["session_id"] == "sess_1"
     assert seen["model"] == "gpt-5.6-sol"
     assert seen["reasoning"] == "medium"
     assert seen["brief"] == "fix the bug"
+
+
+def test_code_bridge_defaults_to_balanced_engineering(tmp_path, monkeypatch):
+    import director_client
+
+    seen = {}
+
+    class FakeJobs:
+        PROVIDERS = ("codex", "openrouter")
+        DEFAULT_MODELS = {"codex": "gpt-5.6-sol", "openrouter": "fallback"}
+
+        @staticmethod
+        def create_job(**kwargs):
+            seen.update(kwargs)
+            return {"id": "sess_bal"}
+
+    bridge = director_client.CodeBridge()
+    monkeypatch.setattr(bridge, "harness", lambda: FakeJobs)
+    monkeypatch.setattr(bridge, "list_configs", lambda: {
+        "ok": True,
+        "configs": [{
+            "id": "harness-balanced-engineering",
+            "name": "Balanced Engineering",
+            "provider": "openrouter",
+            "strategy": "auto",
+            "review_fix": False,
+            "roles": {
+                "coder": {
+                    "role": "coder", "enabled": True,
+                    "model": "deepseek/deepseek-v4-flash-0731",
+                    "reasoning": "low", "fast": True,
+                },
+            },
+        }],
+        "default_id": "harness-balanced-engineering",
+        "default_name": "Balanced Engineering",
+    })
+    got = bridge.start({"task": "ship it", "project": str(tmp_path)})
+    assert got["ok"] and got["config_id"] == "harness-balanced-engineering"
+    assert seen["provider"] == "openrouter"
+    assert seen["model"] == "deepseek/deepseek-v4-flash-0731"
+    assert seen["reasoning"] == "low"
+    assert seen["fast"] is True
+    assert seen["config_name"] == "Balanced Engineering"
+
+
+def test_code_bridge_honours_explicit_config_id(tmp_path, monkeypatch):
+    import director_client
+
+    seen = {}
+
+    class FakeJobs:
+        PROVIDERS = ("openrouter",)
+        DEFAULT_MODELS = {"openrouter": "fallback"}
+
+        @staticmethod
+        def create_job(**kwargs):
+            seen.update(kwargs)
+            return {"id": "sess_cfg"}
+
+    bridge = director_client.CodeBridge()
+    monkeypatch.setattr(bridge, "harness", lambda: FakeJobs)
+    monkeypatch.setattr(bridge, "list_configs", lambda: {
+        "ok": True,
+        "configs": [{
+            "id": "fast-one",
+            "name": "Fast",
+            "provider": "openrouter",
+            "strategy": "auto",
+            "roles": {
+                "coder": {
+                    "role": "coder", "enabled": True,
+                    "model": "deepseek/deepseek-v4-flash",
+                    "reasoning": "off", "fast": True,
+                },
+            },
+        }],
+    })
+    got = bridge.start({
+        "task": "quick edit", "project": str(tmp_path),
+        "config_id": "fast-one",
+    })
+    assert got["ok"] and got["config_id"] == "fast-one"
+    assert seen["model"] == "deepseek/deepseek-v4-flash"
+    assert seen["reasoning"] == "off"
 
 
 def test_code_bridge_refuses_a_missing_project(monkeypatch):

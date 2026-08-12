@@ -9,6 +9,7 @@ from __future__ import annotations
 import html
 import json
 import re
+from urllib.parse import parse_qs, unquote, urlparse
 
 import aiohttp
 
@@ -91,10 +92,86 @@ async def web_fetch(ctx: ToolContext, url: str = "", max_chars: int = MAX_TEXT) 
     )
 
 
+def parse_search_results(markup: str, limit: int = 5) -> list[dict[str, str]]:
+    """Pull title+url rows out of DuckDuckGo lite HTML."""
+    results: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for href, label in re.findall(r'<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>', markup or "", re.S):
+        target = href
+        if target.startswith("//"):
+            target = "https:" + target
+        if "uddg=" in target:
+            wrapped = parse_qs(urlparse(target).query).get("uddg") or []
+            if wrapped:
+                target = unquote(wrapped[0])
+        if not target.startswith("http") or target in seen:
+            continue
+        if "duckduckgo.com" in urlparse(target).netloc:
+            continue
+        seen.add(target)
+        title = readable_text(label)[:200] or target
+        results.append({"title": title, "url": target})
+        if len(results) >= limit:
+            break
+    return results
+
+
+def format_search_results(query: str, results: list[dict[str, str]]) -> str:
+    if not results:
+        return f"No results for {query!r}."
+    lines = [f"Results for {query!r}:"]
+    for index, row in enumerate(results, 1):
+        lines.append(f"{index}. {row['title']}\n   {row['url']}")
+    return "\n".join(lines)
+
+
+async def duckduckgo_search(query: str, count: int) -> list[dict[str, str]]:
+    timeout = aiohttp.ClientTimeout(total=20)
+    headers = {"User-Agent": UA, "Accept": "text/html"}
+    async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+        async with session.post(
+            "https://lite.duckduckgo.com/lite/",
+            data={"q": query},
+            allow_redirects=True,
+        ) as resp:
+            if resp.status >= 400:
+                return []
+            raw = await resp.text(errors="replace")
+    return parse_search_results(raw, count)
+
+
+async def openrouter_search(query: str, count: int, key: str) -> str:
+    payload = {
+        "model": "openai/gpt-4o-mini",
+        "messages": [{"role": "user", "content": (
+            f"Search the web for: {query}\n\n"
+            "List the most relevant results with titles, links and one-line summaries."
+        )}],
+        "tools": [{"type": "openrouter:web_search",
+                   "parameters": {"max_results": count}}],
+    }
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://github.com/callewallerstedt/aios",
+        "X-Title": "aiOS Director",
+    }
+    timeout = aiohttp.ClientTimeout(total=90)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.post("https://openrouter.ai/api/v1/chat/completions",
+                                json=payload, headers=headers) as resp:
+            data = await resp.json(content_type=None)
+            if resp.status != 200:
+                detail = str((data or {}).get("error", {}).get("message") or data)[:300]
+                raise RuntimeError(f"search failed (HTTP {resp.status}): {detail}")
+    choices = (data or {}).get("choices") or []
+    return str(((choices[0] if choices else {}).get("message") or {}).get("content") or "").strip()
+
+
 @tool(
     "web_search",
-    "Search the web and get back result titles, links and snippets. Needs an "
-    "OpenRouter key; without one, use the operator to search in the browser.",
+    "Search the public web and get back result titles and links. Then use "
+    "web_fetch to read a page. Do not drive the operator browser just to search.",
     {
         "type": "object",
         "properties": {
@@ -108,42 +185,29 @@ async def web_search(ctx: ToolContext, query: str = "", max_results: int = 5) ->
     text = str(query or "").strip()
     if not text:
         return ToolResult(error="no query given")
-    key = config.openrouter_key(ctx.settings)
-    if not key:
-        return ToolResult(error="no OpenRouter key configured — use the operator to "
-                                "search in the browser instead")
     count = max(1, min(int(max_results or 5), 20))
-    # OpenRouter exposes search through the `web` plugin. There is no top-level
-    # web_search request field.
-    payload = {
-        "model": "openai/gpt-4o-mini",
-        "messages": [{"role": "user", "content": f"Search the web for: {text}\n\n"
-                                                 "List the most relevant results with titles, "
-                                                 "links and one-line summaries."}],
-        "plugins": [{"id": "web", "max_results": count}],
-    }
-    headers = {
-        "Authorization": f"Bearer {key}",
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://github.com/callewallerstedt/aios",
-        "X-Title": "aiOS Director",
-    }
+    results: list[dict[str, str]] = []
     try:
-        timeout = aiohttp.ClientTimeout(total=90)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post("https://openrouter.ai/api/v1/chat/completions",
-                                    json=payload, headers=headers) as resp:
-                data = await resp.json(content_type=None)
-                if resp.status != 200:
-                    detail = str((data or {}).get("error", {}).get("message") or data)[:300]
-                    return ToolResult(error=f"search failed (HTTP {resp.status}): {detail}")
-    except (aiohttp.ClientError, TimeoutError) as exc:
-        return ToolResult(error=f"search failed: {exc}")
-
-    choices = (data or {}).get("choices") or []
-    body = str(((choices[0] if choices else {}).get("message") or {}).get("content") or "").strip()
-    return ToolResult(
-        output=body or "(no results)",
-        card={"title": "search", "preview": text[:80], "meta": f"{count} results",
-              "tone": "ok", "body": body},
-    )
+        results = await duckduckgo_search(text, count)
+    except (aiohttp.ClientError, TimeoutError, UnicodeDecodeError):
+        results = []
+    if results:
+        body = format_search_results(text, results)
+        return ToolResult(
+            output=body,
+            card={"title": "search", "preview": text[:80], "meta": f"{len(results)} results",
+                  "tone": "ok", "body": body},
+        )
+    key = config.openrouter_key(ctx.settings)
+    if key:
+        try:
+            body = await openrouter_search(text, count, key)
+        except (aiohttp.ClientError, TimeoutError, RuntimeError) as exc:
+            return ToolResult(error=f"search failed: {exc}")
+        if body:
+            return ToolResult(
+                output=body,
+                card={"title": "search", "preview": text[:80], "meta": f"{count} results",
+                      "tone": "ok", "body": body},
+            )
+    return ToolResult(error="search returned nothing — try web_fetch with a specific URL")

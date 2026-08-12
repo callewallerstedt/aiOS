@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, interactive-widget=resizes-content" />
 <meta name="theme-color" content="#1c1d1f" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
@@ -13,6 +13,8 @@
 <link rel="apple-touch-icon" href="/icons/aios-icon-180.png" />
 <link rel="icon" href="/icons/aios-icon-192.png" />
 <link rel="stylesheet" href="/director.css" />
+<link rel="stylesheet" href="/code/code.css" />
+<link rel="stylesheet" href="/code/code-beautiful.css" />
 </head>
 <body>
 
@@ -56,8 +58,10 @@
     <!-- ---------- agent list / left sidebar ---------- -->
     <section id="screen-agents" class="screen hidden">
       <header class="topbar">
-        <h1 class="brand-word">Director</h1>
-        <div class="sub hidden" id="agents-sub">Connecting…</div>
+        <div class="brand-row">
+          <h1 class="brand-word">Director</h1>
+          <span class="conn-dot" data-conn="off" aria-label="Offline"></span>
+        </div>
         <button class="icon-btn" id="btn-search" aria-label="Search" title="Search">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
                stroke-linecap="round"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></svg>
@@ -113,11 +117,17 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
                stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6" /></svg>
         </button>
+        <button class="history-toggle hidden" id="btn-history-toggle" type="button"
+                aria-label="Show previous messages" aria-expanded="false" title="Previous messages">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+               stroke-linecap="round" stroke-linejoin="round"><path d="M7 9l5 5 5-5" /></svg>
+        </button>
         <div class="avatar small" id="chat-avatar"></div>
         <div class="title">
           <h1 id="chat-name">Director</h1>
           <div class="sub" id="chat-sub"></div>
         </div>
+        <span class="conn-dot" data-conn="off" aria-label="Offline"></span>
         <button class="icon-btn" id="btn-screen" aria-label="Operator screen" title="Operator screen">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
             <rect x="2.5" y="4" width="19" height="13" rx="2" /><path d="M8 20h8M12 17v3" />
@@ -188,10 +198,43 @@
       </div>
     </aside>
 
+    <!-- ---------- CODE session (exact aiOS CODE transcript) ---------- -->
+    <section id="screen-code" class="screen hidden">
+      <header class="topbar">
+        <button class="icon-btn" id="btn-code-back" aria-label="Back">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
+               stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6" /></svg>
+        </button>
+        <div class="title">
+          <h1 id="code-session-title">CODE</h1>
+          <div class="sub" id="code-session-sub"></div>
+        </div>
+      </header>
+      <div class="code-detail phone-mirror" id="code-session-detail">
+        <div class="code-transcript-wrap">
+          <div class="code-transcript" id="code-session-transcript"></div>
+          <button class="scroll-bottom" id="code-session-jump" type="button">Jump to latest ↓</button>
+        </div>
+      </div>
+    </section>
+
   </div>
 
 </div>
 
+<script>
+(function () {
+  try {
+    var raw = JSON.parse(localStorage.getItem("aios-director") || "{}");
+    if (raw.token && raw.url) {
+      var pair = document.getElementById("screen-pair");
+      var workspace = document.getElementById("workspace");
+      if (pair) pair.classList.add("hidden");
+      if (workspace) workspace.classList.remove("hidden");
+    }
+  } catch (e) {}
+})();
+</script>
 <script src="/director.js" type="module"></script>
 </body>
 </html>

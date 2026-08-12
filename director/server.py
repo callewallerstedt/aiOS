@@ -218,7 +218,11 @@ def _thread_payload(thread_id: str) -> dict:
     thread = store.get_thread(thread_id)
     if not thread:
         return {}
-    return {"thread": thread, "messages": store.list_messages(thread_id)}
+    messages = store.list_messages(thread_id)
+    through = int(thread.get("compacted_through") or 0)
+    thread["hidden_count"] = sum(
+        1 for message in messages if int(message.get("sequence") or 0) <= through)
+    return {"thread": thread, "messages": messages}
 
 
 @ROUTES.get("/api/agents/{agent_id}/thread")
@@ -428,6 +432,49 @@ async def list_jobs(request: web.Request) -> web.Response:
                           "jobs": store.list_jobs(thread_id=request.query.get("thread_id", ""))})
 
 
+@ROUTES.get("/api/jobs/{job_id}")
+async def get_job(request: web.Request) -> web.Response:
+    job = store.get_job(request.match_info["job_id"])
+    if not job:
+        return error("no such job", status=404)
+    return json_response({"ok": True, "job": job})
+
+
+@ROUTES.get("/api/jobs/{job_id}/code-events")
+async def job_code_events(request: web.Request) -> web.Response:
+    """Proxy the CODE transcript events for a Director-dispatched job.
+
+    The events live on the Windows machine (`code_jobs` events.jsonl). The
+    phone opens a job card and pulls through Director so nothing has to listen
+    on Windows.
+    """
+    job = store.get_job(request.match_info["job_id"])
+    if not job:
+        return error("no such job", status=404)
+    result = job.get("result") or {}
+    request_meta = job.get("request") or {}
+    session_id = str(result.get("session_id") or request_meta.get("session_id") or "")
+    machine_id = str(job.get("machine_id") or "")
+    if not session_id or not machine_id:
+        return error("this job has no CODE session yet", status=409)
+    try:
+        since = int(request.query.get("since") or 0)
+    except (TypeError, ValueError):
+        since = 0
+    runtime = request.app["runtime"]
+    payload = await runtime.call_machine(
+        machine_id, "code.events",
+        {"session_id": session_id, "since": since},
+        timeout=45.0)
+    if not isinstance(payload, dict):
+        return error("machine returned nothing", status=502)
+    if payload.get("ok") is False:
+        return error(str(payload.get("error") or "could not read CODE events"), status=502)
+    payload.setdefault("job_id", job["id"])
+    payload.setdefault("session_id", session_id)
+    return json_response(payload)
+
+
 @ROUTES.post("/api/jobs/{job_id}/stop")
 async def stop_job(request: web.Request) -> web.Response:
     return json_response({"ok": request.app["runtime"].stop_job(request.match_info["job_id"])})
@@ -593,7 +640,7 @@ async def operator_status(request: web.Request) -> web.Response:
 
 @ROUTES.post("/api/operator/start")
 async def operator_start(request: web.Request) -> web.Response:
-    return json_response({"ok": True, "operator": await display_mod.ensure_running()})
+    return json_response({"ok": True, "operator": await display_mod.ensure_running(with_chrome=True)})
 
 
 @ROUTES.post("/api/operator/restart")
@@ -660,7 +707,8 @@ async def machine_job_update(request: web.Request) -> web.Response:
     status = str(body.get("status") or "")
     result = dict(body.get("result") or {})
     if status:
-        store.update_job(job_id, status=status, result=result)
+        previous = dict(job.get("result") or {})
+        store.update_job(job_id, status=status, result={**previous, **result})
     runtime = request.app["runtime"]
     await runtime.emit("code.progress", {"job_id": job_id, "status": status, **result},
                        thread_id=job.get("thread_id", ""), agent_id=job.get("agent_id", ""))
@@ -706,8 +754,11 @@ async def machine_socket(request: web.Request) -> web.WebSocketResponse:
                                    agent_id=job.get("agent_id", ""))
             elif kind == "job":
                 job_id = str(payload.get("job_id") or "")
+                existing = store.get_job(job_id) or {}
+                previous = dict(existing.get("result") or {})
+                incoming = dict(payload.get("result") or {})
                 store.update_job(job_id, status=str(payload.get("status") or "done"),
-                                 result=dict(payload.get("result") or {}))
+                                 result={**previous, **incoming})
     finally:
         runtime.detach_machine(machine["id"])
         await runtime.emit("machine.offline", {"id": machine["id"], "name": machine["name"]})
@@ -729,7 +780,7 @@ async def vnc_bridge(request: web.Request) -> web.WebSocketResponse:
 
     settings = config.load_settings()
     port = int((settings.get("operator") or {}).get("vnc_port") or 5999)
-    await display_mod.ensure_running(settings, with_chrome=False)
+    await display_mod.ensure_running(settings, with_chrome=True)
 
     # noVNC 1.0 always opens with subprotocol "binary". If we do not echo it,
     # the browser aborts the handshake and the phone shows "Failed to connect".
@@ -812,7 +863,7 @@ async def _startup(app: web.Application) -> None:
         push.ensure_keys(settings)
     _catch_up_routines()
     try:
-        await display_mod.ensure_running(settings, with_chrome=False)
+        await display_mod.ensure_running(settings, with_chrome=True)
     except Exception as exc:
         print(f"[director] operator display not started: {exc}", flush=True)
 

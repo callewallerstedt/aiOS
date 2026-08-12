@@ -76,6 +76,12 @@ async def _run(argv: list[str], timeout: float = 20.0,
     return proc.returncode or 0, raw.decode("utf-8", errors="replace").strip()
 
 
+async def display_alive(settings: dict[str, Any] | None = None) -> bool:
+    """True when something is already serving the operator DISPLAY."""
+    code, _ = await _run(["xdpyinfo"], timeout=3, env=display_env(settings))
+    return code == 0
+
+
 async def unit_active(unit: str) -> bool:
     code, out = await _run(["systemctl", "--user", "is-active", unit], timeout=10)
     return code == 0 and out.strip() == "active"
@@ -136,8 +142,12 @@ async def ensure_running(settings: dict[str, Any] | None = None, *,
         return cached
     started_xvfb = False
     states: dict[str, bool] = {}
+    display_up = await display_alive(settings)
     for key, unit in UNITS.items():
         if key == "chrome" and not with_chrome:
+            continue
+        if key == "xvfb" and display_up:
+            states[key] = True
             continue
         active = await unit_active(unit)
         states[key] = active
@@ -195,6 +205,7 @@ def chrome_argv(url: str = "", settings: dict[str, Any] | None = None) -> list[s
         "--no-first-run",
         "--no-default-browser-check",
         "--disable-session-crashed-bubble",
+        "--restore-last-session",
         "--password-store=basic",
         "--disable-gpu",
         "--use-gl=angle",

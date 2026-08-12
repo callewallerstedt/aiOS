@@ -76,7 +76,7 @@ async def operator(ctx: ToolContext, task: str = "", max_steps: int = 0) -> Tool
     {"type": "object", "properties": {}},
 )
 async def operator_screenshot(ctx: ToolContext) -> ToolResult:
-    state = await display_mod.ensure_running(ctx.settings)
+    state = await display_mod.ensure_running(ctx.settings, with_chrome=False)
     if not state.get("ready"):
         return ToolResult(error=f"the operator display is not running ({state.get('units')})")
     try:
@@ -103,7 +103,7 @@ async def operator_screenshot(ctx: ToolContext) -> ToolResult:
         "why": {"type": "string", "description": "One line on what he should look at."}}},
 )
 async def operator_takeover(ctx: ToolContext, why: str = "") -> ToolResult:
-    state = await display_mod.ensure_running(ctx.settings)
+    state = await display_mod.ensure_running(ctx.settings, with_chrome=True)
     if not state.get("ready"):
         return ToolResult(error=f"the operator display is not running ({state.get('units')})")
     await ctx.emit("operator.takeover", {"path": display_mod.takeover_path(),

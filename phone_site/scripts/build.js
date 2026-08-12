@@ -24,6 +24,28 @@ for (const name of [
   fs.copyFileSync(path.join(root, name), path.join(publicDir, name));
 }
 
+// CODE transcript renderer. Prefer the live aiOS copy when this checkout
+// has it; otherwise use the vendored files in ./code so a Vercel build
+// (which only sees phone_site/) still ships them.
+const codePublic = path.join(publicDir, 'code');
+fs.mkdirSync(codePublic, { recursive: true });
+const aiosWeb = path.resolve(root, '..', 'aios_ui', 'web');
+const localCode = path.join(root, 'code');
+for (const [from, to] of [
+  ['js/transcript.js', 'transcript.js'],
+  ['js/markdown.js', 'markdown.js'],
+  ['css/code.css', 'code.css'],
+  ['css/code-beautiful.css', 'code-beautiful.css'],
+]) {
+  const aiosPath = path.join(aiosWeb, from);
+  const localPath = path.join(localCode, to);
+  const src = fs.existsSync(aiosPath) ? aiosPath : localPath;
+  if (!fs.existsSync(src)) {
+    throw new Error(`missing CODE asset ${to} (looked in ${aiosPath} and ${localPath})`);
+  }
+  fs.copyFileSync(src, path.join(codePublic, to));
+}
+
 fs.cpSync(path.join(root, 'icons'), path.join(publicDir, 'icons'), { recursive: true });
 const fontsDir = path.join(root, 'fonts');
 if (fs.existsSync(fontsDir)) {

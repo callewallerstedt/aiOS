@@ -17,6 +17,8 @@ from .. import store
 from . import ToolContext, ToolResult, tool
 
 PROVIDERS = ("codex", "claude", "cursor", "openrouter", "ollama")
+DEFAULT_CONFIG_ID = "harness-balanced-engineering"
+DEFAULT_CONFIG_NAME = "Balanced Engineering"
 
 
 def _pick_machine(hub, preferred: str = "") -> dict | None:
@@ -58,12 +60,62 @@ async def machines(ctx: ToolContext) -> ToolResult:
 
 
 @tool(
+    "code_configs",
+    "List the saved CODE model configurations on a paired machine "
+    "(provider, strategy, role models). Use this before starting a session "
+    f"when Calle has not already named a config. Default recommendation: "
+    f"{DEFAULT_CONFIG_NAME} (`{DEFAULT_CONFIG_ID}`).",
+    {
+        "type": "object",
+        "properties": {
+            "machine": {"type": "string",
+                        "description": "Machine name. Defaults to the first online CODE machine."},
+        },
+    },
+)
+async def code_configs(ctx: ToolContext, machine: str = "") -> ToolResult:
+    target = _pick_machine(ctx.hub, machine)
+    if target is None:
+        return ToolResult(error="no machine is online to list CODE configs on")
+    result = await ctx.hub.call_machine(target["id"], "code.configs", {}, timeout=30.0)
+    if not result.get("ok"):
+        return ToolResult(error=str(result.get("error") or "could not list CODE configs"))
+    rows = result.get("configs") or []
+    if not rows:
+        return ToolResult(
+            output=f"No saved configs on {target['name']}. You can still pass "
+                   "provider/model/reasoning/fast explicitly to code_session. "
+                   f"Otherwise recommend {DEFAULT_CONFIG_NAME}.",
+            card={"title": "configs", "preview": "none saved", "meta": target["name"],
+                  "tone": "muted"})
+    lines = []
+    for row in rows:
+        roles = row.get("roles") if isinstance(row.get("roles"), dict) else {}
+        coder = roles.get("coder") if isinstance(roles.get("coder"), dict) else {}
+        mark = " ← default" if str(row.get("id") or "") == DEFAULT_CONFIG_ID else ""
+        lines.append(
+            f"{row.get('name')} ({row.get('id')}) — provider {row.get('provider')}, "
+            f"strategy {row.get('strategy') or 'auto'}, "
+            f"coder {coder.get('model') or '?'} "
+            f"({coder.get('reasoning') or '?'}"
+            f"{', fast' if coder.get('fast') else ''}){mark}")
+    listing = "\n".join(lines)
+    return ToolResult(
+        output=listing,
+        card={"title": "configs", "preview": f"{len(rows)} on {target['name']}",
+              "meta": DEFAULT_CONFIG_NAME, "tone": "ok", "body": listing})
+
+
+@tool(
     "code_session",
     "Start a CODE session on a paired machine: a real coding agent working in a "
     "real repository, with its own tests. The session runs in the background "
     "and reports back here, so dispatch it and end your turn. Brief it "
     "precisely — the repository or project, the change wanted, and how to know "
-    "it worked.",
+    "it worked. Pass a saved config_id (preferred) or explicit "
+    "provider/model/reasoning/fast. If Calle has not chosen yet, ask first and "
+    f"recommend {DEFAULT_CONFIG_NAME}. When nothing is specified the machine "
+    f"defaults to {DEFAULT_CONFIG_NAME}.",
     {
         "type": "object",
         "properties": {
@@ -72,14 +124,29 @@ async def machines(ctx: ToolContext) -> ToolResult:
                         "description": "Project path or name on that machine, e.g. C:\\\\aiOS."},
             "machine": {"type": "string",
                         "description": "Machine name. Defaults to the first online one that can run CODE."},
+            "config_id": {"type": "string",
+                          "description": f"Saved CODE configuration id. Default on the machine: "
+                                         f"{DEFAULT_CONFIG_ID} ({DEFAULT_CONFIG_NAME})."},
+            "config_name": {"type": "string",
+                            "description": "Saved CODE configuration name (resolved on the machine)."},
             "provider": {"type": "string", "enum": list(PROVIDERS),
-                         "description": "Which coding backend. Defaults to the machine's own default."},
+                         "description": "Coding backend when not using a saved config."},
+            "model": {"type": "string",
+                      "description": "Exact model id when not using a saved config."},
+            "reasoning": {"type": "string",
+                          "description": "Reasoning / intelligence level (e.g. low, medium, high)."},
+            "fast": {"type": "boolean",
+                     "description": "Fast mode for the coder when not using a saved config."},
+            "strategy": {"type": "string",
+                         "description": "Task strategy override (auto / planned / distributed)."},
         },
         "required": ["task"],
     },
 )
 async def code_session(ctx: ToolContext, task: str = "", project: str = "",
-                       machine: str = "", provider: str = "") -> ToolResult:
+                       machine: str = "", config_id: str = "", config_name: str = "",
+                       provider: str = "", model: str = "", reasoning: str = "",
+                       fast: bool | None = None, strategy: str = "") -> ToolResult:
     brief = str(task or "").strip()
     if not brief:
         return ToolResult(error="no task given")
@@ -88,31 +155,69 @@ async def code_session(ctx: ToolContext, task: str = "", project: str = "",
         return ToolResult(error="no machine is online to run CODE on — the Windows "
                                 "desktop is not connected")
 
+    payload = {
+        "task": brief,
+        "project": project,
+        "config_id": str(config_id or "").strip(),
+        "config_name": str(config_name or "").strip(),
+        "provider": str(provider or "").strip().lower(),
+        "model": str(model or "").strip(),
+        "reasoning": str(reasoning or "").strip().lower(),
+        "strategy": str(strategy or "").strip().lower(),
+        "thread_id": ctx.thread_id,
+    }
+    if fast is not None:
+        payload["fast"] = bool(fast)
+
     job = store.create_job(
-        kind="code", request={"task": brief, "project": project, "provider": provider},
+        kind="code",
+        request={k: v for k, v in payload.items() if k != "thread_id" and v != ""},
         thread_id=ctx.thread_id, agent_id=ctx.agent.get("id", ""),
         machine_id=target["id"], status="running")
+    payload["job_id"] = job["id"]
 
     async def run() -> dict:
         result = await ctx.hub.call_machine(
-            target["id"], "code.start",
-            {"task": brief, "project": project, "provider": provider,
-             "job_id": job["id"], "thread_id": ctx.thread_id},
-            timeout=90.0)
+            target["id"], "code.start", payload, timeout=90.0)
         if not result.get("ok"):
-            return {"status": "fail", "summary": str(result.get("error") or "dispatch failed")}
+            return {"status": "fail",
+                    "summary": str(result.get("error") or "dispatch failed"),
+                    "session_id": ""}
         session_id = str(result.get("session_id") or "")
-        await ctx.emit("code.started", {"job_id": job["id"], "session_id": session_id,
-                                        "machine": target["name"], "task": brief})
-        # The machine streams progress as events and posts the final result to
-        # /api/machine/job when the session ends; wait for that.
-        return await _await_completion(ctx, job["id"])
+        store.update_job(job["id"], result={
+            "session_id": session_id,
+            "summary": "running",
+            "provider": result.get("provider") or payload.get("provider") or "",
+            "model": result.get("model") or payload.get("model") or "",
+            "config_id": result.get("config_id") or payload.get("config_id") or "",
+            "config_name": result.get("config_name") or payload.get("config_name") or "",
+        })
+        await ctx.emit("code.started", {
+            "job_id": job["id"], "session_id": session_id,
+            "machine": target["name"], "task": brief,
+            "provider": result.get("provider") or "",
+            "model": result.get("model") or "",
+            "config_id": result.get("config_id") or "",
+            "config_name": result.get("config_name") or "",
+        })
+        # The machine streams progress/events and posts the final result; wait.
+        finished = await _await_completion(ctx, job["id"])
+        finished.setdefault("session_id", session_id)
+        finished.setdefault("config_id", result.get("config_id") or "")
+        finished.setdefault("config_name", result.get("config_name") or "")
+        finished.setdefault("provider", result.get("provider") or "")
+        finished.setdefault("model", result.get("model") or "")
+        return finished
 
     ctx.hub.start_job(job, run)
+    label = (str(config_name or "").strip()
+             or str(config_id or "").strip()
+             or str(provider or "").strip()
+             or DEFAULT_CONFIG_NAME)
     return ToolResult(
-        output=f"CODE session dispatched to {target['name']} as job {job['id']}. It "
-               "reports back here when it finishes.",
-        card={"title": "code", "preview": brief[:90], "meta": target["name"],
+        output=f"CODE session dispatched to {target['name']} as job {job['id']} "
+               f"({label}). It reports back here when it finishes.",
+        card={"title": "code", "preview": brief[:90], "meta": f"{target['name']} · {label}",
               "tone": "accent", "job_id": job["id"]},
     )
 
@@ -126,9 +231,16 @@ async def _await_completion(ctx: ToolContext, job_id: str, *, timeout: float = 7
         if not row:
             return {"status": "fail", "summary": "job vanished"}
         if row["status"] in ("done", "fail", "stopped"):
-            result = row.get("result") or {}
-            return {"status": row["status"],
-                    "summary": str(result.get("summary") or "session finished")}
+            result = dict(row.get("result") or {})
+            return {
+                "status": row["status"],
+                "summary": str(result.get("summary") or "session finished"),
+                "session_id": str(result.get("session_id") or ""),
+                "config_id": str(result.get("config_id") or ""),
+                "config_name": str(result.get("config_name") or ""),
+                "provider": str(result.get("provider") or ""),
+                "model": str(result.get("model") or ""),
+            }
     return {"status": "stopped", "summary": "CODE session timed out after two hours"}
 
 
@@ -146,7 +258,9 @@ async def code_status(ctx: ToolContext, job_id: str = "") -> ToolResult:
         body = f"{row['kind']} job {row['id']}: {row['status']}\n{result.get('summary', '')}"
         return ToolResult(output=body,
                           card={"title": "code", "preview": row["id"], "meta": row["status"],
-                                "tone": "ok" if row["status"] == "done" else "accent"})
+                                "tone": "ok" if row["status"] == "done" else "accent",
+                                "job_id": row["id"],
+                                "session_id": str(result.get("session_id") or "")})
     rows = store.list_jobs(thread_id=ctx.thread_id, limit=10)
     if not rows:
         return ToolResult(output="no jobs dispatched from this conversation yet",

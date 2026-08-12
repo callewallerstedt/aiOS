@@ -48,10 +48,43 @@ for unit in aios-director aios-director-xvfb aios-director-wm aios-director-x11v
   install -m 644 "$APP_DIR/director/deploy/$unit.service" "$UNIT_DIR/"
 done
 systemctl --user daemon-reload
-systemctl --user enable --now aios-director-xvfb.service
-systemctl --user enable --now aios-director-wm.service
-systemctl --user enable --now aios-director-x11vnc.service
-systemctl --user enable --now aios-director-chrome.service
+chmod +x "$APP_DIR/director/deploy/xvfb-start.sh"
+
+# Recycle only when Xvfb is storming or still on the old ExecStart. A healthy
+# display is left alone — restarting it kills Chrome and dumps the session.
+xvfb_pid="$(systemctl --user show aios-director-xvfb.service -p MainPID --value 2>/dev/null || true)"
+xvfb_restarts="$(systemctl --user show aios-director-xvfb.service -p NRestarts --value 2>/dev/null || true)"
+xvfb_cmd=""
+if [ -n "${xvfb_pid:-}" ] && [ "${xvfb_pid}" != "0" ]; then
+  xvfb_cmd="$(ps -p "$xvfb_pid" -o args= 2>/dev/null || true)"
+fi
+recycle_display=0
+if [ "${xvfb_restarts:-0}" -gt 5 ]; then
+  recycle_display=1
+fi
+if echo "$xvfb_cmd" | grep -q 'Xvfb' && ! echo "$xvfb_cmd" | grep -q 'xvfb-start\|tail --pid'; then
+  recycle_display=1
+fi
+if [ "$recycle_display" = 1 ]; then
+  say "recycling operator display (Xvfb was looping or still on the old unit)"
+  systemctl --user stop aios-director-chrome.service aios-director-wm.service aios-director-x11vnc.service aios-director-xvfb.service || true
+  sleep 1
+  if ! DISPLAY=:99 xdpyinfo >/dev/null 2>&1; then
+    rm -f /tmp/.X99-lock /tmp/.X11-unix/X99
+    pkill -f 'Xvfb :99' || true
+  fi
+fi
+
+# Start, do not restart: bouncing a healthy Xvfb kills Chrome.
+systemctl --user reset-failed aios-director-xvfb.service aios-director-wm.service aios-director-x11vnc.service aios-director-chrome.service || true
+systemctl --user enable aios-director-xvfb.service
+systemctl --user enable aios-director-wm.service
+systemctl --user enable aios-director-x11vnc.service
+systemctl --user enable aios-director-chrome.service
+systemctl --user start aios-director-xvfb.service
+systemctl --user start aios-director-wm.service
+systemctl --user start aios-director-x11vnc.service
+systemctl --user start aios-director-chrome.service
 systemctl --user enable aios-director.service
 systemctl --user restart aios-director.service
 

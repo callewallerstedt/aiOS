@@ -191,7 +191,10 @@ ADDED_COLUMNS = {
     "agents": [("avatar", "TEXT NOT NULL DEFAULT ''"),
                ("auto_approve", "INTEGER NOT NULL DEFAULT 0"),
                ("notify", "INTEGER NOT NULL DEFAULT 1")],
-    "threads": [("muted", "INTEGER NOT NULL DEFAULT 0")],
+    "threads": [("muted", "INTEGER NOT NULL DEFAULT 0"),
+                ("summary", "TEXT NOT NULL DEFAULT ''"),
+                ("compacted_through", "INTEGER NOT NULL DEFAULT 0"),
+                ("compacted_at", "REAL NOT NULL DEFAULT 0")],
 }
 
 
@@ -371,13 +374,47 @@ def add_message(thread_id: str, role: str, content: str, meta: dict | None = Non
             "meta": meta or {}, "created_at": now}
 
 
-def list_messages(thread_id: str, *, limit: int = 400) -> list[dict]:
+def list_messages(thread_id: str, *, limit: int = 5000,
+                  after_sequence: int = 0, through_sequence: int = 0) -> list[dict]:
+    where = ["thread_id = ?", "rowid > ?"]
+    params: list[Any] = [thread_id, int(after_sequence or 0)]
+    if through_sequence:
+        where.append("rowid <= ?")
+        params.append(int(through_sequence))
+    params.append(limit)
     rows = _rows(
-        "SELECT * FROM messages WHERE thread_id = ? ORDER BY created_at, rowid LIMIT ?",
-        (thread_id, limit))
+        f"SELECT rowid AS sequence, * FROM messages WHERE {' AND '.join(where)}"
+        " ORDER BY rowid LIMIT ?", params)
     for row in rows:
         row["meta"] = _loads(row.get("meta"), {})
     return rows
+
+
+def latest_message_sequence(thread_id: str) -> int:
+    row = _row("SELECT COALESCE(MAX(rowid), 0) AS sequence FROM messages WHERE thread_id = ?",
+               (thread_id,))
+    return int(row["sequence"]) if row else 0
+
+
+def threads_due_for_compaction(*, before: float, force: bool = False,
+                               limit: int = 50) -> list[dict]:
+    idle = "" if force else "AND t.status = 'idle' AND t.updated_at <= ?"
+    params: list[Any] = [] if force else [before]
+    params.append(limit)
+    return _rows(
+        "SELECT t.*, (SELECT COALESCE(MAX(m.rowid), 0) FROM messages m"
+        " WHERE m.thread_id = t.id) AS latest_sequence FROM threads t"
+        " WHERE t.archived = 0 " + idle +
+        " AND t.compacted_through < (SELECT COALESCE(MAX(m.rowid), 0) FROM messages m"
+        " WHERE m.thread_id = t.id) ORDER BY t.updated_at LIMIT ?", params)
+
+
+def save_compaction(thread_id: str, summary: str, through_sequence: int) -> None:
+    _exec(
+        "UPDATE threads SET summary = ?, compacted_through = ?, compacted_at = ?"
+        " WHERE id = ? AND compacted_through < ?",
+        (summary, int(through_sequence), time.time(), thread_id, int(through_sequence)),
+    )
 
 
 def clear_messages(thread_id: str) -> None:

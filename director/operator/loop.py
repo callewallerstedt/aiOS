@@ -168,7 +168,7 @@ async def run_task(task: str, *, emit: Emit, settings: dict | None = None,
     cancel = cancel or asyncio.Event()
     budget = int(max_steps or operator_cfg.get("max_steps") or 40)
 
-    state = await display_mod.ensure_running(cfg)
+    state = await display_mod.ensure_running(cfg, with_chrome=True)
     if not state.get("ready"):
         return {"status": "fail", "summary": "the operator display is not running "
                                              f"({state.get('units')})", "steps": 0}

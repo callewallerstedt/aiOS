@@ -189,6 +189,26 @@ button { border: 0; background: none; cursor: pointer; }
 .icon-btn:hover, .icon-btn:active { background: var(--hover-2); color: var(--ink); }
 .icon-btn svg { width: 19px; height: 19px; }
 
+.history-toggle {
+  flex: none;
+  width: 24px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  margin-right: -5px;
+  border-radius: 8px;
+  color: var(--ink-3);
+  transition: color 120ms ease, background 120ms ease;
+}
+.history-toggle:hover,
+.history-toggle:active { color: var(--ink); background: var(--hover-2); }
+.history-toggle svg {
+  width: 14px;
+  height: 14px;
+  transition: transform 180ms var(--ease);
+}
+.history-toggle[aria-expanded="true"] svg { transform: rotate(180deg); }
+
 .conn-dot {
   width: 8px;
   height: 8px;
@@ -409,7 +429,7 @@ button { border: 0; background: none; cursor: pointer; }
   display: flex;
   flex-direction: column;
   gap: 10px;
-  padding: 14px 12px 88px;
+  padding: 14px 12px;
   -webkit-overflow-scrolling: touch;
   overscroll-behavior: contain;
 }
@@ -426,10 +446,6 @@ button { border: 0; background: none; cursor: pointer; }
   max-width: 100%;
   margin-inline: 0;
   align-self: flex-start;
-}
-#screen-chat:has(.attach-tray:not(.hidden)) .transcript,
-#screen-chat:has(.attach-menu:not(.hidden)) .transcript {
-  padding-bottom: 168px;
 }
 .transcript-spacer {
   flex: none;
@@ -883,17 +899,22 @@ button { border: 0; background: none; cursor: pointer; }
 
 /* ---------------- composer ---------------- */
 
+/* Keep the composer in the chat's flex layout so the transcript can never
+   extend underneath it. max() avoids double-counting the base gap on devices
+   that already expose a larger home-indicator safe area. */
 .composer {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
+  position: relative;
+  flex: none;
   z-index: 8;
   display: grid;
   gap: 8px;
+  width: 100%;
+  height: auto;
   margin: 0;
-  padding: 12px;
-  background: none;
+  padding: 0 max(12px, env(safe-area-inset-right, 0px))
+           max(12px, env(safe-area-inset-bottom, 0px))
+           max(12px, env(safe-area-inset-left, 0px));
+  background: transparent;
   border: 0;
   box-shadow: none;
   pointer-events: none;
@@ -1435,6 +1456,11 @@ button { border: 0; background: none; cursor: pointer; }
   #screen-chat {
     background: var(--canvas);
   }
+  #screen-code {
+    grid-column: 2;
+    grid-row: 1;
+    background: var(--canvas);
+  }
   #btn-back { display: none; }
   #screen-chat .topbar {
     background: transparent;
@@ -1442,9 +1468,10 @@ button { border: 0; background: none; cursor: pointer; }
   }
 
   .composer {
-    padding: 16px;
+    padding: 0 max(16px, env(safe-area-inset-right, 0px))
+             max(16px, env(safe-area-inset-bottom, 0px))
+             max(16px, env(safe-area-inset-left, 0px));
   }
-  .transcript { padding-bottom: 96px; }
   .composer-pill {
     max-width: 920px;
     width: 100%;
@@ -1554,4 +1581,67 @@ button { border: 0; background: none; cursor: pointer; }
   .thinking.live .thinking-label { animation: none; }
   .working-sentinel .working-label,
   .thinking.live .thinking-label { color: var(--ink-2); background: none; }
+}
+
+/* ---------------- CODE session viewer ---------------- */
+
+.task-row.code-job {
+  width: 100%;
+  text-align: left;
+  color: inherit;
+  cursor: pointer;
+  transition: background 120ms var(--ease);
+}
+.task-row.code-job:hover,
+.task-row.code-job:active { background: var(--hover); }
+.task-row .open-hint {
+  flex: none;
+  color: var(--accent-ink);
+  font-size: 11px;
+  font-weight: 600;
+}
+.tool-card.code-job .tool-chip { cursor: pointer; }
+
+#screen-code {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--canvas);
+
+  /* Map desktop CODE theme tokens onto Director's beautiful-ui palette. */
+  --text: var(--ink);
+  --muted: var(--ink-3);
+  --panel: #232427;
+  --panel2: var(--field);
+  --surface: var(--canvas);
+  --surface2: var(--field);
+  --border: var(--line);
+  --border-soft: var(--line);
+  --global-radius: 14px;
+  --success: var(--green);
+  --danger: var(--red);
+}
+#screen-code > .topbar { flex: none; }
+#screen-code .code-detail {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-radius: 0;
+  box-shadow: none;
+}
+#screen-code .code-transcript-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+#screen-code .code-transcript {
+  -webkit-overflow-scrolling: touch;
+}
+
+@media (min-width: 860px) {
+  #screen-code { background: var(--canvas); }
+  #btn-code-back { display: inline-flex; }
 }
