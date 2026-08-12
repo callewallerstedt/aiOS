@@ -62,7 +62,9 @@ recycle_display=0
 if [ "${xvfb_restarts:-0}" -gt 5 ]; then
   recycle_display=1
 fi
-if echo "$xvfb_cmd" | grep -q 'Xvfb' && ! echo "$xvfb_cmd" | grep -q 'xvfb-start\|tail --pid'; then
+# Migrate the old watcher arrangement once. A healthy current unit has Xvfb
+# itself as MainPID; the `tail --pid` watcher is precisely the orphaned model.
+if echo "$xvfb_cmd" | grep -q 'tail --pid'; then
   recycle_display=1
 fi
 if [ "$recycle_display" = 1 ]; then

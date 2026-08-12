@@ -116,9 +116,27 @@ const BLOB_COLORS = [
 ];
 const BLOB_SHAPES = ["circle", "squircle", "pill", "diamond"];
 const BLOB_EMOTIONS = [
-  "happy", "sleepy", "thinking", "surprised",
-  "wink", "curious", "content", "focused",
+  "frustrated", "annoyed", "thinking", "focused", "sleepy",
+  "confused", "skeptical", "worried", "mischievous",
+  "happy", "wink", "curious", "content", "surprised",
 ];
+const ACTIVE_EYE_ROTATION = [
+  "frustrated", "annoyed", "thinking",
+  "focused", "sleepy", "confused",
+  "skeptical", "worried", "mischievous",
+];
+const ACTIVE_EYE_INTERVAL = 4500;
+const BLOB_EMOTION_LABELS = {
+  frustrated: "Frustrated / overwhelmed",
+  annoyed: "Annoyed / unimpressed",
+  thinking: "Thinking / recalling",
+  focused: "Focused / determined",
+  sleepy: "Sleepy / calm",
+  confused: "Confused / unsure",
+  skeptical: "Skeptical / suspicious",
+  worried: "Worried / concerned",
+  mischievous: "Mischievous / plotting",
+};
 
 function blobSpec(seed) {
   const h = hash32(String(seed || "agent"));
@@ -157,11 +175,34 @@ function blobEyes(emotion) {
     + `<circle cx="${cx + px - 1}" cy="${cy + py - 1.2}" r="0.9" fill="${white}" opacity=".85"/>`;
   const arc = (x, flip = 1) =>
     `<path d="M${x} 31c2.2 ${-4 * flip} 8.2 ${-4 * flip} 10.4 0" fill="none" stroke="${ink}" stroke-width="2.5" stroke-linecap="round"/>`;
+  const brow = (x1, y1, x2, y2, width = 3.6) =>
+    `<path d="M${x1} ${y1}L${x2} ${y2}" fill="none" stroke="${ink}" stroke-width="${width}" stroke-linecap="round"/>`;
   switch (emotion) {
     case "happy": return arc(18) + arc(36);
+    case "frustrated":
+      return `<path d="M18 25l9 6-9 6M46 25l-9 6 9 6" fill="none" stroke="${ink}" stroke-width="4.3" stroke-linecap="round" stroke-linejoin="round"/>`;
+    case "annoyed":
+      return eye(23, 31, 6.4, 7.5, 0, -0.5) + eye(41, 31, 6.4, 7.5, 0, -0.5)
+        + `<path d="M16 25h14M34 25h14" stroke="${ink}" stroke-width="4.4" stroke-linecap="round"/>`;
     case "sleepy":
-      return `<path d="M18 31h10M36 31h10" fill="none" stroke="${ink}" stroke-width="2.4" stroke-linecap="round"/>`;
-    case "thinking": return eye(23, 26, 5.2, 6.2, 1.4, -1.6) + eye(41, 28, 4.4, 5.2, 1.6, -1.2);
+      return `<path d="M17 29q6 7 12 0M35 29q6 7 12 0" fill="none" stroke="${ink}" stroke-width="3.2" stroke-linecap="round"/>`;
+    case "thinking":
+      return eye(23, 30, 6.3, 8, 1, -3) + eye(41, 30, 6.3, 8, 1, -3);
+    case "focused":
+      return eye(23, 32, 6.3, 7.4, 0, 0) + eye(41, 32, 6.3, 7.4, 0, 0)
+        + brow(16, 23, 28, 29) + brow(48, 23, 36, 29);
+    case "confused":
+      return eye(22.5, 30, 6.4, 8, 1.2, -2.2) + eye(42, 29, 5.7, 7.3, 1, -2.4);
+    case "skeptical":
+      return eye(23, 32, 7, 5.8, 3, 0) + eye(41, 32, 7, 5.8, 3, 0)
+        + brow(16, 25, 29, 25, 3.8)
+        + `<path d="M35 25q6-6 13 0" fill="none" stroke="${ink}" stroke-width="3.5" stroke-linecap="round"/>`;
+    case "worried":
+      return eye(23, 32, 6.2, 8, 0, 1) + eye(41, 32, 6.2, 8, 0, 1)
+        + `<path d="M16 25q7-6 13-1M35 24q6-5 13 1" fill="none" stroke="${ink}" stroke-width="3.4" stroke-linecap="round"/>`;
+    case "mischievous":
+      return eye(23, 32, 6.5, 7.2, 0, -0.3) + eye(41, 32, 6.5, 7.2, 0, -0.3)
+        + `<path d="M15 24l15 5M49 24l-15 5" stroke="${ink}" stroke-width="4.6" stroke-linecap="round"/>`;
     case "surprised": return eye(23, 30, 6.2, 7.2) + eye(41, 30, 6.2, 7.2);
     case "wink": return arc(18) + eye(41, 30, 5.4, 6.2, 0.4, 0.4);
     case "curious": return eye(23, 30, 5.2, 6, -1.8, 0.4) + eye(41, 30, 5.2, 6, -1.8, 0.4);
@@ -170,6 +211,13 @@ function blobEyes(emotion) {
     default:
       return eye(23, 30, 4.2, 6.8) + eye(41, 30, 4.2, 6.8);
   }
+}
+
+function activeBlobEmotion(agent, mood, now = Date.now()) {
+  if (mood !== "working" && mood !== "waiting") return blobFor(agent).emotion;
+  const seed = hash32(String(agent?.id || agent?.name || "agent"));
+  const turn = Math.floor(now / ACTIVE_EYE_INTERVAL);
+  return ACTIVE_EYE_ROTATION[(seed + turn) % ACTIVE_EYE_ROTATION.length];
 }
 
 function blobBody(spec) {
@@ -219,8 +267,6 @@ function blobMoodEyes(mood, emotion) {
     return `<path d="M18 31c2.4-3.2 8.4-3.2 10.8 0" fill="none" stroke="${ink}" stroke-width="2.6" stroke-linecap="round"/>`
       + `<path d="M35 31c2.4-3.2 8.4-3.2 10.8 0" fill="none" stroke="${ink}" stroke-width="2.6" stroke-linecap="round"/>`;
   }
-  if (mood === "working") return blobEyes("focused");
-  if (mood === "waiting") return blobEyes("surprised");
   return blobEyes(emotion);
 }
 
@@ -257,8 +303,10 @@ function fillAvatar(node, agent, mood) {
     return;
   }
   const resolved = mood || agentMood(agent);
+  const spec = blobFor(agent);
+  spec.emotion = activeBlobEmotion(agent, resolved);
   node.classList.add("blob", `mood-${resolved}`);
-  node.innerHTML = blobSvg(blobFor(agent), resolved);
+  node.innerHTML = blobSvg(spec, resolved);
 }
 
 function escapeHtml(text) {
@@ -1573,6 +1621,17 @@ function paintAgentRow(agent) {
   if (face) face.replaceWith(avatarStack(agent));
 }
 
+function rotateActiveBlobEyes() {
+  if (document.hidden) return;
+  const active = state.agents.filter((agent) => {
+    const mood = agentMood(agent);
+    return mood === "working" || mood === "waiting";
+  });
+  for (const agent of active) paintAgentRow(agent);
+  const current = active.find((agent) => agent.id === state.agentId);
+  if (current && state.screen === "chat") paintChatHeader(current);
+}
+
 /* ---------------- actions ---------------- */
 
 async function loadAgents() {
@@ -2500,7 +2559,8 @@ async function agentEditor(agent) {
     const btn = el("button", "blob-choice");
     btn.type = "button";
     btn.dataset.blob = `emotion:${emotion}`;
-    btn.title = emotion;
+    btn.title = BLOB_EMOTION_LABELS[emotion] || emotion;
+    btn.setAttribute("aria-label", btn.title);
     btn.innerHTML = blobSvg({ ...draft.blob, emotion });
     btn.addEventListener("click", () => {
       draft.avatar = "";
@@ -3316,11 +3376,11 @@ async function boot() {
     setConnection(false, true);
   }
   connect();
-
   setInterval(() => {
     if (document.hidden || !state.agents.length) return;
     for (const agent of state.agents) paintAgentRow(agent);
   }, 60 * 1000);
+  setInterval(rotateActiveBlobEyes, ACTIVE_EYE_INTERVAL);
 
   // Deep link from a notification tap: ?agent=agt_x
   const wanted = new URLSearchParams(location.search).get("agent");

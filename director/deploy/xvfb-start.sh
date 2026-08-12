@@ -1,7 +1,7 @@
 #!/bin/bash
-# Keep a single Xvfb on :99. systemd used to start a second copy whenever
-# is-active flickered, the new one exited "Server is already active",
-# Restart=always looped (1000+ times), and every real restart killed Chrome.
+# Keep a single, systemd-owned Xvfb on :99. Older installs could leave Xvfb
+# orphaned and make this unit watch it with `tail --pid`; if that orphan died,
+# systemd considered the watcher successful and did not restore the display.
 set -euo pipefail
 DISPLAY_NUM=99
 LOCK="/tmp/.X${DISPLAY_NUM}-lock"
@@ -16,7 +16,24 @@ lock_pid() {
 if [ -S "$SOCK" ]; then
   pid="$(lock_pid || true)"
   if [ -n "${pid:-}" ] && kill -0 "$pid" 2>/dev/null; then
-    exec tail --pid="$pid" -f /dev/null
+    command="$(ps -p "$pid" -o args= 2>/dev/null || true)"
+    case "$command" in
+      /usr/bin/Xvfb\ :${DISPLAY_NUM}*)
+        echo "replacing orphaned Xvfb pid $pid so systemd owns the display" >&2
+        kill "$pid"
+        for _ in $(seq 1 20); do
+          kill -0 "$pid" 2>/dev/null || break
+          sleep 0.1
+        done
+        if kill -0 "$pid" 2>/dev/null; then
+          kill -KILL "$pid"
+        fi
+        ;;
+      *)
+        echo "display :${DISPLAY_NUM} belongs to unexpected pid $pid: $command" >&2
+        exit 1
+        ;;
+    esac
   fi
   rm -f "$LOCK" "$SOCK"
 fi
