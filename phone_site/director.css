@@ -971,12 +971,23 @@ button { border: 0; background: none; cursor: pointer; }
 
 /* ---------------- sidebar search / footer ---------------- */
 
+#workspace {
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
 .sidebar-search {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 12px 10px;
+  gap: 6px;
+  margin: 0 10px 8px;
+  padding: 4px 4px 4px 10px;
+  border-radius: 12px;
+  background: var(--field);
+  box-shadow: var(--shadow-hairline);
 }
+.sidebar-search .icon-btn { display: none; }
 .sidebar-search .search-glyph {
   width: 16px;
   height: 16px;
@@ -1149,6 +1160,7 @@ button { border: 0; background: none; cursor: pointer; }
   }
   #screen-agents .topbar { display: none; }
   .mobile-only { display: none !important; }
+  .sidebar-search .icon-btn { display: grid; }
   .sidebar-foot { display: flex; }
   .agent-list { padding: 4px 8px 8px; }
 
