@@ -92,6 +92,15 @@ def test_the_schedule_tools_are_on_the_default_lineup():
         assert "schedule" in spec["tools"], f"{spec['name']} cannot schedule anything"
 
 
+def test_every_default_agent_has_web_search_and_fetch():
+    from director import agents
+
+    for spec in agents.DEFAULT_AGENTS:
+        names = spec["tools"]
+        assert "web_search" in names, f"{spec['name']} cannot search the web"
+        assert "web_fetch" in names, f"{spec['name']} cannot fetch a page"
+
+
 def test_history_rebuilds_tool_calls(director):
     from director import runtime
 
@@ -289,7 +298,7 @@ def test_registry_loads_fully_even_when_one_module_was_imported_first(tmp_path):
     assert out.returncode == 0, out.stderr
     count, names = out.stdout.strip().splitlines()
     assert int(count) >= 15, f"only {count} tools registered: {names}"
-    for expected in ("shell", "operator", "code_session", "web_fetch", "remember"):
+    for expected in ("shell", "operator", "code_session", "web_fetch", "web_search", "remember"):
         assert expected in names.split()
 
 
@@ -310,6 +319,24 @@ def test_readable_text_strips_scripts_and_keeps_words():
     assert "var x" not in text
     assert "First line" in text and "Second & last" in text
     assert web.page_title(html) == "Hi"
+
+
+def test_search_parser_unwraps_duckduckgo_redirects():
+    from director.tools import web
+
+    markup = """
+    <a href="https://duckduckgo.com/lite/">Home</a>
+    <a href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fdocs">Example docs</a>
+    <a href="https://news.ycombinator.com/item?id=1">HN</a>
+    """
+    rows = web.parse_search_results(markup, limit=5)
+    assert [row["url"] for row in rows] == [
+        "https://example.com/docs",
+        "https://news.ycombinator.com/item?id=1",
+    ]
+    assert rows[0]["title"] == "Example docs"
+    text = web.format_search_results("example", rows)
+    assert "https://example.com/docs" in text
 
 
 def test_every_agent_gets_the_slack_coworker_base_prompt(director):
@@ -446,8 +473,8 @@ def test_ensure_running_skips_probes_when_the_display_is_already_ready(monkeypat
     display_mod.reset_ready_cache()
     assert first["ready"] is True
     assert second is first
-    assert calls["active"] == len(display_mod.UNITS)
-    assert calls["chrome"] == 1
+    assert calls["active"] == len(display_mod.DISPLAY_KEYS)
+    assert calls["chrome"] == 0
     assert calls["run"] == 0
     assert calls["launch"] == 0
 

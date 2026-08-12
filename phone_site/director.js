@@ -435,7 +435,6 @@ function avatarNode(agent, extra = "") {
 
 function renderAgents() {
   const list = $("agent-list");
-  list.textContent = "";
   const query = (state.filter || "").trim().toLowerCase();
   const agents = state.agents.filter((agent) => {
     if (!query) return true;
@@ -443,29 +442,67 @@ function renderAgents() {
     return hay.includes(query);
   });
   if (!agents.length) {
+    list.textContent = "";
     list.append(el("div", "empty", state.agents.length ? "No matching chats." : "No agents yet."));
     return;
   }
   const keep = list.scrollTop;
+  list.querySelector(".empty")?.remove();
+  const existing = new Map();
+  for (const row of list.querySelectorAll(".agent-row")) {
+    existing.set(row.dataset.agentId, row);
+  }
+  const seen = new Set();
   agents.forEach((agent, index) => {
-    const row = el("button", `agent-row${agent.id === state.agentId ? " active" : ""}`);
-    row.dataset.agentId = agent.id;
-    row.style.animationDelay = `${Math.min(index * 26, 200)}ms`;
-    row.append(avatarNode(agent));
-    const meta = el("div", "meta");
-    const name = el("div", "name");
-    name.append(document.createTextNode(agent.name));
-    if (agent.busy || agent.status === "waiting") {
-      name.append(el("span", "dot busy"));
+    seen.add(agent.id);
+    let row = existing.get(agent.id);
+    if (!row) {
+      row = el("button", `agent-row${agent.id === state.agentId ? " active" : ""}`);
+      row.dataset.agentId = agent.id;
+      row.style.animationDelay = `${Math.min(index * 26, 200)}ms`;
+      row.append(avatarNode(agent));
+      const meta = el("div", "meta");
+      const name = el("div", "name");
+      name.append(document.createTextNode(agent.name));
+      if (agent.busy || agent.status === "waiting") name.append(el("span", "dot busy"));
+      meta.append(name);
+      meta.append(el("div", "preview", agent.preview || agent.subtitle || ""));
+      row.append(meta);
+      row.append(el("div", "when", relativeTime(agent.updated_at)));
+      row.addEventListener("click", () => openAgent(agent.id));
+    } else {
+      updateAgentRow(row, agent);
     }
-    meta.append(name);
-    meta.append(el("div", "preview", agent.preview || agent.subtitle || ""));
-    row.append(meta);
-    row.append(el("div", "when", relativeTime(agent.updated_at)));
-    row.addEventListener("click", () => openAgent(agent.id));
+    row.classList.toggle("active", agent.id === state.agentId);
     list.append(row);
   });
+  for (const [id, row] of existing) {
+    if (!seen.has(id)) row.remove();
+  }
   list.scrollTop = keep;
+  list.classList.add("is-ready");
+}
+
+function updateAgentRow(row, agent) {
+  const name = row.querySelector(".name");
+  if (name) {
+    name.textContent = agent.name;
+    if (agent.busy || agent.status === "waiting") name.append(el("span", "dot busy"));
+  }
+  const preview = row.querySelector(".preview");
+  if (preview) preview.textContent = agent.preview || agent.subtitle || "";
+  const when = row.querySelector(".when");
+  if (when) when.textContent = relativeTime(agent.updated_at);
+  const av = row.querySelector(".avatar");
+  if (av) fillAvatar(av, agent);
+}
+
+function markActiveAgent(agentId) {
+  const list = $("agent-list");
+  if (!list) return;
+  for (const row of list.querySelectorAll(".agent-row")) {
+    row.classList.toggle("active", row.dataset.agentId === agentId);
+  }
 }
 
 /* ---------------- transcript ---------------- */
@@ -608,7 +645,7 @@ function ensureThinking() {
   if (state.thinking) return state.thinking;
   const wrap = el("div", "thinking live");
   const head = el("button", "thinking-head");
-  head.innerHTML = `${loadingPixels()}<span class="thinking-label">Thinking</span>${svg('<path d="M6 9l6 6 6-6"/>', "thinking-chevron")}`;
+  head.innerHTML = `<span class="thinking-label">Thinking</span>${svg('<path d="M6 9l6 6 6-6"/>', "thinking-chevron")}`;
   const body = el("div", "thinking-body");
   head.addEventListener("click", () => wrap.classList.toggle("expanded"));
   wrap.append(head, body);
@@ -621,8 +658,6 @@ function ensureThinking() {
 function settleThinking() {
   if (!state.thinking) return;
   state.thinking.classList.remove("live");
-  const pixels = state.thinking.querySelector(".loading-pixels");
-  if (pixels) pixels.remove();
   const label = state.thinking.querySelector(".thinking-label");
   if (label) label.textContent = "Thought";
   state.thinking = null;
@@ -1058,36 +1093,54 @@ function refreshAgentsSoon() {
 /* ---------------- websocket ---------------- */
 
 function connect() {
-  if (state.socket) { try { state.socket.close(); } catch {} }
+  const previous = state.socket;
+  state.socket = null;
+  if (previous) {
+    try { previous.close(); } catch {}
+  }
   const wsUrl = apiUrl(`/ws?token=${encodeURIComponent(state.token)}&since=${state.cursor}`)
     .replace(/^http/, "ws");
   const socket = new WebSocket(wsUrl);
   state.socket = socket;
 
   socket.addEventListener("open", () => {
+    if (state.socket !== socket) return;
     state.reconnect = 0;
     setConnection(true);
   });
   socket.addEventListener("message", (message) => {
+    if (state.socket !== socket) return;
     let event;
     try { event = JSON.parse(message.data); } catch { return; }
     if (event.kind === "ready") { state.cursor = event.payload?.cursor || state.cursor; return; }
     handleEvent(event);
   });
-  socket.addEventListener("close", () => {
-    setConnection(false);
-    state.reconnect = Math.min(state.reconnect + 1, 6);
-    setTimeout(() => { if (state.token) connect(); }, 400 * 2 ** state.reconnect);
+  socket.addEventListener("close", (event) => {
+    if (state.socket !== socket) return;
+    state.socket = null;
+    state.reconnect = Math.min((state.reconnect || 0) + 1, 6);
+    setConnection(false, !event.wasClean && state.reconnect >= 5);
+    const wait = 400 * 2 ** state.reconnect;
+    setTimeout(() => {
+      if (state.token && !state.socket) connect();
+    }, wait);
   });
-  socket.addEventListener("error", () => { try { socket.close(); } catch {} });
+  socket.addEventListener("error", () => {
+    if (state.socket !== socket) return;
+    setConnection(false, true);
+    try { socket.close(); } catch {}
+  });
 }
 
-function setConnection(online) {
-  const line = online ? `${state.agents.length} agents · connected` : "Reconnecting…";
-  const sub = $("agents-sub");
-  if (sub) sub.textContent = line;
+function setConnection(online, issue) {
+  const conn = issue ? "err" : (online ? "on" : "off");
+  const label = issue ? "Connection issue" : (online ? "Connected" : "Offline");
+  document.querySelectorAll(".conn-dot").forEach((dot) => {
+    dot.dataset.conn = conn;
+    dot.setAttribute("aria-label", label);
+  });
   const deviceSub = $("device-sub");
-  if (deviceSub) deviceSub.textContent = line;
+  if (deviceSub) deviceSub.textContent = "Director";
   const deviceName = $("device-name");
   if (deviceName) deviceName.textContent = state.device || "This device";
 }
@@ -1176,10 +1229,9 @@ async function openAgent(agentId) {
   save();
   const agent = state.agents.find((row) => row.id === agentId) || {};
   paintChatHeader(agent);
-  renderAgents();
+  markActiveAgent(agentId);
   show("chat");
   refreshContext();
-  warmTakeover();
 
   const cached = state.threads.get(agentId);
   if (cached) {
@@ -1382,20 +1434,28 @@ function takeoverSrc(path) {
   let base = path || "/vnc/view";
   if (base.includes("vnc.html")) base = "/vnc/view";
   const joiner = base.includes("?") ? "&" : "?";
-  return apiUrl(`${base}${joiner}token=${encodeURIComponent(state.token)}`);
+  return apiUrl(`${base}${joiner}token=${encodeURIComponent(state.token)}&t=${Date.now()}`);
 }
 
-function ensureTakeover(path) {
-  let wrap = $("takeover");
-  const wanted = path || "/vnc/view";
-  if (wrap) {
-    const frame = wrap.querySelector("iframe");
-    if (frame && frame.dataset.path !== wanted) {
-      frame.src = takeoverSrc(wanted);
-      frame.dataset.path = wanted;
-    }
-    return wrap;
+function takeoverOpen() {
+  const wrap = $("takeover");
+  return wrap && !wrap.classList.contains("hidden");
+}
+
+function closeTakeover() {
+  const wrap = $("takeover");
+  if (!wrap) return;
+  wrap.classList.add("hidden");
+  const frame = wrap.querySelector("iframe");
+  if (frame) {
+    frame.dataset.path = "";
+    frame.src = "about:blank";
   }
+}
+
+function ensureTakeoverShell() {
+  let wrap = $("takeover");
+  if (wrap) return wrap;
   wrap = el("div");
   wrap.id = "takeover";
   wrap.classList.add("hidden");
@@ -1403,25 +1463,25 @@ function ensureTakeover(path) {
   bar.append(el("div", "label", "Operator screen — you are in control"));
   const close = el("button", "icon-btn");
   close.innerHTML = svg('<path d="M6 6l12 12M18 6L6 18"/>');
-  close.addEventListener("click", () => wrap.classList.add("hidden"));
+  close.addEventListener("click", closeTakeover);
   bar.append(close);
   const frame = document.createElement("iframe");
-  frame.src = takeoverSrc(wanted);
-  frame.dataset.path = wanted;
+  frame.src = "about:blank";
   frame.allow = "clipboard-read; clipboard-write";
   wrap.append(bar, frame);
   document.body.append(wrap);
   return wrap;
 }
 
-function warmTakeover() {
-  if (!state.token) return;
-  ensureTakeover();
-}
-
 function openTakeover(path) {
-  const wrap = ensureTakeover(path);
+  const wrap = ensureTakeoverShell();
+  const frame = wrap.querySelector("iframe");
+  const wanted = path || "/vnc/view";
   wrap.classList.remove("hidden");
+  if (frame) {
+    frame.src = takeoverSrc(wanted);
+    frame.dataset.path = wanted;
+  }
 }
 
 /* ---------------- settings ---------------- */
@@ -2312,6 +2372,7 @@ async function refreshContext() {
   state.shotTimer = setInterval(() => {
     if (document.visibilityState !== "visible") return;
     if ($("workspace").classList.contains("hidden")) return;
+    if (takeoverOpen()) return;
     refreshScreenPreview().catch(() => {});
   }, 8000);
 }
@@ -2349,18 +2410,31 @@ async function refreshScreenPreview() {
   const card = $("context-screen");
   const img = $("context-screen-img");
   if (!card || !img || !state.token) return;
-  if (state.shot.image) {
-    img.src = state.shot.image;
-    card.classList.add("has-image");
-  }
-  if (state.shot.image && Date.now() - state.shot.at < 2000) return;
-  try {
-    const data = await api("/api/operator/screenshot?preview=1");
-    if (data.image) {
-      state.shot = { image: data.image, at: Date.now() };
-      img.src = data.image;
+  if (takeoverOpen()) return;
+  if (state.shot.image && Date.now() - state.shot.at < 2000) {
+    if (img.getAttribute("src") !== state.shot.image) {
+      img.src = state.shot.image;
       card.classList.add("has-image");
     }
+    return;
+  }
+  try {
+    const data = await api("/api/operator/screenshot?preview=1");
+    if (!data.image || takeoverOpen()) return;
+    if (data.image === state.shot.image) {
+      state.shot.at = Date.now();
+      return;
+    }
+    await new Promise((resolve) => {
+      const probe = new Image();
+      probe.onload = resolve;
+      probe.onerror = resolve;
+      probe.src = data.image;
+    });
+    if (takeoverOpen()) return;
+    state.shot = { image: data.image, at: Date.now() };
+    img.src = data.image;
+    card.classList.add("has-image");
   } catch {
     if (!state.shot.image) card.classList.remove("has-image");
   }
@@ -2398,11 +2472,7 @@ async function boot() {
       box.classList.remove("hidden");
       return;
     }
-    const sub = $("agents-sub");
-    if (sub) {
-      sub.classList.remove("hidden");
-      sub.textContent = message;
-    }
+    setConnection(false, true);
   }
   connect();
   api("/api/operator/start", { method: "POST" }).catch(() => {});

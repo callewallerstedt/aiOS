@@ -29,21 +29,54 @@ const prefix = location.pathname.replace(/\/vnc\/.*$/, "");
 const url = `${proto}://${location.host}${prefix}/vnc/ws?token=${encodeURIComponent(token)}`;
 
 const status = document.getElementById("status");
-try {
-  const rfb = new RFB(document.getElementById("screen"), url);
-  rfb.scaleViewport = true;
-  rfb.clipViewport = false;
-  rfb.resizeSession = false;
-  rfb.background = "#2b2c2f";
-  rfb.addEventListener("connect", () => { status.remove(); });
-  rfb.addEventListener("disconnect", (event) => {
-    const node = document.getElementById("status") || Object.assign(document.createElement("div"), { id: "status" });
-    node.textContent = event.detail?.clean ? "Disconnected" : "Failed to connect";
-    document.body.append(node);
-  });
-} catch (error) {
-  status.textContent = String(error && error.message ? error.message : error);
+const screen = document.getElementById("screen");
+let rfb = null;
+let closed = false;
+let attempt = 0;
+
+function showStatus(text) {
+  status.textContent = text;
+  if (!status.isConnected) document.body.append(status);
 }
+
+function connect() {
+  if (closed) return;
+  if (rfb) {
+    try { rfb.disconnect(); } catch {}
+    rfb = null;
+  }
+  screen.replaceChildren();
+  showStatus(attempt ? "Reconnecting…" : "Connecting…");
+  try {
+    rfb = new RFB(screen, url);
+    rfb.scaleViewport = true;
+    rfb.clipViewport = false;
+    rfb.resizeSession = false;
+    rfb.background = "#2b2c2f";
+    rfb.addEventListener("connect", () => {
+      attempt = 0;
+      status.remove();
+    });
+    rfb.addEventListener("disconnect", (event) => {
+      rfb = null;
+      if (closed) return;
+      // A clean close is the parent tearing the iframe down.
+      if (event.detail?.clean) {
+        showStatus("Disconnected");
+        return;
+      }
+      attempt += 1;
+      const wait = Math.min(400 * 2 ** Math.min(attempt, 4), 4000);
+      showStatus("Reconnecting…");
+      setTimeout(connect, wait);
+    });
+  } catch (error) {
+    showStatus(String(error && error.message ? error.message : error));
+  }
+}
+
+window.addEventListener("pagehide", () => { closed = true; });
+connect();
 </script>
 </body>
 </html>

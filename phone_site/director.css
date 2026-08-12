@@ -55,13 +55,18 @@
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 
 html, body {
+  width: 100%;
+  max-width: 100%;
   height: 100%;
+  min-height: 100dvh;
   margin: 0;
-  overscroll-behavior-y: none;
+  overflow: hidden;
+  overflow-x: clip;
+  overscroll-behavior: none;
+  background: var(--canvas);
 }
 
 body {
-  background: var(--canvas);
   color: var(--ink);
   font-family: var(--font);
   font-size: 13px;
@@ -94,8 +99,10 @@ button { border: 0; background: none; cursor: pointer; }
 /* ---------------- app frame ---------------- */
 
 #app {
-  height: 100dvh;
-  height: 100svh;
+  height: 100%;
+  min-height: 100%;
+  min-height: 100dvh;
+  max-width: 100%;
   display: grid;
   grid-template-rows: minmax(0, 1fr);
   overflow: hidden;
@@ -103,6 +110,7 @@ button { border: 0; background: none; cursor: pointer; }
 
 .screen {
   min-height: 0;
+  min-width: 0;
   height: 100%;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
@@ -111,8 +119,13 @@ button { border: 0; background: none; cursor: pointer; }
 
 #screen-chat {
   position: relative;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
 }
+#screen-chat .topbar { flex: none; }
+#screen-chat .transcript { flex: 1; }
 
 .topbar {
   display: flex;
@@ -138,9 +151,15 @@ button { border: 0; background: none; cursor: pointer; }
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.brand-row {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
 .brand-word {
   margin: 0;
-  flex: 1;
   min-width: 0;
   font-family: var(--font-brand);
   font-size: 13px;
@@ -169,6 +188,23 @@ button { border: 0; background: none; cursor: pointer; }
 }
 .icon-btn:hover, .icon-btn:active { background: var(--hover-2); color: var(--ink); }
 .icon-btn svg { width: 19px; height: 19px; }
+
+.conn-dot {
+  width: 8px;
+  height: 8px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--ink-3);
+  box-shadow: 0 0 0 3px #6c6f7522;
+}
+.conn-dot[data-conn="on"] {
+  background: var(--green);
+  box-shadow: 0 0 0 3px var(--green-tint);
+}
+.conn-dot[data-conn="err"] {
+  background: var(--red);
+  box-shadow: 0 0 0 3px var(--red-tint);
+}
 .icon-btn.danger { color: var(--red); }
 
 .dot {
@@ -301,6 +337,7 @@ button { border: 0; background: none; cursor: pointer; }
   transition: background 120ms ease;
   animation: fade-up 300ms var(--ease) both;
 }
+.agent-list.is-ready .agent-row { animation: none; }
 .agent-row:hover { background: var(--hover); }
 .agent-row:active, .agent-row.active { background: var(--hover-2); }
 .agent-row + .agent-row { position: relative; }
@@ -365,15 +402,35 @@ button { border: 0; background: none; cursor: pointer; }
 
 .transcript {
   min-height: 0;
+  min-width: 0;
+  overflow-x: clip;
   overflow-y: auto;
+  overscroll-behavior-x: none;
   display: flex;
   flex-direction: column;
   gap: 10px;
-  padding: 14px 14px 8px;
+  padding: 14px 12px 88px;
   -webkit-overflow-scrolling: touch;
   overscroll-behavior: contain;
 }
-.transcript > * { flex-shrink: 0; max-width: 920px; width: 100%; margin-inline: auto; }
+.transcript > * {
+  flex-shrink: 0;
+  min-width: 0;
+  max-width: 920px;
+  width: 100%;
+  margin-inline: auto;
+}
+.transcript > .thinking,
+.transcript > .working-sentinel {
+  width: fit-content;
+  max-width: 100%;
+  margin-inline: 0;
+  align-self: flex-start;
+}
+#screen-chat:has(.attach-tray:not(.hidden)) .transcript,
+#screen-chat:has(.attach-menu:not(.hidden)) .transcript {
+  padding-bottom: 168px;
+}
 .transcript-spacer {
   flex: none;
   width: 100%;
@@ -396,19 +453,24 @@ button { border: 0; background: none; cursor: pointer; }
 .row-user, .row-agent {
   display: flex;
   width: 100%;
-  max-width: 920px;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
 }
 .row-user { justify-content: flex-end; }
 .row-agent { justify-content: flex-start; }
 
 .bubble-user, .bubble-agent {
   width: fit-content;
-  max-width: 82%;
+  min-width: 0;
+  max-width: min(82%, 100%);
   padding: 8px 13px;
   font-size: 13px;
   line-height: 1.45;
   animation: fade-up 300ms var(--ease) both;
   overflow-wrap: anywhere;
+  word-break: break-word;
+  overflow-x: hidden;
 }
 .bubble-user {
   border-radius: 18px 18px 6px 18px;
@@ -427,7 +489,7 @@ button { border: 0; background: none; cursor: pointer; }
   margin-bottom: 6px;
 }
 .bubble-user .attach-thumbs img, .bubble-agent .attach-thumbs img {
-  max-width: 160px;
+  max-width: min(160px, 100%);
   max-height: 160px;
   border-radius: 10px;
   display: block;
@@ -464,6 +526,10 @@ button { border: 0; background: none; cursor: pointer; }
 .assistant ul, .assistant ol { margin: 0 0 8px; padding-left: 18px; }
 .assistant li { margin: 2px 0; }
 .assistant a { color: var(--accent-ink); }
+.assistant img, .assistant video, .assistant table {
+  max-width: 100%;
+  height: auto;
+}
 .assistant code {
   padding: 1px 4px;
   border-radius: 5px;
@@ -478,6 +544,7 @@ button { border: 0; background: none; cursor: pointer; }
   border-radius: 10px;
   background: var(--inset);
   box-shadow: var(--shadow-hairline);
+  max-width: 100%;
   overflow-x: auto;
 }
 .assistant pre code { padding: 0; background: none; box-shadow: none; }
@@ -494,15 +561,21 @@ button { border: 0; background: none; cursor: pointer; }
 }
 
 /* thinking — collapsed by default, shimmering while live */
-.thinking { color: var(--ink-3); }
+.thinking {
+  color: var(--ink-3);
+  align-self: flex-start;
+  width: fit-content;
+  max-width: 100%;
+  margin-inline: 0;
+}
 .thinking-head {
   width: fit-content;
   min-height: 28px;
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin: 0 -6px;
-  padding: 4px 6px;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
   border-radius: 7px;
   transition: background 120ms ease;
 }
@@ -517,13 +590,16 @@ button { border: 0; background: none; cursor: pointer; }
   animation: shimmer-text 1.4s linear infinite;
 }
 
-/* 3x3 churning dots — same glyph as aiOS CODE (wave, left-to-right columns). */
+/* 3x3 churning dots — same glyph as aiOS CODE (wave, left-to-right columns).
+   3×4px cells + 2×1.5px gaps = 15px; a smaller box wraps the grid. */
 .loading-pixels {
-  width: 13px;
-  height: 13px;
+  box-sizing: content-box;
+  width: 15px;
+  height: 15px;
   flex: none;
   display: grid;
   grid-template-columns: repeat(3, 4px);
+  grid-template-rows: repeat(3, 4px);
   gap: 1.5px;
   --wave: 1.5s;
 }
@@ -531,9 +607,12 @@ button { border: 0; background: none; cursor: pointer; }
   display: block;
   width: 4px;
   height: 4px;
+  margin: 0;
+  padding: 0;
   border-radius: 1px;
   background: var(--accent);
   opacity: .15;
+  transform-origin: center;
   animation: pixel-on var(--wave) ease-in-out infinite;
 }
 @keyframes pixel-on {
@@ -552,10 +631,14 @@ button { border: 0; background: none; cursor: pointer; }
 
 .working-sentinel {
   --wave: 2.4s;
+  align-self: flex-start;
   width: fit-content;
+  max-width: 100%;
+  margin-inline: 0;
   min-height: 28px;
   display: flex;
   align-items: center;
+  justify-content: flex-start;
   gap: 10px;
   color: var(--ink-3);
   animation: fade-up 260ms var(--ease) both;
@@ -593,18 +676,31 @@ button { border: 0; background: none; cursor: pointer; }
   background: var(--line);
 }
 
-/* tool chip — ONE line: glyph, name, detail pill, chevron */
-.tool-card { animation: fade-up 250ms var(--ease) both; }
-.tool-chip {
+/* tool chip — ONE line: glyph, name, detail pill, chevron.
+   The preview is a block (not a flex container) so ellipsis can actually
+   truncate; a flex .detail sizes to its text and shoves the chat sideways. */
+.tool-card {
+  box-sizing: border-box;
   width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  animation: fade-up 250ms var(--ease) both;
+}
+.tool-chip {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
   min-height: 30px;
   display: flex;
   align-items: center;
   gap: 8px;
-  margin: 0 -4px;
-  padding: 0 4px;
+  margin: 0;
+  padding: 0 2px;
   border-radius: 7px;
   text-align: left;
+  overflow: hidden;
   transition: background 120ms ease;
 }
 .tool-chip:active { background: var(--hover-2); }
@@ -617,28 +713,42 @@ button { border: 0; background: none; cursor: pointer; }
   color: var(--ink-3);
 }
 .tool-chip .glyph svg { width: 15px; height: 15px; }
-.tool-chip .name { flex: none; font-size: 12.5px; font-weight: 500; }
-.tool-chip .detail {
+.tool-chip .name {
+  flex: 0 1 auto;
   min-width: 0;
-  flex: 1;
+  max-width: 42%;
+  font-size: 12.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tool-chip .detail {
+  box-sizing: border-box;
+  flex: 1 1 0;
+  min-width: 0;
   height: 22px;
-  display: flex;
-  align-items: center;
   padding: 0 6px;
   border-radius: 7px;
   background: var(--hover-2);
   color: #bfc1c5;
-  font: 11.5px/1 var(--font-mono);
+  font: 11.5px/22px var(--font-mono);
   box-shadow: var(--shadow-hairline);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.tool-chip .detail:empty { display: none; }
+.tool-chip .meta:empty { display: none; }
 .tool-chip .meta {
-  flex: none;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 28%;
   color: var(--ink-3);
   font-size: 11px;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .tool-chip .card-chevron { width: 12px; height: 12px; flex: none; color: var(--ink-3); transition: transform 300ms ease; }
 .tool-card.expanded .card-chevron { transform: rotate(180deg); }
@@ -655,7 +765,10 @@ button { border: 0; background: none; cursor: pointer; }
   color: var(--ink-2);
   font: 11.5px/1.6 var(--font-mono);
   white-space: pre-wrap;
-  overflow-x: auto;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  max-width: 100%;
+  overflow-x: hidden;
 }
 .tool-card.expanded .tool-body { display: block; animation: fade-in 180ms ease both; }
 
@@ -663,6 +776,8 @@ button { border: 0; background: none; cursor: pointer; }
 .action-card {
   display: grid;
   gap: 10px;
+  min-width: 0;
+  max-width: 100%;
   padding: 13px;
   border-radius: 13px;
   background: var(--surface);
@@ -702,14 +817,15 @@ button { border: 0; background: none; cursor: pointer; }
 
 /* screenshots and takeover */
 .shot {
-  width: fit-content;
-  max-width: 82%;
+  width: min(82%, 420px);
+  max-width: 100%;
+  min-width: 0;
   border-radius: 12px;
   overflow: hidden;
   box-shadow: var(--shadow-card);
   animation: fade-up 320ms var(--ease) both;
 }
-.shot img { display: block; width: 100%; height: auto; }
+.shot img { display: block; width: 100%; max-width: 100%; height: auto; }
 .shot.live img { background: #0d0e10; }
 .shot .cap {
   padding: 6px 10px;
@@ -768,12 +884,24 @@ button { border: 0; background: none; cursor: pointer; }
 /* ---------------- composer ---------------- */
 
 .composer {
-  position: relative;
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
   z-index: 8;
   display: grid;
   gap: 8px;
-  padding: 8px 12px calc(var(--bottom) + 10px);
-  background: transparent;
+  margin: 0;
+  padding: 12px;
+  background: none;
+  border: 0;
+  box-shadow: none;
+  pointer-events: none;
+}
+.composer-pill,
+.attach-tray,
+.attach-menu {
+  pointer-events: auto;
 }
 
 .composer-pill {
@@ -795,12 +923,14 @@ button { border: 0; background: none; cursor: pointer; }
   padding: 9px 8px 8px;
   border: 0;
   border-radius: 0;
-  background: transparent;
+  background: none;
   color: var(--ink);
   box-shadow: none;
   resize: none;
   outline: none;
   line-height: 1.4;
+  -webkit-appearance: none;
+  appearance: none;
 }
 .composer textarea:focus { box-shadow: none; }
 
@@ -1105,7 +1235,7 @@ button { border: 0; background: none; cursor: pointer; }
 #takeover .bar .label { color: var(--ink-2); font-size: 12.5px; }
 
 @media (min-width: 760px) {
-  .transcript { padding-inline: 24px; }
+  .transcript { padding-inline: 16px; }
   .agent-list { padding-inline: 16px; }
 }
 
@@ -1114,6 +1244,8 @@ button { border: 0; background: none; cursor: pointer; }
 #workspace {
   height: 100%;
   min-height: 0;
+  min-width: 0;
+  max-width: 100%;
   display: grid;
   grid-template-rows: minmax(0, 1fr);
   overflow: hidden;
@@ -1215,6 +1347,7 @@ button { border: 0; background: none; cursor: pointer; }
   height: 100%;
   object-fit: cover;
   display: none;
+  background: #0d0e10;
 }
 .screen-card.has-image img { display: block; }
 .screen-card-fallback {
@@ -1309,9 +1442,9 @@ button { border: 0; background: none; cursor: pointer; }
   }
 
   .composer {
-    padding-inline: 18px;
-    padding-bottom: 14px;
+    padding: 16px;
   }
+  .transcript { padding-bottom: 96px; }
   .composer-pill {
     max-width: 920px;
     width: 100%;

@@ -119,35 +119,47 @@ def _remember_ready(state: dict[str, Any]) -> dict[str, Any]:
     return state
 
 
-async def ensure_running(settings: dict[str, Any] | None = None) -> dict:
-    """Start any unit that is not active. Idempotent."""
+DISPLAY_KEYS = ("xvfb", "wm", "vnc")
+
+
+async def ensure_running(settings: dict[str, Any] | None = None, *,
+                         with_chrome: bool = False) -> dict:
+    """Start the virtual display if it is down. Idempotent.
+
+    Screenshot polls and VNC connects must not launch Chrome or paint
+    xsetroot over a session that is already on screen — that is how the
+    operator view used to jump between windows. Chrome is only started
+    when a caller asks for it (an operator run that needs a browser).
+    """
     cached = _cached_ready()
-    if cached is not None:
+    if cached is not None and not with_chrome:
         return cached
-    started = False
+    started_xvfb = False
     states: dict[str, bool] = {}
     for key, unit in UNITS.items():
+        if key == "chrome" and not with_chrome:
+            continue
         active = await unit_active(unit)
         states[key] = active
         if not active:
             await _run(["systemctl", "--user", "start", unit], timeout=25)
-            started = True
-    if started:
-        # Xvfb needs a moment before X clients can connect.
+            if key == "xvfb":
+                started_xvfb = True
+    if started_xvfb:
         for _ in range(20):
             if await unit_active(UNITS["xvfb"]):
                 break
             await asyncio.sleep(0.25)
         await _run(["xsetroot", "-solid", "#2b2c2f"], timeout=5, env=display_env(settings))
-    if not await chrome_running(settings):
+    if with_chrome and not await chrome_running(settings):
         await launch_chrome("", settings)
-    if started:
+    if started_xvfb:
         return _remember_ready(await status(settings))
     cfg = operator_settings(settings)
     return _remember_ready({
         "display": display_name(settings),
         "units": states,
-        "ready": all(states.get(key) for key in ("xvfb", "wm", "vnc")),
+        "ready": all(states.get(key) for key in DISPLAY_KEYS),
         "vnc_port": int(cfg.get("vnc_port") or 5999),
         "novnc_port": int(cfg.get("novnc_port") or 6080),
         "width": int(cfg.get("width") or 1600),

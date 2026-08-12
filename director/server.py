@@ -614,7 +614,7 @@ async def operator_screenshot(request: web.Request) -> web.Response:
     if cached and now - float(_shot_cache.get("at") or 0) < _SHOT_TTL:
         return json_response({"ok": True, **cached, "cached": True})
     settings = config.load_settings()
-    await display_mod.ensure_running(settings)
+    await display_mod.ensure_running(settings, with_chrome=False)
     try:
         png = await x11.capture(settings)
     except RuntimeError as exc:
@@ -729,7 +729,7 @@ async def vnc_bridge(request: web.Request) -> web.WebSocketResponse:
 
     settings = config.load_settings()
     port = int((settings.get("operator") or {}).get("vnc_port") or 5999)
-    await display_mod.ensure_running(settings)
+    await display_mod.ensure_running(settings, with_chrome=False)
 
     # noVNC 1.0 always opens with subprotocol "binary". If we do not echo it,
     # the browser aborts the handshake and the phone shows "Failed to connect".
@@ -812,7 +812,7 @@ async def _startup(app: web.Application) -> None:
         push.ensure_keys(settings)
     _catch_up_routines()
     try:
-        await display_mod.ensure_running(settings)
+        await display_mod.ensure_running(settings, with_chrome=False)
     except Exception as exc:
         print(f"[director] operator display not started: {exc}", flush=True)
 
