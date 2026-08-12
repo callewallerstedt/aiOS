@@ -56,7 +56,8 @@ SHELL_TIMEOUT = 180
 CAPS = {"code": True, "shell": True, "files": True, "platform": "windows"}
 
 _SKIP_ADAPTER = re.compile(
-    r"WSL|Hyper-V|vEthernet|Bluetooth|Loopback|Tailscale|WireGuard|VPN|Virtual",
+    r"WSL|Hyper-V|vEthernet|Bluetooth|Loopback|Tailscale|WireGuard|VPN|"
+    r"Virtual|Local Area Connection\*|lcvpn|Wi-Fi Direct",
     re.I,
 )
 
@@ -70,28 +71,39 @@ def _format_mac(raw: str) -> str:
 
 def parse_ipconfig(text: str) -> dict:
     """Pick the house LAN adapter from `ipconfig /all` text."""
-    source = text or ""
-    headers = list(re.finditer(
-        r"^(?:Ethernet|Wireless|Wi-?Fi) adapter (.+):", source, re.I | re.M))
+    current = ""
+    mac = ""
+    ip = ""
     best: dict = {}
-    for index, name_match in enumerate(headers):
-        end = headers[index + 1].start() if index + 1 < len(headers) else len(source)
-        block = source[name_match.start():end]
-        name = name_match.group(1).strip()
-        if _SKIP_ADAPTER.search(name):
-            continue
-        mac_match = re.search(r"Physical Address[ .]*: *([0-9A-Fa-f-]+)", block)
-        ip_match = re.search(r"IPv4 Address[ .]*: *([0-9.]+)", block)
-        mac = _format_mac(mac_match.group(1) if mac_match else "")
-        ip = ip_match.group(1) if ip_match else ""
-        if not mac:
-            continue
-        row = {"name": name, "mac": mac, "ip": ip}
+
+    def consider() -> dict | None:
+        nonlocal best
+        if not current or _SKIP_ADAPTER.search(current) or not mac:
+            return None
+        row = {"name": current, "mac": mac, "ip": ip}
         if ip.startswith("192.168."):
             return row
         if not best:
             best = row
-    return best
+        return None
+
+    for line in (text or "").splitlines():
+        name_match = re.match(r"^.+ adapter (.+):", line, re.I)
+        if name_match:
+            hit = consider()
+            if hit:
+                return hit
+            current = name_match.group(1).strip()
+            mac = ""
+            ip = ""
+            continue
+        mac_match = re.search(r"Physical Address[ .]*:\s*([0-9A-Fa-f-]+)", line)
+        if mac_match:
+            mac = _format_mac(mac_match.group(1))
+        ip_match = re.search(r"IPv4 Address[ .]*:\s*([0-9.]+)", line)
+        if ip_match:
+            ip = ip_match.group(1)
+    return consider() or best
 
 
 def lan_identity() -> dict:

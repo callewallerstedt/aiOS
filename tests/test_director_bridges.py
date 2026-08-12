@@ -366,6 +366,11 @@ Ethernet adapter Ethernet:
 
    Physical Address. . . . . . . . . : 30-C5-99-D0-0D-4A
    IPv4 Address. . . . . . . . . . . : 192.168.0.83(Preferred)
+
+Wireless LAN adapter Local Area Connection* 10:
+
+   Description . . . . . . . . . . . : Microsoft Wi-Fi Direct Virtual Adapter #2
+   Physical Address. . . . . . . . . : 56-FE-0C-28-65-3E
 """
     got = director_client.parse_ipconfig(sample)
     assert got["mac"] == "30:C5:99:D0:0D:4A"
