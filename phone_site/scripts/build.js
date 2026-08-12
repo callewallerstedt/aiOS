@@ -25,6 +25,10 @@ for (const name of [
 }
 
 fs.cpSync(path.join(root, 'icons'), path.join(publicDir, 'icons'), { recursive: true });
+const fontsDir = path.join(root, 'fonts');
+if (fs.existsSync(fontsDir)) {
+  fs.cpSync(fontsDir, path.join(publicDir, 'fonts'), { recursive: true });
+}
 
 const extraLogo = path.resolve(root, '..', 'assets', 'aios-logo.png');
 if (fs.existsSync(extraLogo)) fs.copyFileSync(extraLogo, path.join(publicDir, 'icons', 'aios-logo.png'));

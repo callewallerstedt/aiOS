@@ -10,6 +10,7 @@ Environment=DISPLAY=:99
 # focus, and _NET_CLIENT_LIST is never published — the operator ends up driving
 # a screen it cannot reason about.
 ExecStart=/usr/bin/openbox
+ExecStartPost=/usr/bin/xsetroot -solid #2b2c2f
 Restart=always
 RestartSec=2
 

@@ -24,6 +24,7 @@ UNITS = {
     "xvfb": "aios-director-xvfb.service",
     "wm": "aios-director-wm.service",
     "vnc": "aios-director-x11vnc.service",
+    "chrome": "aios-director-chrome.service",
 }
 
 # noVNC's static files ship in Ubuntu's `novnc` package. Director serves them
@@ -48,10 +49,12 @@ def display_env(settings: dict[str, Any] | None = None) -> dict[str, str]:
     return env
 
 
-async def _run(argv: list[str], timeout: float = 20.0) -> tuple[int, str]:
+async def _run(argv: list[str], timeout: float = 20.0,
+               env: dict[str, str] | None = None) -> tuple[int, str]:
     try:
         proc = await asyncio.create_subprocess_exec(
-            *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+            *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+            env=env)
     except (FileNotFoundError, NotImplementedError, OSError) as exc:
         # No systemd here (a dev box, or Windows). Report it rather than raising
         # so /api/state still answers.
@@ -78,7 +81,7 @@ async def status(settings: dict[str, Any] | None = None) -> dict:
     return {
         "display": display_name(settings),
         "units": states,
-        "ready": all(states.values()),
+        "ready": all(states.get(key) for key in ("xvfb", "wm", "vnc")),
         "vnc_port": int(cfg.get("vnc_port") or 5999),
         "novnc_port": int(cfg.get("novnc_port") or 6080),
         "width": int(cfg.get("width") or 1600),
@@ -96,6 +99,9 @@ async def ensure_running(settings: dict[str, Any] | None = None) -> dict:
         if await unit_active(UNITS["xvfb"]):
             break
         await asyncio.sleep(0.25)
+    await _run(["xsetroot", "-solid", "#2b2c2f"], timeout=5, env=display_env(settings))
+    if not await chrome_running(settings):
+        await launch_chrome("", settings)
     return await status(settings)
 
 
@@ -111,6 +117,34 @@ def chrome_binary() -> str:
         if found:
             return found
     return ""
+
+
+def chrome_argv(url: str = "", settings: dict[str, Any] | None = None) -> list[str]:
+    """Flags that make Chrome paint on Xvfb instead of a black window."""
+    binary = chrome_binary()
+    cfg = operator_settings(settings)
+    profile = str(config.chrome_profile_dir())
+    width = int(cfg.get("width") or 1600)
+    height = int(cfg.get("height") or 900)
+    argv = [
+        binary,
+        f"--user-data-dir={profile}",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-session-crashed-bubble",
+        "--password-store=basic",
+        "--disable-gpu",
+        "--use-gl=angle",
+        "--use-angle=swiftshader",
+        "--disable-dev-shm-usage",
+        "--no-sandbox",
+        f"--window-size={width},{height}",
+        "--window-position=0,0",
+        "--start-maximized",
+    ]
+    if url:
+        argv.append(url)
+    return argv
 
 
 async def chrome_running(settings: dict[str, Any] | None = None) -> bool:
@@ -129,19 +163,10 @@ async def launch_chrome(url: str = "", settings: dict[str, Any] | None = None) -
     once cost a whole operator run: the browser never came up, every screenshot
     was black, and the only clue was the model saying so.
     """
-    binary = chrome_binary()
-    if not binary:
+    if not chrome_binary():
         return "no Chrome or Chromium found on the box"
-    cfg = operator_settings(settings)
-    profile = str(config.chrome_profile_dir())
     already = await chrome_running(settings)
-    argv = [binary, f"--user-data-dir={profile}", "--no-first-run",
-            "--no-default-browser-check", "--disable-session-crashed-bubble",
-            "--password-store=basic", "--disable-gpu", "--disable-dev-shm-usage",
-            f"--window-size={int(cfg.get('width') or 1600)},{int(cfg.get('height') or 900)}",
-            "--window-position=0,0"]
-    if url:
-        argv.append(url)
+    argv = chrome_argv(url, settings)
 
     log_path = config.home() / "chrome.log"
     try:

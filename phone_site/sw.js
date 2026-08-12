@@ -4,7 +4,7 @@
    network long enough to say so. Director's own API is never cached: stale
    agent state on a phone is worse than an honest error. */
 
-const VERSION = "director-v5";
+const VERSION = "director-v6";
 const SHELL = [
   "/",
   "/index.html",

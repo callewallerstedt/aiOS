@@ -29,17 +29,21 @@ const prefix = location.pathname.replace(/\/vnc\/.*$/, "");
 const url = `${proto}://${location.host}${prefix}/vnc/ws?token=${encodeURIComponent(token)}`;
 
 const status = document.getElementById("status");
-const rfb = new RFB(document.getElementById("screen"), url);
-rfb.scaleViewport = true;
-rfb.clipViewport = false;
-rfb.resizeSession = false;
-rfb.background = "#000";
-rfb.addEventListener("connect", () => { status.remove(); });
-rfb.addEventListener("disconnect", (event) => {
-  const node = document.getElementById("status") || Object.assign(document.createElement("div"), { id: "status" });
-  node.textContent = event.detail?.clean ? "Disconnected" : "Failed to connect";
-  document.body.append(node);
-});
+try {
+  const rfb = new RFB(document.getElementById("screen"), url);
+  rfb.scaleViewport = true;
+  rfb.clipViewport = false;
+  rfb.resizeSession = false;
+  rfb.background = "#2b2c2f";
+  rfb.addEventListener("connect", () => { status.remove(); });
+  rfb.addEventListener("disconnect", (event) => {
+    const node = document.getElementById("status") || Object.assign(document.createElement("div"), { id: "status" });
+    node.textContent = event.detail?.clean ? "Disconnected" : "Failed to connect";
+    document.body.append(node);
+  });
+} catch (error) {
+  status.textContent = String(error && error.message ? error.message : error);
+}
 </script>
 </body>
 </html>

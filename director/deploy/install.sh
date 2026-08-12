@@ -44,13 +44,14 @@ fi
 echo "python: $("$APP_DIR/.venv/bin/python" --version)"
 
 say "systemd units"
-for unit in aios-director aios-director-xvfb aios-director-wm aios-director-x11vnc; do
+for unit in aios-director aios-director-xvfb aios-director-wm aios-director-x11vnc aios-director-chrome; do
   install -m 644 "$APP_DIR/director/deploy/$unit.service" "$UNIT_DIR/"
 done
 systemctl --user daemon-reload
 systemctl --user enable --now aios-director-xvfb.service
 systemctl --user enable --now aios-director-wm.service
 systemctl --user enable --now aios-director-x11vnc.service
+systemctl --user enable --now aios-director-chrome.service
 systemctl --user enable aios-director.service
 systemctl --user restart aios-director.service
 

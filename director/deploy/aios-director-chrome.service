@@ -1,0 +1,17 @@
+[Unit]
+Description=aiOS Director Chrome on the operator screen
+After=aios-director-wm.service
+Requires=aios-director-wm.service
+
+[Service]
+Type=simple
+Environment=DISPLAY=:99
+Environment=XAUTHORITY=
+# SwiftShader so Chrome actually paints on Xvfb. Without a GL backend the
+# window comes up black and every screenshot / VNC frame is empty.
+ExecStart=/usr/bin/google-chrome-stable --user-data-dir=%h/.local/share/aios-director/chrome-profile --no-first-run --no-default-browser-check --disable-session-crashed-bubble --password-store=basic --disable-gpu --use-gl=angle --use-angle=swiftshader --disable-dev-shm-usage --no-sandbox --window-size=1600,900 --window-position=0,0 --start-maximized
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target

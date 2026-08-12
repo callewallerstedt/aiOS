@@ -324,10 +324,29 @@ def test_every_agent_gets_the_slack_coworker_base_prompt(director):
     assert "You are part of aiOS Director" in operator
 
 
+def test_funnel_prefix_is_stripped_so_vnc_routes_match():
+    from director.server import strip_funnel_prefix
+
+    assert strip_funnel_prefix("/director/vnc/view") == "/vnc/view"
+    assert strip_funnel_prefix("/director/vnc/ws") == "/vnc/ws"
+    assert strip_funnel_prefix("/director") == "/"
+    assert strip_funnel_prefix("/api/health") == "/api/health"
+
+
 def test_takeover_path_is_the_chrome_free_viewer():
     from director.operator import display as display_mod
 
     assert display_mod.takeover_path() == "/vnc/view"
+
+
+def test_chrome_flags_paint_on_a_virtual_screen(director, monkeypatch):
+    from director.operator import display as display_mod
+
+    monkeypatch.setattr(display_mod, "chrome_binary", lambda: "/usr/bin/google-chrome-stable")
+    argv = display_mod.chrome_argv("https://example.com")
+    assert "--use-angle=swiftshader" in argv
+    assert "--no-sandbox" in argv
+    assert argv[-1] == "https://example.com"
 
 
 def test_appearance_defaults_cover_both_bubbles():

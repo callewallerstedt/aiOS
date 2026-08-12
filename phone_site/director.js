@@ -722,20 +722,26 @@ async function answer(id, text, wrap) {
 }
 
 function shotCard(payload) {
-  const row = el("div", "row-agent");
-  const wrap = el("div", "shot");
-  const img = document.createElement("img");
-  img.src = payload.image;
-  img.alt = "Operator screen";
-  img.loading = "lazy";
-  wrap.append(img);
-  const bits = [];
-  if (payload.step) bits.push("step " + payload.step);
-  if (payload.width && payload.height) bits.push(payload.width + "x" + payload.height);
-  if (bits.length) wrap.append(el("div", "cap", bits.join(" · ")));
-  img.addEventListener("click", () => openTakeover("/vnc/view"));
-  row.append(wrap);
-  appendTranscript(row);
+  if (!payload || !payload.image) return;
+  let row = $("live-shot");
+  if (!row) {
+    row = el("div", "row-agent");
+    row.id = "live-shot";
+    const wrap = el("div", "shot live");
+    const img = document.createElement("img");
+    img.alt = "Operator screen";
+    wrap.append(img);
+    wrap.append(el("div", "cap", "Operator screen"));
+    img.addEventListener("click", () => openTakeover("/vnc/view"));
+    row.append(wrap);
+    appendTranscript(row);
+  }
+  row.querySelector("img").src = payload.image;
+  const preview = $("context-screen-img");
+  if (preview) {
+    preview.src = payload.image;
+    $("context-screen")?.classList.add("has-image");
+  }
   scrollDown();
 }
 
@@ -897,23 +903,12 @@ function handleEvent(event) {
       break;
 
     case "operator.started":
-      taskRow(payload.job_id || "operator", `Operator: ${payload.task || ""}`, "running");
-      break;
-
     case "operator.step":
-      taskRow(payload.job_id || "operator", `Operator: ${payload.message || payload.thought || ""}`,
-              `step ${payload.step}`);
-      break;
-
+    case "operator.actions":
     case "operator.done":
     case "operator.failed":
-    case "operator.stopped": {
-      const wrap = taskRow(payload.job_id || "operator", "Operator", "");
-      wrap.classList.add(event.kind === "operator.done" ? "done" : "failed");
-      wrap.querySelector(".state").textContent =
-        event.kind === "operator.done" ? "done" : (payload.error ? "failed" : "stopped");
+    case "operator.stopped":
       break;
-    }
 
     case "operator.takeover":
       openTakeover(payload.path);
@@ -1072,7 +1067,7 @@ async function openAgent(agentId) {
   try {
     const log = await api(`/api/events?thread_id=${encodeURIComponent(state.threadId)}`);
     const shots = (log.events || []).filter((event) => event.kind === "operator.screenshot");
-    for (const event of shots.slice(-8)) shotCard(event.payload || {});
+    if (shots.length) shotCard(shots[shots.length - 1].payload || {});
   } catch { /* live stream will catch up */ }
   if (!(data.messages || []).length) {
     appendTranscript(el("div", "empty", `Say something to ${agent.name || "Director"}.`));
@@ -2250,7 +2245,12 @@ function wire() {
   $("btn-settings").addEventListener("click", openSettings);
   $("btn-settings-mobile")?.addEventListener("click", openSettings);
   $("btn-new-agent").addEventListener("click", newAgent);
-  $("btn-new-agent-mobile")?.addEventListener("click", newAgent);
+  $("btn-search")?.addEventListener("click", () => {
+    const box = $("sidebar-search");
+    if (!box) return;
+    const open = box.classList.toggle("hidden") === false;
+    if (open) $("agent-search")?.focus();
+  });
   $("agent-search")?.addEventListener("input", (event) => {
     state.filter = event.target.value || "";
     renderAgents();

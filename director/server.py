@@ -52,6 +52,26 @@ def error(message: str, status: int = 400) -> web.Response:
     return json_response({"ok": False, "error": message}, status=status)
 
 
+def strip_funnel_prefix(path: str) -> str:
+    """Tailscale Funnel publishes us at /director; the app itself lives at /."""
+    if path == "/director":
+        return "/"
+    if path.startswith("/director/"):
+        return path[len("/director"):]
+    return path
+
+
+@web.middleware
+async def funnel_prefix(request: web.Request, handler):
+    stripped = strip_funnel_prefix(request.path)
+    if stripped != request.path:
+        rel = stripped
+        if request.query_string:
+            rel = f"{stripped}?{request.query_string}"
+        request = request.clone(rel_url=rel)
+    return await handler(request)
+
+
 # ---------------- middleware ----------------
 
 @web.middleware
@@ -802,7 +822,8 @@ def _catch_up_routines() -> None:
 
 
 def create_app() -> web.Application:
-    app = web.Application(middlewares=[cors_and_auth], client_max_size=64 * 1024 * 1024)
+    app = web.Application(middlewares=[funnel_prefix, cors_and_auth],
+                          client_max_size=64 * 1024 * 1024)
     app["runtime"] = runtime_mod.runtime()
     app.add_routes(ROUTES)
     app.on_startup.append(_startup)
