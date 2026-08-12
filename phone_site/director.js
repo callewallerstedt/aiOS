@@ -2774,7 +2774,6 @@ async function boot() {
     setConnection(false, true);
   }
   connect();
-  api("/api/operator/start", { method: "POST" }).catch(() => {});
 
   // Deep link from a notification tap: ?agent=agt_x
   const wanted = new URLSearchParams(location.search).get("agent");

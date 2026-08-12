@@ -642,12 +642,14 @@ async def operator_status(request: web.Request) -> web.Response:
 
 @ROUTES.post("/api/operator/start")
 async def operator_start(request: web.Request) -> web.Response:
-    return json_response({"ok": True, "operator": await display_mod.ensure_running(with_chrome=True)})
+    # Starting the viewer must never launch or replace the browser an active
+    # operator turn is controlling. Operator runs request Chrome themselves.
+    return json_response({"ok": True, "operator": await display_mod.ensure_running(with_chrome=False)})
 
 
 @ROUTES.post("/api/operator/restart")
 async def operator_restart(request: web.Request) -> web.Response:
-    return json_response({"ok": True, "operator": await display_mod.restart()})
+    return json_response({"ok": True, "operator": await display_mod.restart_viewer()})
 
 
 _SHOT_TTL = 1.25
@@ -781,18 +783,18 @@ async def vnc_bridge(request: web.Request) -> web.WebSocketResponse:
         raise web.HTTPUnauthorized(text="not paired")
 
     settings = config.load_settings()
-    port = int((settings.get("operator") or {}).get("vnc_port") or 5999)
-    await display_mod.ensure_running(settings, with_chrome=True)
+
+    # Connect before accepting the WebSocket so a healthy display takes the
+    # direct, sub-second path. This never probes, starts or restarts Chrome.
+    try:
+        reader, writer = await display_mod.open_viewer_connection(settings)
+    except (OSError, ConnectionError, asyncio.TimeoutError) as exc:
+        raise web.HTTPServiceUnavailable(text=str(exc)) from exc
 
     # noVNC 1.0 always opens with subprotocol "binary". If we do not echo it,
     # the browser aborts the handshake and the phone shows "Failed to connect".
     ws = web.WebSocketResponse(protocols=("binary",), heartbeat=None, max_msg_size=0)
     await ws.prepare(request)
-    try:
-        reader, writer = await asyncio.open_connection("127.0.0.1", port)
-    except OSError as exc:
-        await ws.close(code=1011, message=str(exc).encode())
-        return ws
 
     async def tcp_to_ws() -> None:
         while True:
@@ -865,7 +867,9 @@ async def _startup(app: web.Application) -> None:
         push.ensure_keys(settings)
     _catch_up_routines()
     try:
-        await display_mod.ensure_running(settings, with_chrome=True)
+        # Keep the viewer infrastructure warm. Chrome belongs to operator runs
+        # and may already be in the middle of an action.
+        await display_mod.ensure_running(settings, with_chrome=False)
     except Exception as exc:
         print(f"[director] operator display not started: {exc}", flush=True)
 
