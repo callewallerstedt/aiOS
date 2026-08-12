@@ -407,3 +407,47 @@ def test_a_follow_up_is_only_started_when_the_last_row_is_still_the_user(directo
     director.add_message(thread["id"], "user", "two")
     messages = director.list_messages(thread["id"])
     assert messages[-1]["role"] == "user"
+
+
+def test_ensure_running_skips_probes_when_the_display_is_already_ready(monkeypatch):
+    """Screenshot polls used to shell out to systemctl/xsetroot/pgrep every
+    time. Once the display is up, a short cache must skip that work so the
+    operator screen can open without waiting on four systemd round-trips."""
+    import asyncio
+
+    from director.operator import display as display_mod
+
+    display_mod.reset_ready_cache()
+    calls = {"active": 0, "run": 0, "chrome": 0, "launch": 0}
+
+    async def fake_active(unit):
+        calls["active"] += 1
+        return True
+
+    async def fake_run(argv, timeout=10, env=None):
+        calls["run"] += 1
+        return 0, "active"
+
+    async def fake_chrome(settings=None):
+        calls["chrome"] += 1
+        return True
+
+    async def fake_launch(url="", settings=None):
+        calls["launch"] += 1
+        return "opened"
+
+    monkeypatch.setattr(display_mod, "unit_active", fake_active)
+    monkeypatch.setattr(display_mod, "_run", fake_run)
+    monkeypatch.setattr(display_mod, "chrome_running", fake_chrome)
+    monkeypatch.setattr(display_mod, "launch_chrome", fake_launch)
+
+    first = asyncio.run(display_mod.ensure_running({"operator": {}}))
+    second = asyncio.run(display_mod.ensure_running({"operator": {}}))
+    display_mod.reset_ready_cache()
+    assert first["ready"] is True
+    assert second is first
+    assert calls["active"] == len(display_mod.UNITS)
+    assert calls["chrome"] == 1
+    assert calls["run"] == 0
+    assert calls["launch"] == 0
+

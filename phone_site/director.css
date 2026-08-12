@@ -505,6 +505,62 @@ button { border: 0; background: none; cursor: pointer; }
   color: transparent;
   animation: shimmer-text 1.4s linear infinite;
 }
+
+/* 3x3 churning dots — same glyph as aiOS CODE (wave, left-to-right columns). */
+.loading-pixels {
+  width: 13px;
+  height: 13px;
+  flex: none;
+  display: grid;
+  grid-template-columns: repeat(3, 4px);
+  gap: 1.5px;
+  --wave: 1.5s;
+}
+.loading-pixels span {
+  display: block;
+  width: 4px;
+  height: 4px;
+  border-radius: 1px;
+  background: var(--accent);
+  opacity: .15;
+  animation: pixel-on var(--wave) ease-in-out infinite;
+}
+@keyframes pixel-on {
+  0%, 100% { opacity: .15; transform: scale(.85); }
+  45% { opacity: .8; transform: scale(1); }
+}
+@keyframes pixel-sweep {
+  0%, 100% { opacity: .15; transform: scale(.85); }
+  7% { opacity: .95; transform: scale(1); }
+  24% { opacity: .15; transform: scale(.85); }
+}
+.loading-pixels.anim-wave span { animation-name: pixel-sweep; }
+.loading-pixels.anim-wave span:nth-child(3n + 1) { animation-delay: 0s; }
+.loading-pixels.anim-wave span:nth-child(3n + 2) { animation-delay: calc(var(--wave) * .05); }
+.loading-pixels.anim-wave span:nth-child(3n) { animation-delay: calc(var(--wave) * .10); }
+
+.working-sentinel {
+  --wave: 2.4s;
+  width: fit-content;
+  min-height: 28px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--ink-3);
+  animation: fade-up 260ms var(--ease) both;
+}
+.working-sentinel .loading-pixels { --wave: 2.4s; }
+.working-sentinel .working-label {
+  color: transparent;
+  background-image: linear-gradient(90deg, var(--ink-3) 35%, var(--accent) 50%, var(--ink-3) 65%);
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  font-size: 13px;
+  font-weight: 500;
+  animation: shimmer-text var(--wave) linear infinite;
+  animation-delay: calc(var(--wave) * -0.80);
+}
 .thinking-chevron { width: 13px; height: 13px; color: var(--ink-3); transition: transform 300ms ease; }
 .thinking.expanded .thinking-chevron { transform: rotate(180deg); }
 .thinking-body {
@@ -576,6 +632,7 @@ button { border: 0; background: none; cursor: pointer; }
 .tool-chip .card-chevron { width: 12px; height: 12px; flex: none; color: var(--ink-3); transition: transform 300ms ease; }
 .tool-card.expanded .card-chevron { transform: rotate(180deg); }
 .tool-card.running .glyph { color: var(--accent-ink); animation: pulse 1.2s ease-in-out infinite; }
+.tool-card.running .glyph:has(.loading-pixels) { animation: none; color: var(--accent); }
 .tool-card.danger .name { color: var(--red); }
 .tool-card.ok .meta { color: var(--green); }
 
@@ -662,6 +719,11 @@ button { border: 0; background: none; cursor: pointer; }
   box-shadow: var(--shadow-hairline);
   animation: fade-up 300ms var(--ease) both;
 }
+.task-row .task-pixels { width: 13px; height: 13px; flex: none; }
+.task-row.done .loading-pixels span,
+.task-row.failed .loading-pixels span { animation: none; }
+.task-row.done .loading-pixels span { opacity: .85; background: var(--green); }
+.task-row.failed .loading-pixels span { opacity: .85; background: var(--red); }
 .task-row .spinner {
   width: 13px;
   height: 13px;
@@ -1342,5 +1404,10 @@ button { border: 0; background: none; cursor: pointer; }
   .avatar.mood-working svg,
   .avatar.mood-waiting svg,
   .avatar.mood-idle svg,
-  .avatar.mood-sleeping svg { animation: none; }
+  .avatar.mood-sleeping svg,
+  .loading-pixels span,
+  .working-sentinel .working-label,
+  .thinking.live .thinking-label { animation: none; }
+  .working-sentinel .working-label,
+  .thinking.live .thinking-label { color: var(--ink-2); background: none; }
 }

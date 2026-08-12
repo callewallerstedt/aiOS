@@ -26,6 +26,10 @@ const state = {
   thinking: null,       // live reasoning element
   tools: new Map(),     // call_id -> element
   jobs: new Map(),      // job_id -> element
+  threads: new Map(),   // agentId -> last thread payload
+  openGen: 0,
+  shot: { image: "", at: 0 },
+  working: null,
   busy: false,
   recorder: null,
   chunks: [],
@@ -325,14 +329,19 @@ function apiUrl(path) {
 }
 
 async function api(path, options = {}) {
-  const response = await fetch(apiUrl(path), {
-    ...options,
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${state.token}`,
-      ...(options.headers || {}),
-    },
-  });
+  let response;
+  try {
+    response = await fetch(apiUrl(path), {
+      ...options,
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${state.token}`,
+        ...(options.headers || {}),
+      },
+    });
+  } catch {
+    throw new Error("Can't reach Director right now.");
+  }
   if (response.status === 401) {
     unpair(true);
     throw new Error("This device is no longer paired.");
@@ -439,6 +448,7 @@ function renderAgents() {
   const keep = list.scrollTop;
   agents.forEach((agent, index) => {
     const row = el("button", `agent-row${agent.id === state.agentId ? " active" : ""}`);
+    row.dataset.agentId = agent.id;
     row.style.animationDelay = `${Math.min(index * 26, 200)}ms`;
     row.append(avatarNode(agent));
     const meta = el("div", "meta");
@@ -526,11 +536,41 @@ function addStatus(text, isError) {
   return node;
 }
 
+function loadingPixels() {
+  return `<span class="loading-pixels anim-wave" aria-hidden="true">${"<span></span>".repeat(9)}</span>`;
+}
+
+function churningRow(label) {
+  const node = el("div", "working-sentinel live");
+  node.innerHTML = `${loadingPixels()}<span class="working-label">${escapeHtml(label)}</span>`;
+  return node;
+}
+
+function ensureWorking(label) {
+  if (state.working) {
+    const lab = state.working.querySelector(".working-label");
+    if (lab && label) lab.textContent = label;
+    return state.working;
+  }
+  const node = churningRow(label || "Churning");
+  appendTranscript(node);
+  state.working = node;
+  scrollDown();
+  return node;
+}
+
+function settleWorking() {
+  if (!state.working) return;
+  state.working.remove();
+  state.working = null;
+}
+
 function ensureThinking() {
+  settleWorking();
   if (state.thinking) return state.thinking;
   const wrap = el("div", "thinking live");
   const head = el("button", "thinking-head");
-  head.innerHTML = `<span class="thinking-label">Thinking</span>${svg('<path d="M6 9l6 6 6-6"/>', "thinking-chevron")}`;
+  head.innerHTML = `${loadingPixels()}<span class="thinking-label">Thinking</span>${svg('<path d="M6 9l6 6 6-6"/>', "thinking-chevron")}`;
   const body = el("div", "thinking-body");
   head.addEventListener("click", () => wrap.classList.toggle("expanded"));
   wrap.append(head, body);
@@ -543,18 +583,21 @@ function ensureThinking() {
 function settleThinking() {
   if (!state.thinking) return;
   state.thinking.classList.remove("live");
+  const pixels = state.thinking.querySelector(".loading-pixels");
+  if (pixels) pixels.remove();
   const label = state.thinking.querySelector(".thinking-label");
   if (label) label.textContent = "Thought";
   state.thinking = null;
 }
 
 function toolCard({ callId, name, args, card, running }) {
+  if (running) settleWorking();
   const wrap = el("div", `tool-card${running ? " running" : ""}`);
   const chip = el("button", "tool-chip");
   const detail = card?.preview || summariseArgs(args) || "";
   const meta = card?.meta || (running ? "…" : "");
   chip.innerHTML =
-    `<span class="glyph">${svg(glyphFor(name))}</span>` +
+    `<span class="glyph">${running ? loadingPixels() : svg(glyphFor(name))}</span>` +
     `<span class="name">${escapeHtml(card?.title || name)}</span>` +
     `<span class="detail">${escapeHtml(detail)}</span>` +
     `<span class="meta">${escapeHtml(meta)}</span>` +
@@ -594,6 +637,8 @@ function finishTool(callId, name, card) {
   if (card?.tone) wrap.classList.add(card.tone);
   const chip = wrap.querySelector(".tool-chip");
   chip.querySelector(".name").textContent = card?.title || name;
+  const glyph = chip.querySelector(".glyph");
+  if (glyph) glyph.innerHTML = svg(glyphFor(name));
   if (card?.preview) chip.querySelector(".detail").textContent = card.preview;
   chip.querySelector(".meta").textContent = card?.meta || "";
   const body = wrap.querySelector(".tool-body");
@@ -749,7 +794,9 @@ function taskRow(jobId, label, stateText) {
   let wrap = state.jobs.get(jobId);
   if (!wrap) {
     wrap = el("div", "task-row");
-    wrap.append(el("div", "spinner"));
+    const pixels = el("div", "task-pixels");
+    pixels.innerHTML = loadingPixels();
+    wrap.append(pixels);
     wrap.append(el("div", "label", label));
     wrap.append(el("div", "state", stateText || "running"));
     state.jobs.set(jobId, wrap);
@@ -774,6 +821,7 @@ function renderMessages(messages) {
   state.jobs.clear();
   state.streaming = null;
   state.thinking = null;
+  state.working = null;
 
   const pendingTools = new Map();
   for (const message of messages) {
@@ -1017,8 +1065,24 @@ function setBusy(busy) {
     if (busy && agent.status !== "waiting") agent.status = "running";
     if (!busy) agent.status = "idle";
     fillAvatar($("chat-avatar"), agent);
-    renderAgents();
+    paintAgentRow(agent);
   }
+  if (busy) ensureWorking();
+  else settleWorking();
+}
+
+function paintAgentRow(agent) {
+  const row = $("agent-list")?.querySelector(`[data-agent-id="${agent.id}"]`);
+  if (!row) return;
+  const name = row.querySelector(".name");
+  if (name) {
+    const dot = name.querySelector(".dot.busy");
+    const show = agent.busy || agent.status === "waiting";
+    if (show && !dot) name.append(el("span", "dot busy"));
+    if (!show && dot) dot.remove();
+  }
+  const av = row.querySelector(".avatar");
+  if (av) fillAvatar(av, agent);
 }
 
 /* ---------------- actions ---------------- */
@@ -1028,7 +1092,26 @@ async function loadAgents() {
   state.agents = data.agents || [];
   renderAgents();
   setConnection(state.socket?.readyState === WebSocket.OPEN);
+  prefetchThreads();
   return data;
+}
+
+function prefetchThreads() {
+  const ids = state.agents
+    .filter((agent) => agent.id && agent.id !== state.agentId && !state.threads.has(agent.id))
+    .slice(0, 5)
+    .map((agent) => agent.id);
+  for (const id of ids) {
+    api(`/api/agents/${id}/thread`).then((data) => {
+      if (!data?.thread || state.threads.has(id)) return;
+      state.threads.set(id, {
+        thread: data.thread,
+        messages: data.messages || [],
+        cursor: data.cursor || 0,
+        at: Date.now(),
+      });
+    }).catch(() => {});
+  }
 }
 
 function paintChatHeader(agent) {
@@ -1047,6 +1130,7 @@ function paintChatHeader(agent) {
 }
 
 async function openAgent(agentId) {
+  const gen = ++state.openGen;
   if (state.threadId) markWatching(state.threadId, false);
   state.agentId = agentId;
   save();
@@ -1055,22 +1139,40 @@ async function openAgent(agentId) {
   renderAgents();
   show("chat");
   refreshContext();
-  transcriptEl().textContent = "";
-  addStatus("Loading…");
+  warmTakeover();
 
-  const data = await api(`/api/agents/${agentId}/thread`);
-  state.threadId = data.thread.id;
-  state.cursor = Math.max(state.cursor, data.cursor || 0);
-  renderMessages(data.messages || []);
-  setBusy(data.thread.status === "running" || data.thread.status === "waiting");
-  markWatching(state.threadId, true);
+  const cached = state.threads.get(agentId);
+  if (cached) {
+    state.threadId = cached.thread.id;
+    state.cursor = Math.max(state.cursor, cached.cursor || 0);
+    renderMessages(cached.messages || []);
+    setBusy(cached.thread.status === "running" || cached.thread.status === "waiting");
+    markWatching(state.threadId, true);
+  } else {
+    transcriptEl().textContent = "";
+    appendTranscript(churningRow("Loading"));
+  }
+
   try {
-    const log = await api(`/api/events?thread_id=${encodeURIComponent(state.threadId)}`);
-    const shots = (log.events || []).filter((event) => event.kind === "operator.screenshot");
-    if (shots.length) shotCard(shots[shots.length - 1].payload || {});
-  } catch { /* live stream will catch up */ }
-  if (!(data.messages || []).length) {
-    appendTranscript(el("div", "empty", `Say something to ${agent.name || "Director"}.`));
+    const data = await api(`/api/agents/${agentId}/thread`);
+    if (gen !== state.openGen) return;
+    state.threads.set(agentId, {
+      thread: data.thread,
+      messages: data.messages || [],
+      cursor: data.cursor || 0,
+      at: Date.now(),
+    });
+    state.threadId = data.thread.id;
+    state.cursor = Math.max(state.cursor, data.cursor || 0);
+    renderMessages(data.messages || []);
+    setBusy(data.thread.status === "running" || data.thread.status === "waiting");
+    markWatching(state.threadId, true);
+    if (!(data.messages || []).length) {
+      appendTranscript(el("div", "empty", `Say something to ${agent.name || "Director"}.`));
+    }
+  } catch (error) {
+    if (gen !== state.openGen) return;
+    if (!cached) addStatus(String(error.message || error), true);
   }
 }
 
@@ -1236,25 +1338,50 @@ function markWatching(threadId, active) {
 
 /* ---------------- takeover ---------------- */
 
-function openTakeover(path) {
-  const existing = $("takeover");
-  if (existing) existing.remove();
-  const wrap = el("div");
+function takeoverSrc(path) {
+  let base = path || "/vnc/view";
+  if (base.includes("vnc.html")) base = "/vnc/view";
+  const joiner = base.includes("?") ? "&" : "?";
+  return apiUrl(`${base}${joiner}token=${encodeURIComponent(state.token)}`);
+}
+
+function ensureTakeover(path) {
+  let wrap = $("takeover");
+  const wanted = path || "/vnc/view";
+  if (wrap) {
+    const frame = wrap.querySelector("iframe");
+    if (frame && frame.dataset.path !== wanted) {
+      frame.src = takeoverSrc(wanted);
+      frame.dataset.path = wanted;
+    }
+    return wrap;
+  }
+  wrap = el("div");
   wrap.id = "takeover";
+  wrap.classList.add("hidden");
   const bar = el("div", "bar");
   bar.append(el("div", "label", "Operator screen — you are in control"));
   const close = el("button", "icon-btn");
   close.innerHTML = svg('<path d="M6 6l12 12M18 6L6 18"/>');
-  close.addEventListener("click", () => wrap.remove());
+  close.addEventListener("click", () => wrap.classList.add("hidden"));
   bar.append(close);
   const frame = document.createElement("iframe");
-  let base = path || "/vnc/view";
-  if (base.includes("vnc.html")) base = "/vnc/view";
-  const joiner = base.includes("?") ? "&" : "?";
-  frame.src = apiUrl(`${base}${joiner}token=${encodeURIComponent(state.token)}`);
+  frame.src = takeoverSrc(wanted);
+  frame.dataset.path = wanted;
   frame.allow = "clipboard-read; clipboard-write";
   wrap.append(bar, frame);
   document.body.append(wrap);
+  return wrap;
+}
+
+function warmTakeover() {
+  if (!state.token) return;
+  ensureTakeover();
+}
+
+function openTakeover(path) {
+  const wrap = ensureTakeover(path);
+  wrap.classList.remove("hidden");
 }
 
 /* ---------------- settings ---------------- */
@@ -2182,14 +2309,20 @@ async function refreshScreenPreview() {
   const card = $("context-screen");
   const img = $("context-screen-img");
   if (!card || !img || !state.token) return;
+  if (state.shot.image) {
+    img.src = state.shot.image;
+    card.classList.add("has-image");
+  }
+  if (state.shot.image && Date.now() - state.shot.at < 2000) return;
   try {
-    const data = await api("/api/operator/screenshot");
+    const data = await api("/api/operator/screenshot?preview=1");
     if (data.image) {
+      state.shot = { image: data.image, at: Date.now() };
       img.src = data.image;
       card.classList.add("has-image");
     }
   } catch {
-    card.classList.remove("has-image");
+    if (!state.shot.image) card.classList.remove("has-image");
   }
 }
 
@@ -2216,14 +2349,23 @@ async function boot() {
       save();
     }
   } catch (error) {
-    show("pair");
-    $("pair-url").value = state.url;
-    const box = $("pair-error");
-    box.textContent = String(error.message || error);
-    box.classList.remove("hidden");
-    return;
+    const message = String(error.message || error);
+    if (/no longer paired/i.test(message)) {
+      show("pair");
+      $("pair-url").value = state.url;
+      const box = $("pair-error");
+      box.textContent = message;
+      box.classList.remove("hidden");
+      return;
+    }
+    const sub = $("agents-sub");
+    if (sub) {
+      sub.classList.remove("hidden");
+      sub.textContent = message;
+    }
   }
   connect();
+  api("/api/operator/start", { method: "POST" }).catch(() => {});
 
   // Deep link from a notification tap: ?agent=agt_x
   const wanted = new URLSearchParams(location.search).get("agent");

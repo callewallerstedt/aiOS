@@ -601,16 +601,31 @@ async def operator_restart(request: web.Request) -> web.Response:
     return json_response({"ok": True, "operator": await display_mod.restart()})
 
 
+_SHOT_TTL = 1.25
+_shot_cache: dict[str, Any] = {"at": 0.0, "full": None, "preview": None}
+
+
 @ROUTES.get("/api/operator/screenshot")
 async def operator_screenshot(request: web.Request) -> web.Response:
+    preview = request.query.get("preview") in ("1", "true")
+    key = "preview" if preview else "full"
+    now = time.monotonic()
+    cached = _shot_cache.get(key)
+    if cached and now - float(_shot_cache.get("at") or 0) < _SHOT_TTL:
+        return json_response({"ok": True, **cached, "cached": True})
     settings = config.load_settings()
     await display_mod.ensure_running(settings)
     try:
         png = await x11.capture(settings)
     except RuntimeError as exc:
         return error(str(exc), status=503)
-    data_url, width, height = x11.encode_jpeg(png)
-    return json_response({"ok": True, "image": data_url, "width": width, "height": height})
+    max_width = 720 if preview else 1400
+    quality = 52 if preview else 68
+    data_url, width, height = x11.encode_jpeg(png, max_width=max_width, quality=quality)
+    payload = {"image": data_url, "width": width, "height": height}
+    _shot_cache["at"] = time.monotonic()
+    _shot_cache[key] = payload
+    return json_response({"ok": True, **payload})
 
 
 # ---------------- machines ----------------

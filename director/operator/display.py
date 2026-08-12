@@ -16,9 +16,17 @@ import asyncio
 import os
 import shutil
 import subprocess
+import time
 from typing import Any
 
 from .. import config
+
+# Skip the systemd / xsetroot / chrome probe when we already know the
+# display is up. Screenshot polls and VNC connects used to pay that cost
+# on every call, which is why the operator screen felt slow to open.
+_READY_TTL = 20.0
+_ready_until = 0.0
+_ready_status: dict[str, Any] | None = None
 
 UNITS = {
     "xvfb": "aios-director-xvfb.service",
@@ -89,26 +97,69 @@ async def status(settings: dict[str, Any] | None = None) -> dict:
     }
 
 
+def reset_ready_cache() -> None:
+    global _ready_until, _ready_status
+    _ready_until = 0.0
+    _ready_status = None
+
+
+def _cached_ready() -> dict[str, Any] | None:
+    if _ready_status and _ready_status.get("ready") and time.monotonic() < _ready_until:
+        return _ready_status
+    return None
+
+
+def _remember_ready(state: dict[str, Any]) -> dict[str, Any]:
+    global _ready_until, _ready_status
+    if state.get("ready"):
+        _ready_status = state
+        _ready_until = time.monotonic() + _READY_TTL
+    else:
+        reset_ready_cache()
+    return state
+
+
 async def ensure_running(settings: dict[str, Any] | None = None) -> dict:
     """Start any unit that is not active. Idempotent."""
-    for unit in UNITS.values():
-        if not await unit_active(unit):
+    cached = _cached_ready()
+    if cached is not None:
+        return cached
+    started = False
+    states: dict[str, bool] = {}
+    for key, unit in UNITS.items():
+        active = await unit_active(unit)
+        states[key] = active
+        if not active:
             await _run(["systemctl", "--user", "start", unit], timeout=25)
-    # Xvfb needs a moment before X clients can connect.
-    for _ in range(20):
-        if await unit_active(UNITS["xvfb"]):
-            break
-        await asyncio.sleep(0.25)
-    await _run(["xsetroot", "-solid", "#2b2c2f"], timeout=5, env=display_env(settings))
+            started = True
+    if started:
+        # Xvfb needs a moment before X clients can connect.
+        for _ in range(20):
+            if await unit_active(UNITS["xvfb"]):
+                break
+            await asyncio.sleep(0.25)
+        await _run(["xsetroot", "-solid", "#2b2c2f"], timeout=5, env=display_env(settings))
     if not await chrome_running(settings):
         await launch_chrome("", settings)
-    return await status(settings)
+    if started:
+        return _remember_ready(await status(settings))
+    cfg = operator_settings(settings)
+    return _remember_ready({
+        "display": display_name(settings),
+        "units": states,
+        "ready": all(states.get(key) for key in ("xvfb", "wm", "vnc")),
+        "vnc_port": int(cfg.get("vnc_port") or 5999),
+        "novnc_port": int(cfg.get("novnc_port") or 6080),
+        "width": int(cfg.get("width") or 1600),
+        "height": int(cfg.get("height") or 900),
+    })
 
 
 async def restart(settings: dict[str, Any] | None = None) -> dict:
+    reset_ready_cache()
     for unit in UNITS.values():
         await _run(["systemctl", "--user", "restart", unit], timeout=25)
-    return await status(settings)
+    return _remember_ready(await status(settings))
 
 
 def chrome_binary() -> str:

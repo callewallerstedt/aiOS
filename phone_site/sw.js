@@ -2,12 +2,15 @@
 
    The app shell is cached so the PWA opens instantly and survives a dead
    network long enough to say so. Director's own API is never cached: stale
-   agent state on a phone is worse than an honest error. */
+   agent state on a phone is worse than an honest error.
 
-const VERSION = "director-v6";
+   iOS will show a blank "Load Failed" screen if install() rejects. Vercel
+   cleanUrls 308s /index.html -> /, and cache.addAll treats that as failure,
+   so we cache each file on its own and never fall back a script to HTML. */
+
+const VERSION = "director-v8";
 const SHELL = [
   "/",
-  "/index.html",
   "/director.css",
   "/director.js",
   "/manifest.webmanifest",
@@ -16,9 +19,11 @@ const SHELL = [
 ];
 
 self.addEventListener("install", (event) => {
-  event.waitUntil(
-    caches.open(VERSION).then((cache) => cache.addAll(SHELL)).then(() => self.skipWaiting())
-  );
+  event.waitUntil((async () => {
+    const cache = await caches.open(VERSION);
+    await Promise.all(SHELL.map((url) => cache.add(url).catch(() => {})));
+    await self.skipWaiting();
+  })());
 });
 
 self.addEventListener("activate", (event) => {
@@ -29,8 +34,6 @@ self.addEventListener("activate", (event) => {
   );
 });
 
-/* Push. Director sends {title, body, url, tag}; the tag collapses repeats for
-   one conversation so a chatty run does not stack ten banners. */
 self.addEventListener("push", (event) => {
   let payload = {};
   try {
@@ -56,7 +59,6 @@ self.addEventListener("notificationclick", (event) => {
   const target = (event.notification.data && event.notification.data.url) || "/";
   event.waitUntil(
     self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clients) => {
-      // Focus the app if it is already open rather than opening a second copy.
       for (const client of clients) {
         if (client.url.includes(self.location.origin) && "focus" in client) {
           client.postMessage({ type: "notification", url: target });
@@ -73,17 +75,27 @@ self.addEventListener("fetch", (event) => {
   if (request.method !== "GET") return;
 
   const url = new URL(request.url);
-  // Only ever serve our own origin from cache. Director lives elsewhere.
   if (url.origin !== self.location.origin) return;
   if (url.pathname.startsWith("/api/")) return;
 
-  event.respondWith(
-    fetch(request)
-      .then((response) => {
+  const isPage = request.mode === "navigate" || url.pathname === "/" || url.pathname.endsWith(".html");
+
+  event.respondWith((async () => {
+    try {
+      const response = await fetch(request);
+      if (response.ok) {
         const copy = response.clone();
         caches.open(VERSION).then((cache) => cache.put(request, copy)).catch(() => {});
-        return response;
-      })
-      .catch(() => caches.match(request).then((hit) => hit || caches.match("/index.html")))
-  );
+      }
+      return response;
+    } catch {
+      const hit = await caches.match(request);
+      if (hit) return hit;
+      if (isPage) {
+        const page = await caches.match("/");
+        if (page) return page;
+      }
+      return Response.error();
+    }
+  })());
 });
