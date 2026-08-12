@@ -31,11 +31,13 @@ import json
 import os
 import pathlib
 import platform
+import re
 import socket
 import subprocess
 import sys
 import time
 import traceback
+import uuid
 
 try:
     import aiohttp
@@ -52,6 +54,76 @@ RECONNECT_MAX = 60.0
 SHELL_TIMEOUT = 180
 
 CAPS = {"code": True, "shell": True, "files": True, "platform": "windows"}
+
+_SKIP_ADAPTER = re.compile(
+    r"WSL|Hyper-V|vEthernet|Bluetooth|Loopback|Tailscale|WireGuard|VPN|Virtual",
+    re.I,
+)
+
+
+def _format_mac(raw: str) -> str:
+    hexed = re.sub(r"[^0-9A-Fa-f]", "", raw or "")
+    if len(hexed) != 12:
+        return ""
+    return ":".join(hexed[i:i + 2] for i in range(0, 12, 2)).upper()
+
+
+def parse_ipconfig(text: str) -> dict:
+    """Pick the house LAN adapter from `ipconfig /all` text."""
+    source = text or ""
+    headers = list(re.finditer(
+        r"^(?:Ethernet|Wireless|Wi-?Fi) adapter (.+):", source, re.I | re.M))
+    best: dict = {}
+    for index, name_match in enumerate(headers):
+        end = headers[index + 1].start() if index + 1 < len(headers) else len(source)
+        block = source[name_match.start():end]
+        name = name_match.group(1).strip()
+        if _SKIP_ADAPTER.search(name):
+            continue
+        mac_match = re.search(r"Physical Address[ .]*: *([0-9A-Fa-f-]+)", block)
+        ip_match = re.search(r"IPv4 Address[ .]*: *([0-9.]+)", block)
+        mac = _format_mac(mac_match.group(1) if mac_match else "")
+        ip = ip_match.group(1) if ip_match else ""
+        if not mac:
+            continue
+        row = {"name": name, "mac": mac, "ip": ip}
+        if ip.startswith("192.168."):
+            return row
+        if not best:
+            best = row
+    return best
+
+
+def lan_identity() -> dict:
+    """MAC + IPv4 of the adapter Director should wake."""
+    ip = ""
+    try:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        probe.connect(("192.168.0.17", 80))
+        ip = probe.getsockname()[0]
+        probe.close()
+    except OSError:
+        ip = ""
+    info: dict = {}
+    if sys.platform == "win32":
+        try:
+            raw = subprocess.check_output(
+                ["ipconfig", "/all"], text=True, encoding="oem", errors="replace",
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            info = parse_ipconfig(raw)
+        except (OSError, subprocess.CalledProcessError):
+            info = {}
+    if not info.get("mac"):
+        info["mac"] = _format_mac(f"{uuid.getnode():012x}")
+    if ip and not info.get("ip"):
+        info["ip"] = ip
+    elif ip and str(info.get("ip") or "").startswith("192.168."):
+        pass
+    elif ip:
+        info["ip"] = ip
+    if info.get("ip") and info["ip"].count(".") == 3:
+        info["broadcast"] = ".".join(info["ip"].split(".")[:3] + ["255"])
+    return {k: v for k, v in info.items() if v}
 
 
 def log(message: str) -> None:
@@ -380,6 +452,14 @@ class DirectorClient:
                                           heartbeat=30.0) as socket:
                 self.socket = socket
                 log(f"connected to {self.url} as {self.name}")
+                hello = lan_identity()
+                hello["type"] = "hello"
+                hello["name"] = self.name
+                try:
+                    await socket.send_json(hello)
+                    log(f"lan {hello.get('ip', '?')} {hello.get('mac', '?')}")
+                except Exception as exc:
+                    log(f"hello failed: {type(exc).__name__}: {exc}")
                 async for message in socket:
                     if message.type != aiohttp.WSMsgType.TEXT:
                         continue

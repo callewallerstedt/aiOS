@@ -27,7 +27,7 @@ import aiohttp
 from aiohttp import web
 
 from . import agents as agents_mod
-from . import auth, config, models, push, store
+from . import auth, config, models, push, store, wake
 from . import routines as routines_mod
 from . import runtime as runtime_mod
 from .operator import display as display_mod
@@ -130,6 +130,7 @@ async def pair(request: web.Request) -> web.Response:
 def _agent_row(agent: dict, runtime: runtime_mod.Runtime) -> dict:
     thread = store.latest_thread(agent["id"])
     routines = store.list_routines(agent_id=agent["id"], include_disabled=False)
+    working = runtime.working_from_group(thread["id"]) if thread and store.is_group(agent) else []
     return {
         "id": agent["id"],
         "name": agent["name"],
@@ -143,12 +144,15 @@ def _agent_row(agent: dict, runtime: runtime_mod.Runtime) -> dict:
         "reasoning": agent["reasoning"],
         "auto_approve": bool(agent.get("auto_approve")),
         "notify": bool(agent.get("notify", 1)),
+        "members": list(agent.get("members") or []),
+        "rules": agent.get("rules") or "",
         "routines": len(routines),
         "thread_id": thread["id"] if thread else "",
         "preview": thread["preview"] if thread else "",
         "updated_at": thread["updated_at"] if thread else agent["created_at"],
         "status": thread["status"] if thread else "idle",
         "busy": runtime.busy(thread["id"]) if thread else False,
+        "working": working,
     }
 
 
@@ -158,10 +162,12 @@ async def state(request: web.Request) -> web.Response:
     settings = config.load_settings()
     agents = [_agent_row(agent, runtime) for agent in agents_mod.ensure_seeded()]
     agents.sort(key=lambda row: row["updated_at"], reverse=True)
+    machines = runtime.online_machines()
     return json_response({
         "ok": True,
         "agents": agents,
-        "machines": runtime.online_machines(),
+        "machines": machines,
+        "wake": wake.status(machines=machines, settings=settings),
         "cursor": store.latest_event_id(),
         "defaults": settings.get("defaults", {}),
         "operator": await display_mod.status(settings),
@@ -182,17 +188,31 @@ async def create_agent(request: web.Request) -> web.Response:
     name = str(body.get("name") or "").strip()
     if not name:
         return error("an agent needs a name")
-    agent = store.create_agent(
-        name=name, emoji=str(body.get("emoji") or "🤖"),
-        kind=str(body.get("kind") or "custom"),
-        subtitle=str(body.get("subtitle") or ""),
-        system_prompt=str(body.get("system_prompt") or ""),
-        backend=str(body.get("backend") or ""), model=str(body.get("model") or ""),
-        reasoning=str(body.get("reasoning") or ""),
-        avatar=str(body.get("avatar") or ""),
-        # A new chat is a full Director unless asked for otherwise.
-        tools=list(body.get("tools") or agents_mod.DIRECTOR_TOOLS),
-        sort=int(body.get("sort") or 99))
+    kind = str(body.get("kind") or "custom").strip() or "custom"
+    if kind == "group":
+        members = agents_mod.resolve_member_ids(body.get("members") or [])
+        if len(members) < 2:
+            return error("a group chat needs at least two agents")
+        agent = store.create_agent(
+            name=name, emoji=str(body.get("emoji") or "🤖"),
+            kind="group",
+            subtitle=str(body.get("subtitle") or ""),
+            avatar=str(body.get("avatar") or ""),
+            tools=[],
+            members=members,
+            rules=str(body.get("rules") or ""),
+            sort=int(body.get("sort") or 99))
+    else:
+        agent = store.create_agent(
+            name=name, emoji=str(body.get("emoji") or "🤖"),
+            kind=kind,
+            subtitle=str(body.get("subtitle") or ""),
+            system_prompt=str(body.get("system_prompt") or ""),
+            backend=str(body.get("backend") or ""), model=str(body.get("model") or ""),
+            reasoning=str(body.get("reasoning") or ""),
+            avatar=str(body.get("avatar") or ""),
+            tools=list(body.get("tools") or agents_mod.DIRECTOR_TOOLS),
+            sort=int(body.get("sort") or 99))
     store.create_thread(agent["id"])
     return json_response({"ok": True, "agent": agent})
 
@@ -200,6 +220,11 @@ async def create_agent(request: web.Request) -> web.Response:
 @ROUTES.patch("/api/agents/{agent_id}")
 async def patch_agent(request: web.Request) -> web.Response:
     body = await request.json()
+    if "members" in body:
+        body = dict(body)
+        body["members"] = agents_mod.resolve_member_ids(body.get("members") or [])
+        if len(body["members"]) < 2:
+            return error("a group chat needs at least two agents")
     agent = store.update_agent(request.match_info["agent_id"], body)
     if agent is None:
         return error("no such agent", status=404)
@@ -214,7 +239,7 @@ async def delete_agent(request: web.Request) -> web.Response:
 
 # ---------------- threads ----------------
 
-def _thread_payload(thread_id: str) -> dict:
+def _thread_payload(thread_id: str, runtime: runtime_mod.Runtime | None = None) -> dict:
     thread = store.get_thread(thread_id)
     if not thread:
         return {}
@@ -222,7 +247,8 @@ def _thread_payload(thread_id: str) -> dict:
     through = int(thread.get("compacted_through") or 0)
     thread["hidden_count"] = sum(
         1 for message in messages if int(message.get("sequence") or 0) <= through)
-    return {"thread": thread, "messages": messages}
+    working = runtime.working_from_group(thread_id) if runtime else []
+    return {"thread": thread, "messages": messages, "working": working}
 
 
 @ROUTES.get("/api/agents/{agent_id}/thread")
@@ -232,13 +258,15 @@ async def agent_thread(request: web.Request) -> web.Response:
     if agent is None:
         return error("no such agent", status=404)
     thread = store.latest_thread(agent_id) or store.create_thread(agent_id)
+    runtime = request.app["runtime"]
     return json_response({"ok": True, "cursor": store.latest_event_id(),
-                          **_thread_payload(thread["id"])})
+                          **_thread_payload(thread["id"], runtime)})
 
 
 @ROUTES.get("/api/threads/{thread_id}")
 async def get_thread(request: web.Request) -> web.Response:
-    payload = _thread_payload(request.match_info["thread_id"])
+    runtime = request.app["runtime"]
+    payload = _thread_payload(request.match_info["thread_id"], runtime)
     if not payload:
         return error("no such thread", status=404)
     return json_response({"ok": True, "cursor": store.latest_event_id(), **payload})
@@ -642,12 +670,14 @@ async def operator_status(request: web.Request) -> web.Response:
 
 @ROUTES.post("/api/operator/start")
 async def operator_start(request: web.Request) -> web.Response:
-    return json_response({"ok": True, "operator": await display_mod.ensure_running(with_chrome=True)})
+    # Starting the viewer must never launch or replace the browser an active
+    # operator turn is controlling. Operator runs request Chrome themselves.
+    return json_response({"ok": True, "operator": await display_mod.ensure_running(with_chrome=False)})
 
 
 @ROUTES.post("/api/operator/restart")
 async def operator_restart(request: web.Request) -> web.Response:
-    return json_response({"ok": True, "operator": await display_mod.restart()})
+    return json_response({"ok": True, "operator": await display_mod.restart_viewer()})
 
 
 _SHOT_TTL = 1.25
@@ -692,7 +722,23 @@ async def enroll_machine(request: web.Request) -> web.Response:
 
 @ROUTES.get("/api/machines")
 async def list_machines(request: web.Request) -> web.Response:
-    return json_response({"ok": True, "machines": request.app["runtime"].online_machines()})
+    runtime = request.app["runtime"]
+    machines = runtime.online_machines()
+    settings = config.load_settings()
+    return json_response({
+        "ok": True,
+        "machines": machines,
+        "wake": wake.status(machines=machines, settings=settings),
+    })
+
+
+@ROUTES.post("/api/wake")
+async def wake_pc(request: web.Request) -> web.Response:
+    """Broadcast a Wake-on-LAN magic packet to the house Windows PC."""
+    result = wake.send()
+    if not result.get("ok"):
+        return error(str(result.get("error") or "wake failed"))
+    return json_response(result)
 
 
 @ROUTES.post("/api/machine/job")
@@ -744,7 +790,12 @@ async def machine_socket(request: web.Request) -> web.WebSocketResponse:
             except json.JSONDecodeError:
                 continue
             kind = str(payload.get("type") or "")
-            if kind == "result":
+            if kind == "hello":
+                try:
+                    wake.remember(payload)
+                except ValueError:
+                    pass
+            elif kind == "result":
                 runtime.resolve_machine_call(str(payload.get("call_id") or ""),
                                              dict(payload.get("result") or {}))
             elif kind == "event":
@@ -781,18 +832,18 @@ async def vnc_bridge(request: web.Request) -> web.WebSocketResponse:
         raise web.HTTPUnauthorized(text="not paired")
 
     settings = config.load_settings()
-    port = int((settings.get("operator") or {}).get("vnc_port") or 5999)
-    await display_mod.ensure_running(settings, with_chrome=True)
+
+    # Connect before accepting the WebSocket so a healthy display takes the
+    # direct, sub-second path. This never probes, starts or restarts Chrome.
+    try:
+        reader, writer = await display_mod.open_viewer_connection(settings)
+    except (OSError, ConnectionError, asyncio.TimeoutError) as exc:
+        raise web.HTTPServiceUnavailable(text=str(exc)) from exc
 
     # noVNC 1.0 always opens with subprotocol "binary". If we do not echo it,
     # the browser aborts the handshake and the phone shows "Failed to connect".
     ws = web.WebSocketResponse(protocols=("binary",), heartbeat=None, max_msg_size=0)
     await ws.prepare(request)
-    try:
-        reader, writer = await asyncio.open_connection("127.0.0.1", port)
-    except OSError as exc:
-        await ws.close(code=1011, message=str(exc).encode())
-        return ws
 
     async def tcp_to_ws() -> None:
         while True:
@@ -865,7 +916,9 @@ async def _startup(app: web.Application) -> None:
         push.ensure_keys(settings)
     _catch_up_routines()
     try:
-        await display_mod.ensure_running(settings, with_chrome=True)
+        # Keep the viewer infrastructure warm. Chrome belongs to operator runs
+        # and may already be in the middle of an action.
+        await display_mod.ensure_running(settings, with_chrome=False)
     except Exception as exc:
         print(f"[director] operator display not started: {exc}", flush=True)
 

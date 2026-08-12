@@ -8,6 +8,7 @@ change.
 from __future__ import annotations
 
 import platform
+import re
 import time
 from typing import Any
 
@@ -22,6 +23,7 @@ WEB_TOOLS = ["web_fetch", "web_search"]
 BOX_TOOLS = ["shell", "read_file", "write_file", "list_dir", "processes"]
 OPERATOR_TOOLS = ["operator", "operator_screenshot", "operator_takeover", "handoff"]
 CODE_TOOLS = ["code_session", "code_status", "code_configs", "machines"]
+GROUP_TOOLS = ["start_work", "react", "recall", "remember"]
 
 DIRECTOR_TOOLS = CORE_TOOLS + WEB_TOOLS + BOX_TOOLS + OPERATOR_TOOLS + CODE_TOOLS
 
@@ -121,6 +123,32 @@ when you need the list.
 You do not edit files on the Windows box directly. The CODE session does that,
 with its own tests and its own review; your job is to brief it well, watch it,
 and tell Calle the truth about the result.
+"""
+
+GROUP_CHAT_PROMPT = """You are in a group chat with Calle and the other agents listed below.
+
+Behave like a sharp coworker in a Slack channel. Default is to show up.
+
+* This message is for you unless Calle clearly addressed someone else by name
+  and not you. "hey guys", "can you react", a question to the room — that is
+  you. Do not wait to see if someone else goes first.
+* If Calle asks for a reaction (react, heart, thumbs up, emoji), call `react`
+  immediately with that emoji and write nothing else. Heart/love → ❤️.
+  Everyone in the room reacts. Do not SILENT. Do not say "I did" or "ok".
+* Prefer `react` over a spoken "ok" / "got it" / "sounds good" / "noted".
+* If you are unsure, still drop a short word ("yeah", "on it") or a `react`.
+  SILENT only when the message names someone else and is clearly not for you.
+* Keep replies short. One or two sentences is the default.
+* Tag others with `@Name` (exact names below) when you need them. Keep the
+  back-and-forth going — tag, they reply, they tag you — until the plan is
+  settled. Then stop tagging so the thread can rest.
+* If the ask is real work (code, the operator, files, a long job), say you
+  are on it in one line and call `start_work` with a precise brief. That work
+  runs in your private chat with Calle, not here. Never call shell,
+  code_session, operator, or write_file from a group chat.
+* You can see your own private chat with Calle. Use it when asked what you
+  last did.
+* Do not speak for other agents. Do not recap the whole thread.
 """
 
 DEFAULT_AGENTS = [
@@ -274,3 +302,101 @@ def system_prompt(agent: dict, settings: dict[str, Any] | None = None) -> str:
     if remembered:
         parts.append(remembered)
     return "\n\n".join(part for part in parts if part)
+
+
+def resolve_member_ids(raw: list | None) -> list[str]:
+    """Keep live, non-group agents, in order, dropping duplicates and junk."""
+    ids: list[str] = []
+    seen: set[str] = set()
+    for item in raw or []:
+        agent_id = str(item or "").strip()
+        if not agent_id or agent_id in seen:
+            continue
+        agent = store.get_agent(agent_id)
+        if not agent or int(agent.get("archived") or 0) or store.is_group(agent):
+            continue
+        seen.add(agent_id)
+        ids.append(agent_id)
+    return ids
+
+
+def group_members(group: dict) -> list[dict]:
+    """Resolve a group's member ids to live, non-group agent rows."""
+    rows = []
+    for agent_id in resolve_member_ids(group.get("members") or []):
+        agent = store.get_agent(agent_id)
+        if agent:
+            rows.append(agent)
+    return rows
+
+
+def group_system_prompt(member: dict, group: dict, members: list[dict],
+                        settings: dict[str, Any] | None = None) -> str:
+    """Prompt for one agent speaking inside a group thread."""
+    others = ", ".join(
+        f"{row['name']} ({row.get('subtitle') or row.get('kind') or 'agent'})"
+        for row in members if row.get("id") != member.get("id")
+    ) or "nobody else"
+    tags = ", ".join(f"@{row['name']}" for row in members) or "(just you)"
+    rules = str(group.get("rules") or "").strip()
+    parts = [
+        BASE_PROMPT.strip(),
+        identity_block(member),
+        GROUP_CHAT_PROMPT.strip(),
+        f"This group is **{group.get('name') or 'Group'}**. The other people here: {others}.",
+        f"Tag people with these exact handles: {tags}.",
+    ]
+    if rules:
+        parts.append(f"Group rules, which everyone in this chat follows:\n{rules}")
+    custom = str(member.get("system_prompt") or "").strip()
+    if custom:
+        parts.append(f"Calle's instructions for you personally:\n{custom}")
+    private = private_thread_context(str(member.get("id") or ""))
+    if private:
+        parts.append(private)
+    _with_house_instructions(parts, settings)
+    environment = environment_block(settings)
+    if environment:
+        parts.append(f"Context:\n{environment}")
+    remembered = memory_tools.memory_block()
+    if remembered:
+        parts.append(remembered)
+    return "\n\n".join(part for part in parts if part)
+
+
+def private_thread_context(agent_id: str) -> str:
+    """A short recap of this agent's private chat with Calle."""
+    thread = store.latest_thread(str(agent_id or ""))
+    if not thread:
+        return ""
+    lines: list[str] = []
+    for row in store.list_messages(thread["id"])[-10:]:
+        role = row.get("role")
+        content = " ".join(str(row.get("content") or "").split())
+        if not content:
+            continue
+        if role == "user":
+            lines.append(f"Calle: {content[:240]}")
+        elif role == "assistant":
+            lines.append(f"You: {content[:240]}")
+    if not lines:
+        return "Your private chat with Calle is empty so far."
+    return ("Your recent private chat with Calle — the others cannot see this. "
+            "Use it if asked what you last did:\n" + "\n".join(lines[-6:]))
+
+
+def mentions_in(text: str, members: list[dict]) -> list[dict]:
+    """Agents @tagged or named as whole words in `text`."""
+    hits: list[dict] = []
+    seen: set[str] = set()
+    blob = str(text or "")
+    for member in members:
+        name = str(member.get("name") or "").strip()
+        member_id = str(member.get("id") or "")
+        if not name or not member_id or member_id in seen:
+            continue
+        pattern = re.compile(rf"(?:^|[^\w])@?{re.escape(name)}\b", re.IGNORECASE)
+        if pattern.search(blob):
+            seen.add(member_id)
+            hits.append(member)
+    return hits

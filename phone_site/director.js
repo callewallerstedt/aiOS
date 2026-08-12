@@ -43,6 +43,9 @@ const state = {
   currentThread: null,
   currentMessages: [],
   screen: "agents",
+  groupWorking: new Map(),
+  machines: [],
+  wake: null,
 };
 
 /* ---------------- storage ---------------- */
@@ -174,17 +177,40 @@ function blobBody(spec) {
   if (spec.shape === "circle") return `<circle cx="32" cy="32" r="26" fill="${fill}"/>`;
   if (spec.shape === "pill") return `<rect x="4" y="14" width="56" height="36" rx="18" fill="${fill}"/>`;
   if (spec.shape === "diamond") {
-    return `<rect x="14" y="14" width="36" height="36" rx="8" fill="${fill}" transform="rotate(45 32 32)"/>`;
+    // 15% larger than the other blob bodies so the rotated square reads as
+    // the same visual weight, then a bit more as requested.
+    return `<rect x="11.3" y="11.3" width="41.4" height="41.4" rx="9.2" fill="${fill}" transform="rotate(45 32 32)"/>`;
   }
   return `<rect x="6" y="6" width="52" height="52" rx="16" fill="${fill}"/>`;
+}
+
+function sleepWindow(agent) {
+  const h = hash32(String((agent && (agent.id || agent.name)) || "agent"));
+  // Stable per agent: fall asleep some minute between 21:00 and 01:59,
+  // wake some minute between 08:00 and 11:59. Never during the day.
+  return {
+    sleepMins: (21 * 60 + (h % (5 * 60))) % (24 * 60),
+    wakeMins: 8 * 60 + ((h >>> 11) % (4 * 60)),
+  };
+}
+
+function isAsleep(agent, now) {
+  if (!agent || String(agent.kind || "") === "group") return false;
+  const at = now || new Date();
+  const { sleepMins, wakeMins } = sleepWindow(agent);
+  const mins = at.getHours() * 60 + at.getMinutes();
+  if (sleepMins < wakeMins) return mins >= sleepMins && mins < wakeMins;
+  return mins >= sleepMins || mins < wakeMins;
 }
 
 function agentMood(agent) {
   if (!agent || agent.frozen) return "idle";
   if (agent.busy || agent.status === "running") return "working";
   if (agent.status === "waiting") return "waiting";
+  if (String(agent.kind || "") === "group") return "idle";
   if (agent.id && agent.id === state.agentId) return "idle";
-  return "sleeping";
+  if (isAsleep(agent)) return "sleeping";
+  return "idle";
 }
 
 function blobMoodEyes(mood, emotion) {
@@ -262,8 +288,55 @@ function markdown(source) {
   const out = [];
   let list = null;
   const closeList = () => { if (list) { out.push(`</${list}>`); list = null; } };
+  const splitRow = (line) => line.trim().replace(/^\||\|$/g, "").split("|").map((cell) => cell.trim());
+  const isDivider = (line) => {
+    const cells = splitRow(line);
+    return cells.length >= 2 && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
+  };
+  const looksRow = (line) => line.trim().includes("|");
+  const skipBlank = (from) => {
+    let i = from;
+    while (i < lines.length && !lines[i].trim()) i += 1;
+    return i;
+  };
+  const alignOf = (cell) => {
+    const left = cell.startsWith(":");
+    const right = cell.endsWith(":");
+    if (left && right) return "center";
+    if (right) return "right";
+    if (left) return "left";
+    return "";
+  };
 
-  for (const line of lines) {
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    if (line.trim() && looksRow(line)) {
+      const dividerAt = skipBlank(i + 1);
+      if (dividerAt < lines.length && isDivider(lines[dividerAt])) {
+        const header = splitRow(line);
+        const aligns = splitRow(lines[dividerAt]).map(alignOf);
+        if (header.length >= 2 && aligns.length === header.length) {
+          closeList();
+          const rows = [];
+          let j = skipBlank(dividerAt + 1);
+          while (j < lines.length) {
+            if (!lines[j].trim()) { j += 1; continue; }
+            if (!looksRow(lines[j])) break;
+            const row = splitRow(lines[j]);
+            while (row.length < header.length) row.push("");
+            rows.push(row.slice(0, header.length));
+            j += 1;
+          }
+          const attr = (n) => (aligns[n] ? ` style="text-align:${aligns[n]}"` : "");
+          const head = header.map((cell, n) => `<th${attr(n)}>${cell}</th>`).join("");
+          const body = rows.map((row) =>
+            `<tr>${row.map((cell, n) => `<td${attr(n)}>${cell}</td>`).join("")}</tr>`).join("");
+          out.push(`<div class="md-table"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`);
+          i = j - 1;
+          continue;
+        }
+      }
+    }
     const heading = line.match(/^(#{1,3})\s+(.*)$/);
     const bullet = line.match(/^\s*[-*]\s+(.*)$/);
     const numbered = line.match(/^\s*\d+[.)]\s+(.*)$/);
@@ -441,10 +514,36 @@ function unpair(silent) {
 
 /* ---------------- agent list ---------------- */
 
-function avatarNode(agent, extra = "") {
+function avatarNode(agent, extra = "", mood) {
   const node = el("div", `avatar${extra ? ` ${extra}` : ""}`);
-  fillAvatar(node, agent);
+  fillAvatar(node, agent, mood);
   return node;
+}
+
+function isGroup(agent) {
+  return String(agent?.kind || "") === "group";
+}
+
+function agentById(id) {
+  return state.agents.find((row) => row.id === id) || null;
+}
+
+function groupMemberAgents(agent) {
+  return (agent?.members || []).map((id) => agentById(id)).filter(Boolean);
+}
+
+function avatarStack(agent, extra = "") {
+  if (!isGroup(agent)) return avatarNode(agent, extra);
+  const members = groupMemberAgents(agent);
+  const stack = el("div", `avatar-stack${extra ? ` ${extra}` : ""}`);
+  const shown = members.slice(0, 3);
+  stack.dataset.count = String(shown.length || 1);
+  if (!shown.length) {
+    stack.append(avatarNode(agent, extra, "idle"));
+    return stack;
+  }
+  for (const member of shown) stack.append(avatarNode(member, "tiny", "idle"));
+  return stack;
 }
 
 function renderAgents() {
@@ -474,13 +573,12 @@ function renderAgents() {
       row = el("button", `agent-row${agent.id === state.agentId ? " active" : ""}`);
       row.dataset.agentId = agent.id;
       row.style.animationDelay = `${Math.min(index * 26, 200)}ms`;
-      row.append(avatarNode(agent));
+      row.append(avatarStack(agent));
       const meta = el("div", "meta");
       const name = el("div", "name");
-      name.append(document.createTextNode(agent.name));
-      if (agent.busy || agent.status === "waiting") name.append(el("span", "dot busy"));
+      paintAgentName(name, agent);
       meta.append(name);
-      meta.append(el("div", "preview", agent.preview || agent.subtitle || ""));
+      meta.append(el("div", "preview", agent.preview || ""));
       row.append(meta);
       row.append(el("div", "when", relativeTime(agent.updated_at)));
       row.addEventListener("click", () => openAgent(agent.id));
@@ -497,18 +595,23 @@ function renderAgents() {
   list.classList.add("is-ready");
 }
 
+function paintAgentName(node, agent) {
+  if (!node) return;
+  node.textContent = "";
+  node.append(el("span", "name-text", agent.name || "Agent"));
+  const sub = String(agent.subtitle || "").trim();
+  if (sub) node.append(el("span", "sub-pill", sub));
+  if (agent.busy || agent.status === "waiting") node.append(el("span", "dot busy"));
+}
+
 function updateAgentRow(row, agent) {
-  const name = row.querySelector(".name");
-  if (name) {
-    name.textContent = agent.name;
-    if (agent.busy || agent.status === "waiting") name.append(el("span", "dot busy"));
-  }
+  paintAgentName(row.querySelector(".name"), agent);
   const preview = row.querySelector(".preview");
-  if (preview) preview.textContent = agent.preview || agent.subtitle || "";
+  if (preview) preview.textContent = agent.preview || "";
   const when = row.querySelector(".when");
   if (when) when.textContent = relativeTime(agent.updated_at);
-  const av = row.querySelector(".avatar");
-  if (av) fillAvatar(av, agent);
+  const face = row.querySelector(".avatar-stack") || row.querySelector(".avatar");
+  if (face) face.replaceWith(avatarStack(agent));
 }
 
 function markActiveAgent(agentId) {
@@ -594,9 +697,10 @@ function stampIfNeeded(at) {
   if (!state.lastStampAt || ms >= state.lastStampAt) state.lastStampAt = ms;
 }
 
-function addUser(text, attachments, at) {
+function addUser(text, attachments, at, extra = {}) {
   stampIfNeeded(at);
   const row = el("div", "row-user");
+  if (extra.id) row.dataset.msgId = extra.id;
   const node = el("div", "bubble-user");
   // Keep the selected appearance on the actual bubble as well as in CSS.
   // Mobile WebKit can briefly lose the custom-property paint when the PWA
@@ -612,15 +716,175 @@ function addUser(text, attachments, at) {
   return node;
 }
 
-function addAssistant(text, at) {
+function addAssistant(text, at, extra = {}) {
+  if (extra?.kind === "work_done") {
+    addWorkDoneCard(extra, text, at);
+    return;
+  }
   stampIfNeeded(at);
   const row = el("div", "row-agent");
+  if (extra?.id) row.dataset.msgId = extra.id;
   const node = el("div", "bubble-agent assistant");
   node.innerHTML = markdown(text);
-  row.append(node);
+  const speakerId = extra?.speaker_id || "";
+  if (speakerId) {
+    const speaker = agentById(speakerId) || {
+      id: speakerId,
+      name: extra.speaker_name || "Agent",
+      emoji: extra.emoji || "",
+    };
+    row.classList.add("named");
+    row.append(avatarNode(speaker, "tiny", "idle"));
+    const col = el("div", "speech");
+    col.append(el("div", "speaker-name", speaker.name || extra.speaker_name || "Agent"));
+    col.append(node);
+    row.append(col);
+  } else {
+    row.append(node);
+  }
   appendTranscript(row);
   scrollDown();
   return node;
+}
+
+function addWorkDoneCard(extra, text, at) {
+  stampIfNeeded(at);
+  const speaker = agentById(extra.speaker_id) || {
+    id: extra.speaker_id,
+    name: extra.speaker_name || "Agent",
+  };
+  const card = el("button", "work-done");
+  card.type = "button";
+  card.append(avatarNode(speaker, "tiny", "idle"));
+  const meta = el("div", "work-done-meta");
+  meta.append(el("div", "work-done-name", `${speaker.name || "Agent"} finished`));
+  meta.append(el("div", "work-done-preview", String(text || "Done.").slice(0, 90)));
+  card.append(meta);
+  card.addEventListener("click", () => {
+    if (speaker.id) openAgent(speaker.id);
+  });
+  appendTranscript(card);
+  scrollDown();
+  return card;
+}
+
+function lastMessageHost() {
+  const node = transcriptEl();
+  if (!node) return null;
+  const rows = [...node.querySelectorAll(".row-agent.named, .row-user")];
+  return rows.length ? rows[rows.length - 1] : null;
+}
+
+function messageHost(targetId) {
+  const node = transcriptEl();
+  if (!node) return null;
+  if (targetId) {
+    const match = node.querySelector(`[data-msg-id="${targetId}"]`);
+    if (match) return match;
+  }
+  return lastMessageHost();
+}
+
+function addReaction(payload, at) {
+  const emoji = payload?.emoji || payload?.text || "👍";
+  const speakerId = String(payload?.speaker_id || "");
+  const speakerName = payload?.speaker_name || "Agent";
+  const host = messageHost(payload?.target_id);
+  if (!host) {
+    stampIfNeeded(at);
+    const row = el("div", "row-agent named");
+    const bar = el("div", "react-bar");
+    row.append(bar);
+    appendTranscript(row);
+    return paintReactChip(bar, emoji, speakerId, speakerName);
+  }
+  const bubble = host.querySelector(".bubble-user, .bubble-agent") || host;
+  let bar = bubble.querySelector(":scope > .react-bar");
+  if (!bar) {
+    bar = el("div", "react-bar");
+    bubble.append(bar);
+  }
+  return paintReactChip(bar, emoji, speakerId, speakerName);
+}
+
+function paintReactChip(bar, emoji, speakerId, speakerName) {
+  const existing = [...bar.querySelectorAll(".react-chip")].find(
+    (chip) => chip.dataset.emoji === emoji
+  );
+  if (existing) {
+    const who = new Set((existing.dataset.speakers || "").split(",").filter(Boolean));
+    if (speakerId && who.has(speakerId)) return existing;
+    if (speakerId) who.add(speakerId);
+    existing.dataset.speakers = [...who].join(",");
+    const count = existing.querySelector(".react-count");
+    if (count) count.textContent = who.size > 1 ? String(who.size) : "";
+    existing.title = [existing.title, speakerName].filter(Boolean).join(", ");
+    return existing;
+  }
+  const chip = el("span", "react-chip");
+  chip.dataset.emoji = emoji;
+  chip.dataset.speakers = speakerId;
+  chip.title = speakerName;
+  chip.append(el("span", "react-emoji", emoji));
+  chip.append(el("span", "react-count"));
+  bar.append(chip);
+  scrollDown();
+  return chip;
+}
+
+function paintGroupWorking() {
+  const node = transcriptEl();
+  if (!node) return;
+  let cluster = node.querySelector("#group-working");
+  if (!state.groupWorking.size) {
+    cluster?.remove();
+    return;
+  }
+  if (!cluster) {
+    cluster = el("button", "work-cluster");
+    cluster.id = "group-working";
+    cluster.type = "button";
+    cluster.addEventListener("click", workingSheet);
+    appendTranscript(cluster);
+  }
+  cluster.textContent = "";
+  for (const [id, row] of state.groupWorking) {
+    const chip = el("span", "work-chip");
+    const agent = agentById(id) || { id, name: row.name || "Agent" };
+    chip.append(avatarNode(agent, "tiny", "idle"));
+    chip.append(el("span", "work-chip-label", `${agent.name || row.name || "Agent"} working`));
+    cluster.append(chip);
+  }
+  const spacer = $("transcript-spacer");
+  if (spacer && spacer.parentNode === node) node.insertBefore(cluster, spacer);
+  scrollDown();
+}
+
+function workingSheet() {
+  const { body, dismiss } = openSheet("Working now");
+  const list = el("div", "group");
+  if (!state.groupWorking.size) {
+    list.append(el("div", "hint", "Nobody is working right now."));
+    body.append(list);
+    return;
+  }
+  for (const [id, row] of state.groupWorking) {
+    const agent = agentById(id) || { id, name: row.name || "Agent" };
+    const btn = el("button", "btn member-pick on");
+    btn.type = "button";
+    btn.append(avatarNode(agent, "tiny", "idle"));
+    const label = el("span");
+    label.append(document.createTextNode(agent.name || row.name || "Agent"));
+    btn.append(label);
+    if (row.task) btn.append(el("span", "sub", row.task));
+    btn.addEventListener("click", () => {
+      dismiss();
+      if (agent.id) openAgent(agent.id);
+    });
+    list.append(btn);
+  }
+  list.append(el("div", "hint", "Opens that agent's private chat — the work lives there, not in this group."));
+  body.append(list);
 }
 
 function addStatus(text, isError) {
@@ -732,6 +996,7 @@ function summariseArgs(args) {
 }
 
 function finishTool(callId, name, card) {
+  if (name === "start_work" || name === "react") return;
   const wrap = state.tools.get(callId);
   if (!wrap) { toolCard({ callId, name, card }); return; }
   state.tools.delete(callId);
@@ -962,17 +1227,29 @@ function renderMessages(messages, thread = state.currentThread) {
   state.thinking = null;
   state.working = null;
   state.lastStampAt = 0;
+  state.groupWorking = new Map();
+  for (const row of thread?.working || []) {
+    if (row.agent_id) state.groupWorking.set(row.agent_id, row);
+  }
 
   const pendingTools = new Map();
   for (const message of shown) {
-    if (message.role === "user") addUser(message.content, message.meta?.attachments, message.created_at);
-    else if (message.role === "assistant") addAssistant(message.content, message.created_at);
+    if (message.role === "user") addUser(message.content, message.meta?.attachments, message.created_at, { id: message.id });
+    else if (message.role === "assistant") addAssistant(message.content, message.created_at, { ...(message.meta || {}), id: message.id });
+    else if (message.role === "reaction") addReaction({
+      emoji: message.content || message.meta?.emoji,
+      speaker_id: message.meta?.speaker_id,
+      speaker_name: message.meta?.speaker_name,
+      target_id: message.meta?.target_id,
+    }, message.created_at);
     else if (message.role === "system") addStatus(message.content.split("\n")[0]);
     else if (message.role === "tool_call") {
+      if (message.meta?.name === "start_work" || message.meta?.name === "react") continue;
       let args = {};
       try { args = JSON.parse(message.meta?.arguments || "{}"); } catch {}
       pendingTools.set(message.meta?.call_id, { name: message.meta?.name, args });
     } else if (message.role === "tool_result") {
+      if (message.meta?.name === "start_work" || message.meta?.name === "react") continue;
       const pending = pendingTools.get(message.meta?.call_id) || {};
       const output = message.meta?.output || "";
       const card = message.meta?.card || {
@@ -989,6 +1266,7 @@ function renderMessages(messages, thread = state.currentThread) {
       });
     }
   }
+  paintGroupWorking();
   scrollDown(true);
 }
 
@@ -1007,9 +1285,14 @@ function handleEvent(event) {
   switch (event.kind) {
     case "message.user":
       // Echoed by the sender already; only render when it came from elsewhere.
+      if (payload.id) {
+        const rows = [...(transcriptEl()?.querySelectorAll(".row-user") || [])];
+        const last = rows[rows.length - 1];
+        if (last && !last.dataset.msgId) last.dataset.msgId = payload.id;
+      }
       if (!document.querySelector(`[data-user-pending="${payload.id}"]`)) {
         if (!state.lastSentText || state.lastSentText !== payload.text) {
-          addUser(payload.text, payload.attachments, event.created_at);
+          addUser(payload.text, payload.attachments, event.created_at, { id: payload.id });
         }
       }
       state.lastSentText = "";
@@ -1044,17 +1327,23 @@ function handleEvent(event) {
         state.streaming.innerHTML = markdown(payload.text || state.streaming.dataset.raw || "");
         state.streaming = null;
       } else {
-        addAssistant(payload.text || "", event.created_at);
+        addAssistant(payload.text || "", event.created_at, payload);
       }
       scrollDown();
       break;
 
+    case "message.reaction":
+      addReaction(payload, event.created_at);
+      break;
+
     case "tool.start":
+      if (payload.name === "start_work" || payload.name === "react") break;
       settleThinking();
       toolCard({ callId: payload.call_id, name: payload.name, args: payload.arguments, running: true });
       break;
 
     case "tool.done":
+      if (payload.name === "start_work" || payload.name === "react") break;
       finishTool(payload.call_id, payload.name, payload.card);
       break;
 
@@ -1145,7 +1434,24 @@ function handleEvent(event) {
       break;
 
     case "thread.steered":
-      addStatus("Sent — Director will pick this up in the current run.");
+      addStatus("Sent — they'll pick this up without stopping.");
+      break;
+
+    case "group.working":
+      if (payload.agent_id) {
+        state.groupWorking.set(payload.agent_id, payload);
+        paintGroupWorking();
+      }
+      break;
+
+    case "group.idle":
+      if (payload.agent_id) state.groupWorking.delete(payload.agent_id);
+      paintGroupWorking();
+      break;
+
+    case "group.considering":
+    case "group.quiet":
+    case "group.round_done":
       break;
 
     case "thread.compacted":
@@ -1159,6 +1465,14 @@ function handleEvent(event) {
     case "routine.created":
       addStatus(`Scheduled "${payload.name}" — ${payload.schedule}`);
       refreshAgentsSoon();
+      break;
+
+    case "machine.online":
+      markMachine(payload, true);
+      break;
+
+    case "machine.offline":
+      markMachine(payload, false);
       break;
 
     default:
@@ -1235,31 +1549,28 @@ function setBusy(busy) {
   const send = $("btn-send");
   if (stop) stop.classList.toggle("hidden", !busy);
   if (send) send.classList.toggle("hidden", false);
-  $("chat-sub").textContent = busy ? "working..." : ($("chat-sub").dataset.idle || "");
   const agent = state.agents.find((row) => row.id === state.agentId);
+  const group = isGroup(agent);
+  $("chat-sub").textContent = busy
+    ? (group ? (state.groupWorking.size ? "working…" : "listening…") : "working...")
+    : ($("chat-sub").dataset.idle || "");
   if (agent) {
     agent.busy = busy;
     if (busy && agent.status !== "waiting") agent.status = "running";
     if (!busy) agent.status = "idle";
-    fillAvatar($("chat-avatar"), agent);
+    paintChatHeader(agent);
     paintAgentRow(agent);
   }
-  if (busy) ensureWorking();
-  else settleWorking();
+  if (busy && !group) ensureWorking();
+  else if (!busy) settleWorking();
 }
 
 function paintAgentRow(agent) {
   const row = $("agent-list")?.querySelector(`[data-agent-id="${agent.id}"]`);
   if (!row) return;
-  const name = row.querySelector(".name");
-  if (name) {
-    const dot = name.querySelector(".dot.busy");
-    const show = agent.busy || agent.status === "waiting";
-    if (show && !dot) name.append(el("span", "dot busy"));
-    if (!show && dot) dot.remove();
-  }
-  const av = row.querySelector(".avatar");
-  if (av) fillAvatar(av, agent);
+  paintAgentName(row.querySelector(".name"), agent);
+  const face = row.querySelector(".avatar-stack") || row.querySelector(".avatar");
+  if (face) face.replaceWith(avatarStack(agent));
 }
 
 /* ---------------- actions ---------------- */
@@ -1267,10 +1578,70 @@ function paintAgentRow(agent) {
 async function loadAgents() {
   const data = await api("/api/state");
   state.agents = data.agents || [];
+  state.machines = data.machines || [];
+  state.wake = data.wake || null;
   renderAgents();
+  paintWakeButton();
   setConnection(state.socket?.readyState === WebSocket.OPEN);
   prefetchThreads();
   return data;
+}
+
+function paintWakeButton() {
+  const btn = $("btn-wake-pc");
+  const screen = $("screen-agents");
+  if (!btn) return;
+  const wake = state.wake || {};
+  const show = !!wake.available && !wake.online;
+  btn.classList.toggle("hidden", !show);
+  screen?.classList.toggle("pc-asleep", show);
+  if (!btn.disabled) {
+    const label = btn.querySelector("span");
+    if (label) label.textContent = "Wake PC";
+  }
+}
+
+function markMachine(payload, online) {
+  const machines = state.machines || [];
+  let row = machines.find((item) => item.id === payload?.id);
+  if (row) row.online = online;
+  else if (payload?.id) {
+    machines.push({ id: payload.id, name: payload.name || "PC", online });
+  }
+  state.machines = machines;
+  if (!state.wake) state.wake = { available: true, online: false, name: "PC" };
+  const windows = machines.find((item) =>
+    /windows/i.test(`${item.platform || ""} ${item.name || ""}`)) || machines[0];
+  state.wake.online = !!(windows && windows.online);
+  if (windows?.name) state.wake.name = windows.name;
+  paintWakeButton();
+}
+
+async function wakePc() {
+  const btn = $("btn-wake-pc");
+  if (!btn || btn.disabled) return;
+  const label = btn.querySelector("span");
+  btn.disabled = true;
+  if (label) label.textContent = "Waking…";
+  try {
+    await api("/api/wake", { method: "POST" });
+  } catch (error) {
+    if (label) label.textContent = String(error.message || error).slice(0, 40);
+    btn.disabled = false;
+    return;
+  }
+  const start = Date.now();
+  while (Date.now() - start < 90000) {
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    try {
+      const data = await api("/api/state");
+      state.machines = data.machines || [];
+      state.wake = data.wake || state.wake;
+      if (data.wake?.online) break;
+    } catch { /* keep waiting */ }
+  }
+  btn.disabled = false;
+  paintWakeButton();
 }
 
 function prefetchThreads() {
@@ -1292,16 +1663,31 @@ function prefetchThreads() {
 }
 
 function paintChatHeader(agent) {
-  $("chat-name").textContent = agent.name || "Director";
-  $("composer-input").placeholder = `Message ${agent.name || "Director"}…`;
+  const title = $("chat-name");
+  title.textContent = "";
+  title.append(el("span", "name-text", agent.name || "Director"));
+  const subLabel = String(agent.subtitle || "").trim();
+  if (subLabel) title.append(el("span", "sub-pill", subLabel));
+  $("composer-input").placeholder = isGroup(agent)
+    ? `Message ${agent.name || "the group"}…`
+    : `Message ${agent.name || "Director"}…`;
   const sub = $("chat-sub");
-  const bits = [agent.subtitle || ""];
+  const bits = [];
+  if (isGroup(agent)) {
+    const n = (agent.members || []).length;
+    bits.push(n ? `${n} agents` : "group");
+  }
   if (agent.routines) bits.push(`${agent.routines} scheduled`);
   if (agent.auto_approve) bits.push("auto-approved");
   const line = bits.filter(Boolean).join(" · ");
   sub.dataset.idle = line;
-  sub.textContent = line;
-  fillAvatar($("chat-avatar"), agent);
+  if (!state.busy) sub.textContent = line;
+  const slot = $("chat-avatar");
+  if (slot) {
+    const next = avatarStack(agent, "small");
+    next.id = "chat-avatar";
+    slot.replaceWith(next);
+  }
   const label = $("context-screen-label");
   if (label) label.textContent = `${agent.name || "Operator"}'s screen`;
 }
@@ -1327,8 +1713,10 @@ async function openAgent(agentId, { pushHistory = true } = {}) {
   if (cached) {
     state.threadId = cached.thread.id;
     state.cursor = Math.max(state.cursor, cached.cursor || 0);
+    cached.thread.working = cached.working || cached.thread.working || [];
     renderMessages(cached.messages || [], cached.thread);
-    setBusy(cached.thread.status === "running" || cached.thread.status === "waiting");
+    setBusy(cached.thread.status === "running" || cached.thread.status === "waiting"
+      || (cached.thread.working || []).length > 0);
     markWatching(state.threadId, true);
   } else {
     transcriptEl().textContent = "";
@@ -1338,16 +1726,19 @@ async function openAgent(agentId, { pushHistory = true } = {}) {
   try {
     const data = await api(`/api/agents/${agentId}/thread`);
     if (gen !== state.openGen) return;
+    data.thread.working = data.working || [];
     state.threads.set(agentId, {
       thread: data.thread,
       messages: data.messages || [],
+      working: data.working || [],
       cursor: data.cursor || 0,
       at: Date.now(),
     });
     state.threadId = data.thread.id;
     state.cursor = Math.max(state.cursor, data.cursor || 0);
     renderMessages(data.messages || [], data.thread);
-    setBusy(data.thread.status === "running" || data.thread.status === "waiting");
+    setBusy(data.thread.status === "running" || data.thread.status === "waiting"
+      || (data.working || []).length > 0);
     markWatching(state.threadId, true);
     if (!(data.messages || []).length) {
       appendTranscript(el("div", "empty", `Say something to ${agent.name || "Director"}.`));
@@ -1365,9 +1756,11 @@ async function refreshOpenThread() {
   try {
     const data = await api(`/api/threads/${threadId}`);
     if (state.threadId !== threadId) return;
+    data.thread.working = data.working || [];
     state.threads.set(agentId, {
       thread: data.thread,
       messages: data.messages || [],
+      working: data.working || [],
       cursor: data.cursor || state.cursor,
       at: Date.now(),
     });
@@ -2278,15 +2671,164 @@ async function newAgent() {
   await agentEditor(null);
 }
 
+function newChatChooser() {
+  const { body, dismiss } = openSheet("New chat");
+  const box = el("div", "group");
+  const agentBtn = el("button", "btn", "Agent");
+  agentBtn.addEventListener("click", () => { dismiss(); agentEditor(null); });
+  const groupBtn = el("button", "btn primary", "Group chat");
+  groupBtn.addEventListener("click", () => { dismiss(); groupEditor(null); });
+  box.append(agentBtn, groupBtn);
+  box.append(el("div", "hint",
+    "A group is several agents in one room. They decide who speaks. "
+    + "If you ask someone to do a task, they take it to their private chat with you."));
+  body.append(box);
+}
+
+async function groupEditor(group) {
+  const creating = !group;
+  const draft = {
+    name: group?.name || "",
+    blob: parseBlob(group?.emoji) || blobSpec(group?.id || group?.name || `group-${Date.now()}`),
+    avatar: group?.avatar || "",
+    subtitle: group?.subtitle || "",
+    members: new Set(group?.members || []),
+    rules: group?.rules || "",
+  };
+  const { body, dismiss } = openSheet(creating ? "New group chat" : `Edit ${draft.name || "group"}`);
+
+  const identity = el("div", "group");
+  identity.append(el("h3", null, "Group"));
+  const picker = el("div", "avatar-picker");
+  const preview = el("div", "avatar big");
+  const paintAvatar = () => {
+    fillAvatar(preview, {
+      id: group?.id || draft.name || "new-group",
+      avatar: draft.avatar,
+      emoji: encodeBlob(draft.blob),
+      frozen: true,
+    }, "idle");
+  };
+  paintAvatar();
+  picker.append(preview);
+  identity.append(picker);
+  const shuffle = el("button", "btn ghost", "Shuffle this blob");
+  shuffle.addEventListener("click", () => {
+    draft.avatar = "";
+    draft.blob = blobSpec(`${group?.id || draft.name || "group"}-${Math.random()}`);
+    paintAvatar();
+  });
+  identity.append(shuffle);
+  const nameInput = textInput(draft.name, "Ops, Home, Studio…");
+  identity.append(field("Name", nameInput));
+  const subtitleInput = textInput(draft.subtitle, "What this room is for");
+  identity.append(field("Subtitle", subtitleInput));
+  body.append(identity);
+
+  const people = el("div", "group");
+  people.append(el("h3", null, "Agents in this chat"));
+  people.append(el("div", "hint", "Everyone here sees every message. They speak when it is for them."));
+  const picks = el("div", "member-picks");
+  const candidates = state.agents.filter((row) => !isGroup(row));
+  if (!candidates.length) {
+    people.append(el("div", "hint", "Create an agent first, then add them here."));
+  }
+  for (const agent of candidates) {
+    const row = el("button", `member-pick${draft.members.has(agent.id) ? " on" : ""}`);
+    row.type = "button";
+    row.append(avatarNode(agent, "tiny"));
+    const label = el("span");
+    label.append(document.createTextNode(agent.name));
+    row.append(label);
+    if (agent.subtitle) row.append(el("span", "sub", agent.subtitle));
+    row.addEventListener("click", () => {
+      if (draft.members.has(agent.id)) draft.members.delete(agent.id);
+      else draft.members.add(agent.id);
+      row.classList.toggle("on", draft.members.has(agent.id));
+    });
+    picks.append(row);
+  }
+  people.append(picks);
+  body.append(people);
+
+  const rulesBox = el("div", "group");
+  rulesBox.append(el("h3", null, "Group rules"));
+  const rulesInput = el("textarea");
+  rulesInput.rows = 6;
+  rulesInput.value = draft.rules;
+  rulesInput.placeholder = "How this room works. Everyone in the group sees these.";
+  rulesBox.append(rulesInput);
+  rulesBox.append(el("div", "hint",
+    "Examples: keep it short, Coder owns code, Operator owns the screen, don't pile on."));
+  body.append(rulesBox);
+
+  const actions = el("div", "group");
+  const save = el("button", "btn primary", creating ? "Create group" : "Save");
+  save.addEventListener("click", async () => {
+    const members = [...draft.members];
+    const payload = {
+      name: nameInput.value.trim(),
+      emoji: encodeBlob(draft.blob),
+      avatar: draft.avatar,
+      subtitle: subtitleInput.value.trim(),
+      kind: "group",
+      members,
+      rules: rulesInput.value,
+    };
+    if (!payload.name) { alert("Give the group a name."); return; }
+    if (members.length < 2) { alert("Pick at least two agents."); return; }
+    save.disabled = true;
+    try {
+      if (creating) {
+        const created = await api("/api/agents", { method: "POST", body: JSON.stringify(payload) });
+        dismiss();
+        await loadAgents();
+        if (created?.agent?.id) await openAgent(created.agent.id);
+      } else {
+        await api(`/api/agents/${group.id}`, { method: "PATCH", body: JSON.stringify(payload) });
+        dismiss();
+        await loadAgents();
+        if (state.agentId === group.id) {
+          const fresh = state.agents.find((row) => row.id === group.id);
+          if (fresh) paintChatHeader(fresh);
+        }
+      }
+    } catch (error) {
+      alert(String(error.message || error));
+      save.disabled = false;
+    }
+  });
+  actions.append(save);
+  if (!creating) {
+    const remove = el("button", "btn danger", "Delete this group");
+    remove.addEventListener("click", async () => {
+      if (!confirm(`Delete ${group.name} ? The agents themselves stay.`)) return;
+      await api(`/api/agents/${group.id}`, { method: "DELETE" });
+      dismiss();
+      if (state.agentId === group.id) state.agentId = "";
+      show("agents");
+      await loadAgents();
+    });
+    actions.append(remove);
+  }
+  body.append(actions);
+}
+
 function chatMenu() {
   const agent = state.agents.find((row) => row.id === state.agentId) || {};
   const { body, dismiss } = openSheet(agent.name || "Conversation");
   const group = el("div", "group");
+  const groupChat = isGroup(agent);
 
   const options = [
-    ["Edit this agent", () => { dismiss(); agentEditor(agent); }],
-    ["Routines", () => { dismiss(); routinesSheet(agent); }],
-    ["Open the operator screen", () => { dismiss(); openTakeover(); }],
+    [groupChat ? "Edit this group" : "Edit this agent",
+     () => { dismiss(); groupChat ? groupEditor(agent) : agentEditor(agent); }],
+  ];
+  if (!groupChat) {
+    options.push(["Routines", () => { dismiss(); routinesSheet(agent); }]);
+    options.push(["Open the operator screen", () => { dismiss(); openTakeover(); }]);
+  }
+  options.push(
     ["Start a fresh conversation", async () => {
       dismiss();
       await api(`/api/threads/${state.threadId}/clear`, { method: "POST" });
@@ -2296,7 +2838,7 @@ function chatMenu() {
       dismiss();
       await api(`/api/threads/${state.threadId}/stop`, { method: "POST" });
     }],
-  ];
+  );
   for (const [label, action] of options) {
     const button = el("button", "btn", label);
     button.addEventListener("click", action);
@@ -2774,7 +3316,11 @@ async function boot() {
     setConnection(false, true);
   }
   connect();
-  api("/api/operator/start", { method: "POST" }).catch(() => {});
+
+  setInterval(() => {
+    if (document.hidden || !state.agents.length) return;
+    for (const agent of state.agents) paintAgentRow(agent);
+  }, 60 * 1000);
 
   // Deep link from a notification tap: ?agent=agt_x
   const wanted = new URLSearchParams(location.search).get("agent");
@@ -2795,7 +3341,8 @@ function wire() {
   $("pair-form").addEventListener("submit", doPair);
   $("btn-settings").addEventListener("click", openSettings);
   $("btn-settings-mobile")?.addEventListener("click", openSettings);
-  $("btn-new-agent").addEventListener("click", newAgent);
+  $("btn-wake-pc")?.addEventListener("click", wakePc);
+  $("btn-new-agent").addEventListener("click", newChatChooser);
   $("btn-search")?.addEventListener("click", () => {
     const box = $("sidebar-search");
     if (!box) return;

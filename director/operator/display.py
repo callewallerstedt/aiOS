@@ -27,6 +27,8 @@ from .. import config
 _READY_TTL = 20.0
 _ready_until = 0.0
 _ready_status: dict[str, Any] | None = None
+_recovery_lock: asyncio.Lock | None = None
+_recovery_loop: asyncio.AbstractEventLoop | None = None
 
 UNITS = {
     "xvfb": "aios-director-xvfb.service",
@@ -89,9 +91,8 @@ async def unit_active(unit: str) -> bool:
 
 async def status(settings: dict[str, Any] | None = None) -> dict:
     cfg = operator_settings(settings)
-    states = {}
-    for key, unit in UNITS.items():
-        states[key] = await unit_active(unit)
+    active = await asyncio.gather(*(unit_active(unit) for unit in UNITS.values()))
+    states = dict(zip(UNITS, active))
     return {
         "display": display_name(settings),
         "units": states,
@@ -126,6 +127,16 @@ def _remember_ready(state: dict[str, Any]) -> dict[str, Any]:
 
 
 DISPLAY_KEYS = ("xvfb", "wm", "vnc")
+
+
+def _get_recovery_lock() -> asyncio.Lock:
+    """One repair at a time, without binding tests to an old event loop."""
+    global _recovery_lock, _recovery_loop
+    loop = asyncio.get_running_loop()
+    if _recovery_lock is None or _recovery_loop is not loop:
+        _recovery_lock = asyncio.Lock()
+        _recovery_loop = loop
+    return _recovery_lock
 
 
 async def ensure_running(settings: dict[str, Any] | None = None, *,
@@ -177,11 +188,52 @@ async def ensure_running(settings: dict[str, Any] | None = None, *,
     })
 
 
-async def restart(settings: dict[str, Any] | None = None) -> dict:
+async def open_viewer_connection(settings: dict[str, Any] | None = None):
+    """Connect to x11vnc without touching a healthy operator session.
+
+    Viewing is a consumer of the display, not an operator startup. The common
+    path is therefore one local TCP connection and no systemd/Chrome probes.
+    Only a failed connection enters the serialized display-service recovery
+    path, and that path explicitly never launches or restarts Chrome.
+    """
+    cfg = operator_settings(settings)
+    port = int(cfg.get("vnc_port") or 5999)
+    try:
+        return await asyncio.wait_for(
+            asyncio.open_connection("127.0.0.1", port), timeout=0.75)
+    except (OSError, asyncio.TimeoutError):
+        pass
+
+    async with _get_recovery_lock():
+        # Another viewer may have repaired the service while we waited.
+        try:
+            return await asyncio.wait_for(
+                asyncio.open_connection("127.0.0.1", port), timeout=0.75)
+        except (OSError, asyncio.TimeoutError):
+            reset_ready_cache()
+            await ensure_running(settings, with_chrome=False)
+
+        last_error: BaseException | None = None
+        for _ in range(12):
+            try:
+                return await asyncio.wait_for(
+                    asyncio.open_connection("127.0.0.1", port), timeout=0.75)
+            except (OSError, asyncio.TimeoutError) as exc:
+                last_error = exc
+                await asyncio.sleep(0.15)
+        raise ConnectionError(f"operator viewer is unavailable on port {port}") from last_error
+
+
+async def restart_viewer(settings: dict[str, Any] | None = None) -> dict:
+    """Repair only the VNC exporter; preserve Xvfb, WM and Chrome processes."""
     reset_ready_cache()
-    for unit in UNITS.values():
-        await _run(["systemctl", "--user", "restart", unit], timeout=25)
+    await _run(["systemctl", "--user", "restart", UNITS["vnc"]], timeout=25)
     return _remember_ready(await status(settings))
+
+
+async def restart(settings: dict[str, Any] | None = None) -> dict:
+    """Backward-compatible safe restart used by the operator API."""
+    return await restart_viewer(settings)
 
 
 def chrome_binary() -> str:

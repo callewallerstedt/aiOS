@@ -351,3 +351,23 @@ def test_terminal_states_split_success_from_failure():
     assert "done" in director_client.TERMINAL_OK
     assert "failed" in director_client.TERMINAL_BAD
     assert not (director_client.TERMINAL_OK & director_client.TERMINAL_BAD)
+
+
+def test_ipconfig_picks_the_house_ethernet_not_wsl():
+    import director_client
+
+    sample = """
+Ethernet adapter vEthernet (WSL (Hyper-V firewall)):
+
+   Physical Address. . . . . . . . . : 00-15-5D-D5-22-71
+   IPv4 Address. . . . . . . . . . . : 172.19.64.1(Preferred)
+
+Ethernet adapter Ethernet:
+
+   Physical Address. . . . . . . . . : 30-C5-99-D0-0D-4A
+   IPv4 Address. . . . . . . . . . . : 192.168.0.83(Preferred)
+"""
+    got = director_client.parse_ipconfig(sample)
+    assert got["mac"] == "30:C5:99:D0:0D:4A"
+    assert got["ip"] == "192.168.0.83"
+    assert got["name"] == "Ethernet"

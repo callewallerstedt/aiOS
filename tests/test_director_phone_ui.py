@@ -121,3 +121,93 @@ def test_homepage_settings_has_universal_instructions():
     assert "instructions: houseInput.value" in body
     assert "Every agent sees this" in body
     assert "Save instructions" in body
+
+
+def test_group_chat_has_a_chooser_editor_and_working_chips():
+    assert "function newChatChooser()" in JS
+    assert "function groupEditor(group)" in JS
+    assert "function paintGroupWorking()" in JS
+    assert 'kind: "group"' in JS
+    assert "start_work" in JS
+    assert "work-cluster" in JS
+    assert "work-chip" in CSS
+    assert "avatar-stack" in CSS
+    assert 'title="New chat"' in HTML
+    assert '$("btn-new-agent").addEventListener("click", newChatChooser)' in JS
+    assert "they'll pick this up without stopping" in JS
+    diamond = _block(JS, "function blobBody", "function sleepWindow")
+    assert "41.4" in diamond
+    assert "11.3" in diamond
+    assert "function sleepWindow(agent)" in JS
+    assert "function isAsleep(agent, now)" in JS
+    assert 'return "sleeping";' in _block(JS, "function agentMood", "function blobMoodEyes")
+    assert "isAsleep(agent)" in _block(JS, "function agentMood", "function blobMoodEyes")
+    assert 'stack.dataset.count' in JS
+    assert ".avatar-stack[data-count=\"3\"]" in CSS
+    assert "animation: none" in _block(CSS, ".avatar-stack {", ".row-agent.named")
+    assert "sub-pill" in CSS
+    assert "function paintAgentName(node, agent)" in JS
+    assert "function addReaction(payload, at)" in JS
+    assert "react-chip" in CSS
+    assert 'case "message.reaction"' in JS
+    assert 'avatarNode(member, "tiny", "idle")' in JS
+    assert 'avatarNode(speaker, "tiny", "idle")' in JS
+    assert 'payload.name === "react"' in _block(JS, 'case "tool.done":', "case \"approval\":")
+    assert "target_id" in _block(JS, "function addReaction", "function paintGroupWorking")
+    assert "data-msg-id" in JS or "dataset.msgId" in JS
+    assert "position: absolute" in _block(CSS, ".react-bar {", ".react-chip {")
+    assert "margin-inline: auto" not in _block(CSS, ".transcript > * {", ".transcript > .thinking")
+
+
+def test_agent_markdown_renders_pipe_tables(tmp_path):
+    """Agent bubbles used to print | tables as paragraphs. GFM tables,
+    including blank lines between rows, have to become a real <table>."""
+    import json
+    import subprocess
+
+    body = _block(JS, "function markdown(source)", "function relativeTime")
+    assert "<table>" in body
+    assert "thead" in body
+    assert r"/^:?-{3,}:?$/" in body
+    assert 'class="md-table"' in body
+    assert ".md-table" in CSS
+    assert ".assistant th, .assistant td" in CSS
+
+    sample = (
+        "Known positions from the previous record\n"
+        "| Position | Entry | Quantity | Today |\n"
+        "\n"
+        "|---|---:|---:|---:|\n"
+        "\n"
+        "| NVIDIA | $221.84 | 2 | Not reliably verified |\n"
+        "\n"
+        "| SAAB B | 673.80 kr | 4 | Not reliably verified |\n"
+        "\n"
+        "| Tesla | — | — | $326.13, down 2.01% at 13:29 EDT |\n"
+    )
+    helpers = _block(JS, "function escapeHtml(text)", "function relativeTime")
+    script = (
+        helpers
+        + "\nconst html = markdown(" + json.dumps(sample) + ");\n"
+        + "if (!html.includes('<table>') || !html.includes('NVIDIA')) process.exit(1);\n"
+        + "if (html.includes('| NVIDIA |')) process.exit(2);\n"
+        + "if (!html.includes('text-align:right')) process.exit(3);\n"
+        + "if (!html.includes('SAAB B') || !html.includes('Tesla')) process.exit(4);\n"
+        + "process.stdout.write('ok');\n"
+    )
+    path = tmp_path / "md.js"
+    path.write_text(script, encoding="utf-8")
+    result = subprocess.run(
+        ["node", str(path)], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr or result.stdout
+    assert result.stdout == "ok"
+
+
+def test_homepage_has_a_wake_pc_button_for_an_offline_windows_box():
+    assert 'id="btn-wake-pc"' in HTML
+    assert "Wake PC" in HTML
+    assert "function paintWakeButton()" in JS
+    assert 'api("/api/wake"' in JS
+    assert "wake.available" in JS
+    assert "pc-asleep" in CSS
+    assert ".wake-pc" in CSS

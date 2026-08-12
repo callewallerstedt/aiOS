@@ -30,6 +30,8 @@ TURN_TIMEOUT = 900.0
 SCHEDULER_TICK = 20.0
 COMPACTION_IDLE_SECONDS = 60 * 60
 COMPACTION_INPUT_CHARS = 120_000
+GROUP_TAG_HOPS = 12
+GROUP_QUIET_TOOLS = {"start_work", "react"}
 
 
 class Runtime:
@@ -53,6 +55,12 @@ class Runtime:
         # Threads a client currently has open, so a reply the user is watching
         # does not also buzz their pocket.
         self._watching: dict[str, float] = {}
+        # (group_thread_id, member_agent_id) -> in-flight group reply
+        self._group_speaks: dict[tuple[str, str], asyncio.Task] = {}
+        # private_thread_id -> work that was started from a group chat
+        self._private_from_group: dict[str, dict] = {}
+        # group_thread_id -> tag-follow-up hops since the last user message
+        self._group_tag_hops: dict[str, int] = {}
 
     # ---------------- events ----------------
 
@@ -482,14 +490,40 @@ class Runtime:
 
     def stop_thread(self, thread_id: str) -> bool:
         self.cancel_event(thread_id).set()
+        stopped = False
         task = self._turn_tasks.get(thread_id)
         if task and not task.done():
-            return True
-        return False
+            stopped = True
+        for key, speak in list(self._group_speaks.items()):
+            if key[0] == thread_id and speak and not speak.done():
+                speak.cancel()
+                stopped = True
+        return stopped
 
     def busy(self, thread_id: str) -> bool:
         task = self._turn_tasks.get(thread_id)
-        return bool(task and not task.done())
+        if task and not task.done():
+            return True
+        if any(not speak.done() for (tid, _), speak in self._group_speaks.items()
+               if tid == thread_id):
+            return True
+        for private_id, origin in self._private_from_group.items():
+            if origin.get("group_thread_id") != thread_id:
+                continue
+            private = self._turn_tasks.get(private_id)
+            if private and not private.done():
+                return True
+        return False
+
+    def working_from_group(self, group_thread_id: str) -> list[dict]:
+        rows = []
+        for private_id, origin in self._private_from_group.items():
+            if origin.get("group_thread_id") != group_thread_id:
+                continue
+            private = self._turn_tasks.get(private_id)
+            if private and not private.done():
+                rows.append({**origin, "private_thread_id": private_id})
+        return rows
 
     async def send_message(self, thread_id: str, text: str,
                            attachments: list[dict] | None = None) -> dict:
@@ -503,6 +537,10 @@ class Runtime:
         await self.emit("message.user", {"id": message["id"], "text": text,
                                          "attachments": attachments or []},
                         thread_id=thread_id, agent_id=thread["agent_id"])
+        owner = store.get_agent(str(thread.get("agent_id") or ""))
+        if store.is_group(owner):
+            await self.run_group_round(thread_id, trigger="user")
+            return message
         if self.busy(thread_id):
             # Mid-run steering: the message is already in the transcript, so the
             # next model round picks it up on its own.
@@ -512,6 +550,339 @@ class Runtime:
             return message
         await self.run_turn(thread_id, trigger="user")
         return message
+
+    async def run_group_round(self, thread_id: str, *, trigger: str = "user") -> None:
+        """Fan the latest group message out to every member, in parallel.
+
+        Each agent decides whether to speak. In-flight speakers are not
+        cancelled — they finish, then pick up a newer user message the same
+        way a private chat queues a follow-up.
+        """
+        thread = store.get_thread(thread_id)
+        if not thread:
+            return
+        group = store.get_agent(str(thread.get("agent_id") or ""))
+        if not store.is_group(group):
+            return
+        members = agents_mod.group_members(group)
+        if not members:
+            await self.emit("thread.error", {"error": "this group has no members"},
+                            thread_id=thread_id, agent_id=group["id"])
+            return
+        store.touch_thread(thread_id, status="running")
+        await self.emit("thread.status", {"status": "running", "trigger": trigger},
+                        thread_id=thread_id, agent_id=group["id"])
+        if trigger == "user":
+            self._group_tag_hops[thread_id] = 0
+        await self.emit("group.considering", {
+            "agent_ids": [row["id"] for row in members],
+            "trigger": trigger,
+        }, thread_id=thread_id, agent_id=group["id"], persist=False)
+        for member in members:
+            self._spawn_group_member(thread_id, group, member)
+
+    def _spawn_group_member(self, thread_id: str, group: dict, member: dict) -> None:
+        key = (thread_id, str(member["id"]))
+        existing = self._group_speaks.get(key)
+        if existing and not existing.done():
+            return
+
+        async def runner() -> None:
+            started = time.time()
+            try:
+                await self._group_member_turn(thread_id, group, member)
+            except asyncio.CancelledError:
+                await self.emit("group.quiet", {"agent_id": member["id"], "reason": "stopped"},
+                                thread_id=thread_id, agent_id=member["id"], persist=False)
+                raise
+            except Exception as exc:
+                await self.emit("thread.error",
+                                {"error": f"{member.get('name')}: {type(exc).__name__}: {exc}"},
+                                thread_id=thread_id, agent_id=member["id"])
+            finally:
+                self._group_speaks.pop(key, None)
+                messages = store.list_messages(thread_id)
+                last = messages[-1] if messages else None
+                newer_user = (last and last["role"] == "user"
+                              and float(last.get("created_at") or 0) > started + 0.05)
+                tagged = self._tagged_since(thread_id, member, started)
+                if newer_user or tagged:
+                    self._spawn_group_member(thread_id, group, member)
+                elif not any(not task.done() for (tid, _), task in self._group_speaks.items()
+                             if tid == thread_id):
+                    if not self.working_from_group(thread_id):
+                        store.touch_thread(thread_id, status="idle")
+                        await self.emit("thread.status", {"status": "idle"},
+                                        thread_id=thread_id, agent_id=group["id"])
+                    await self.emit("group.round_done", {}, thread_id=thread_id,
+                                    agent_id=group["id"], persist=False)
+
+        self._group_speaks[key] = asyncio.create_task(runner())
+
+    def _group_transcript(self, thread_id: str) -> str:
+        names = {row["id"]: row["name"] for row in store.list_agents()}
+        lines = []
+        for row in store.list_messages(thread_id)[-60:]:
+            role = row.get("role")
+            meta = row.get("meta") or {}
+            content = str(row.get("content") or "").strip()
+            if role == "user":
+                lines.append(f"Calle: {content}")
+            elif role == "assistant":
+                speaker = names.get(str(meta.get("speaker_id") or ""), "Agent")
+                kind = str(meta.get("kind") or "")
+                if kind == "work_done":
+                    lines.append(f"[{speaker} finished private work: {content[:500]}]")
+                else:
+                    lines.append(f"{speaker}: {content}")
+            elif role == "reaction":
+                speaker = names.get(str(meta.get("speaker_id") or ""), "Agent")
+                lines.append(f"{speaker} reacted {content or meta.get('emoji') or '👍'}")
+            elif role == "tool_call" and str(meta.get("name") or "") == "start_work":
+                speaker = names.get(str(meta.get("speaker_id") or ""), "Agent")
+                lines.append(f"[{speaker} started private work]")
+        return "\n".join(lines) or "(empty group chat)"
+
+    def _is_silent_reply(self, text: str) -> bool:
+        compact = "".join(ch for ch in str(text or "").strip().upper() if ch.isalnum())
+        return compact in {"", "SILENT", "NOREPLY", "PASS", "QUIET"}
+
+    def _nudge_mentions(self, thread_id: str, group: dict, speaker: dict, text: str) -> None:
+        """Wake anyone this speaker just @tagged, until the hop cap."""
+        hops = int(self._group_tag_hops.get(thread_id) or 0)
+        members = agents_mod.group_members(group)
+        for member in agents_mod.mentions_in(text, members):
+            if str(member.get("id") or "") == str(speaker.get("id") or ""):
+                continue
+            if hops >= GROUP_TAG_HOPS:
+                return
+            hops += 1
+            self._group_tag_hops[thread_id] = hops
+            self._spawn_group_member(thread_id, group, member)
+
+    def _tagged_since(self, thread_id: str, member: dict, started: float) -> bool:
+        """True when someone else named this member after this turn began."""
+        if int(self._group_tag_hops.get(thread_id) or 0) >= GROUP_TAG_HOPS:
+            return False
+        member_id = str(member.get("id") or "")
+        for row in store.list_messages(thread_id):
+            if float(row.get("created_at") or 0) <= started + 0.05:
+                continue
+            if row.get("role") != "assistant":
+                continue
+            meta = row.get("meta") or {}
+            if str(meta.get("speaker_id") or "") == member_id:
+                continue
+            if agents_mod.mentions_in(str(row.get("content") or ""), [member]):
+                return True
+        return False
+
+    async def _group_member_turn(self, thread_id: str, group: dict, member: dict) -> None:
+        settings = config.load_settings()
+        cancel = self.cancel_event(thread_id)
+        members = agents_mod.group_members(group)
+        ctx = tools_mod.ToolContext(
+            agent=member, thread_id=thread_id, settings=settings,
+            emit=lambda kind, payload: self.emit(kind, payload, thread_id=thread_id,
+                                                 agent_id=member["id"]),
+            request_approval=lambda **kw: self.request_approval(thread_id, member["id"], **kw),
+            ask_user=lambda question, **kw: self.ask_user(thread_id, member["id"], question, **kw),
+            cancel=cancel, hub=self, source="group")
+        schemas = tools_mod.schemas(agents_mod.GROUP_TOOLS)
+        instructions = agents_mod.group_system_prompt(member, group, members, settings)
+        transcript = self._group_transcript(thread_id)
+        items = [
+            models.user_message(
+                "Recent group chat:\n" + transcript
+                + "\n\nReply as yourself. A room message is for you — speak or "
+                  "react. SILENT only if Calle named someone else and not you. "
+                  "If they asked for a reaction, call react and write nothing."
+            )
+        ]
+
+        spoke = False
+        for _round in range(8):
+            if cancel.is_set():
+                return
+            reply = await models.complete(
+                backend=str(member.get("backend") or ""),
+                model=str(member.get("model") or ""),
+                reasoning=str(member.get("reasoning") or "low"),
+                instructions=instructions, items=items, tools=schemas,
+                timeout=180.0, settings=settings)
+            text = str(reply.get("text") or "").strip()
+            calls = reply.get("tool_calls") or []
+            silent = self._is_silent_reply(text) and not calls
+            if silent:
+                await self.emit("group.quiet", {"agent_id": member["id"]},
+                                thread_id=thread_id, agent_id=member["id"], persist=False)
+                return
+            if text and not self._is_silent_reply(text):
+                message = store.add_message(thread_id, "assistant", text, {
+                    "speaker_id": member["id"],
+                    "speaker_name": member.get("name") or "",
+                    "backend": reply.get("backend"), "model": reply.get("model"),
+                    "usage": reply.get("usage") or {},
+                })
+                store.touch_thread(thread_id, preview=f"{member.get('name')}: {text}"[:280])
+                await self.emit("message.assistant", {
+                    "id": message["id"], "text": text,
+                    "speaker_id": member["id"],
+                    "speaker_name": member.get("name") or "",
+                    "usage": reply.get("usage") or {},
+                    "model": reply.get("model"), "backend": reply.get("backend"),
+                }, thread_id=thread_id, agent_id=member["id"])
+                spoke = True
+                self._nudge_mentions(thread_id, group, member, text)
+                if not calls:
+                    await self.notify(thread_id, group,
+                                      f"{member.get('name') or 'Agent'} in {group.get('name') or 'group'}",
+                                      text, tag=thread_id)
+            if not calls:
+                if not spoke and not text:
+                    await self.emit("group.quiet", {"agent_id": member["id"]},
+                                    thread_id=thread_id, agent_id=member["id"], persist=False)
+                return
+            for call in calls:
+                if cancel.is_set():
+                    return
+                await self._run_tool_call(thread_id, member, ctx, call)
+            items = [
+                models.user_message("Recent group chat:\n" + self._group_transcript(thread_id)
+                                    + "\n\nContinue as yourself. If you already "
+                                      "reacted or answered, stop. Do not narrate a reaction.")
+            ]
+            for row in store.list_messages(thread_id)[-12:]:
+                meta = row.get("meta") or {}
+                if row["role"] == "tool_call" and str(meta.get("speaker_id") or "") == member["id"]:
+                    items.append(models.tool_call(str(meta.get("call_id") or ""),
+                                                  str(meta.get("name") or ""),
+                                                  str(meta.get("arguments") or "{}")))
+                elif row["role"] == "tool_result" and str(meta.get("speaker_id") or "") == member["id"]:
+                    items.append(models.tool_result(str(meta.get("call_id") or ""),
+                                                    str(meta.get("output") or "")))
+
+    async def start_private_work(self, ctx: tools_mod.ToolContext, task: str) -> tools_mod.ToolResult:
+        """Move a group-chat task into that agent's private thread with Calle."""
+        agent = ctx.agent
+        group_thread = store.get_thread(ctx.thread_id) or {}
+        group = store.get_agent(str(group_thread.get("agent_id") or "")) or {}
+        private = store.latest_thread(str(agent["id"])) or store.create_thread(str(agent["id"]))
+        group_name = str(group.get("name") or "group")
+        brief = (
+            f"[From the group chat “{group_name}”]\n\n{task.strip()}\n\n"
+            "Calle asked this in the group. Do the work in this private thread. "
+            "Do not wait for extra confirmation. A short note will go back to the "
+            "group when you finish. If you are already working on something related, "
+            "fold this in rather than starting over."
+        )
+        existing = self._private_from_group.get(private["id"])
+        since = store.latest_message_sequence(private["id"]) + 1
+        if existing:
+            existing["jobs"] = int(existing.get("jobs") or 1) + 1
+            existing["task"] = task.strip()[:240]
+            existing["since_sequence"] = min(int(existing.get("since_sequence") or since), since)
+            existing["group_thread_id"] = ctx.thread_id
+            existing["group_id"] = str(group.get("id") or "")
+        else:
+            self._private_from_group[private["id"]] = {
+                "group_thread_id": ctx.thread_id,
+                "group_id": str(group.get("id") or ""),
+                "agent_id": str(agent["id"]),
+                "name": str(agent.get("name") or ""),
+                "task": task.strip()[:240],
+                "jobs": 1,
+                "since_sequence": since,
+            }
+        await self.emit("group.working", {
+            "agent_id": agent["id"],
+            "name": agent.get("name") or "",
+            "private_thread_id": private["id"],
+            "task": task.strip()[:120],
+        }, thread_id=ctx.thread_id, agent_id=agent["id"])
+        await self.send_message(private["id"], brief)
+        return tools_mod.ToolResult(
+            output=f"Work is running in your private chat ({private['id']}).",
+            card={"title": "working", "preview": task.strip()[:90],
+                  "meta": str(agent.get("name") or ""), "tone": "accent",
+                  "agent_id": agent["id"], "private_thread_id": private["id"]},
+        )
+
+    async def post_reaction(self, ctx: tools_mod.ToolContext, emoji: str) -> tools_mod.ToolResult:
+        """Drop a reaction chip on the latest user/assistant message."""
+        from .tools.group import normalize_react
+        chosen = normalize_react(emoji)
+        agent = ctx.agent
+        target_id = ""
+        for row in reversed(store.list_messages(ctx.thread_id)):
+            if row.get("role") not in {"user", "assistant"}:
+                continue
+            if str((row.get("meta") or {}).get("kind") or "") == "work_done":
+                continue
+            target_id = str(row.get("id") or "")
+            break
+        store.add_message(ctx.thread_id, "reaction", chosen, {
+            "speaker_id": agent["id"],
+            "speaker_name": agent.get("name") or "",
+            "emoji": chosen,
+            "target_id": target_id,
+        })
+        await self.emit("message.reaction", {
+            "emoji": chosen,
+            "text": chosen,
+            "speaker_id": agent["id"],
+            "speaker_name": agent.get("name") or "",
+            "target_id": target_id,
+        }, thread_id=ctx.thread_id, agent_id=agent["id"])
+        return tools_mod.ToolResult(output=f"reacted {chosen}")
+
+    async def _report_group_work(self, thread_id: str, agent: dict) -> None:
+        origin = self._private_from_group.get(thread_id)
+        if not origin:
+            return
+        if self.busy(thread_id):
+            return
+        messages = store.list_messages(thread_id)
+        since = int(origin.get("since_sequence") or 0)
+        after = [row for row in messages if int(row.get("sequence") or 0) >= since]
+        if not after or after[-1]["role"] == "user":
+            return
+        preview = ""
+        for row in reversed(after):
+            if row["role"] == "assistant" and str(row.get("content") or "").strip():
+                preview = str(row["content"]).strip()
+                break
+        if not preview:
+            return
+        if self._private_from_group.get(thread_id) is not origin:
+            return
+        self._private_from_group.pop(thread_id, None)
+        group_thread_id = str(origin.get("group_thread_id") or "")
+        if not group_thread_id:
+            return
+        message = store.add_message(group_thread_id, "assistant", preview[:500], {
+            "speaker_id": agent["id"],
+            "speaker_name": agent.get("name") or "",
+            "kind": "work_done",
+            "private_thread_id": thread_id,
+        })
+        store.touch_thread(group_thread_id,
+                           preview=f"{agent.get('name')}: {preview}"[:280])
+        await self.emit("message.assistant", {
+            "id": message["id"], "text": preview[:500],
+            "kind": "work_done",
+            "speaker_id": agent["id"],
+            "speaker_name": agent.get("name") or "",
+            "private_thread_id": thread_id,
+        }, thread_id=group_thread_id, agent_id=agent["id"])
+        await self.emit("group.idle", {
+            "agent_id": agent["id"],
+            "private_thread_id": thread_id,
+        }, thread_id=group_thread_id, agent_id=agent["id"])
+        if not self.busy(group_thread_id):
+            store.touch_thread(group_thread_id, status="idle")
+            await self.emit("thread.status", {"status": "idle"},
+                            thread_id=group_thread_id, agent_id=origin.get("group_id") or "")
 
     async def run_turn(self, thread_id: str, *, trigger: str = "user") -> None:
         if self.busy(thread_id):
@@ -526,6 +897,10 @@ class Runtime:
             return
         agent = store.get_agent(thread["agent_id"])
         if not agent:
+            return
+        if store.is_group(agent):
+            self._turn_tasks.pop(thread_id, None)
+            await self.run_group_round(thread_id, trigger=trigger)
             return
         settings = config.load_settings()
         cancel = self.cancel_event(thread_id)
@@ -576,6 +951,8 @@ class Runtime:
         messages = store.list_messages(thread_id)
         if messages and messages[-1]["role"] == "user" and not self.busy(thread_id):
             await self.run_turn(thread_id, trigger="queued")
+        else:
+            await self._report_group_work(thread_id, agent)
 
     async def _tool_rounds(self, thread_id: str, agent: dict, ctx: tools_mod.ToolContext,
                            schemas: list[dict], settings: dict,
@@ -650,9 +1027,13 @@ class Runtime:
             args = {}
 
         store.add_message(thread_id, "tool_call", "", {
-            "call_id": call_id, "name": name, "arguments": raw_args})
-        await self.emit("tool.start", {"call_id": call_id, "name": name, "arguments": args},
-                        thread_id=thread_id, agent_id=agent["id"])
+            "call_id": call_id, "name": name, "arguments": raw_args,
+            **({"speaker_id": agent["id"]} if getattr(ctx, "source", "") == "group" else {}),
+        })
+        quiet = getattr(ctx, "source", "") == "group" and name in GROUP_QUIET_TOOLS
+        if not quiet:
+            await self.emit("tool.start", {"call_id": call_id, "name": name, "arguments": args},
+                            thread_id=thread_id, agent_id=agent["id"])
 
         tool = tools_mod.get(name)
         image = ""
@@ -671,7 +1052,8 @@ class Runtime:
                     output = f"declined by Calle: {decision.get('note') or 'no reason given'}"
                     card = {"title": name, "preview": summary[:90], "meta": "declined",
                             "tone": "danger"}
-                    await self._finish_tool(thread_id, agent, call_id, name, output, card)
+                    await self._finish_tool(thread_id, agent, call_id, name, output, card,
+                                            source=getattr(ctx, "source", ""))
                     return
             try:
                 result = await tool.run(ctx, **args)
@@ -685,16 +1067,21 @@ class Runtime:
                 card["tone"] = "danger"
             image = str(result.image or "")
 
-        await self._finish_tool(thread_id, agent, call_id, name, output, card, image=image)
+        await self._finish_tool(thread_id, agent, call_id, name, output, card, image=image,
+                                source=getattr(ctx, "source", ""))
 
     async def _finish_tool(self, thread_id: str, agent: dict, call_id: str, name: str,
-                           output: str, card: dict, *, image: str = "") -> None:
+                           output: str, card: dict, *, image: str = "", source: str = "") -> None:
         meta = {"call_id": call_id, "name": name, "output": output, "card": card}
         if image:
             meta["image"] = image
+        if source == "group":
+            meta["speaker_id"] = agent["id"]
         store.add_message(thread_id, "tool_result", "", meta)
-        await self.emit("tool.done", {"call_id": call_id, "name": name, "card": card},
-                        thread_id=thread_id, agent_id=agent["id"])
+        quiet = source == "group" and name in GROUP_QUIET_TOOLS
+        if not quiet:
+            await self.emit("tool.done", {"call_id": call_id, "name": name, "card": card},
+                            thread_id=thread_id, agent_id=agent["id"])
 
 
 def build_items(thread_id: str) -> list[dict]:

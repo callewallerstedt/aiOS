@@ -43,6 +43,7 @@ class ToolContext:
     cancel: asyncio.Event
     hub: Any = None          # server hub, for talking to machines
     depth: int = 0           # subagent nesting, to stop runaway delegation
+    source: str = ""         # "group" when this turn is a group-chat reply
 
 
 @dataclass
@@ -92,7 +93,7 @@ def load_all() -> None:
     if _LOADED:
         return
     _LOADED = True
-    from . import (code, interaction, memory, operator,  # noqa: F401
+    from . import (code, group, interaction, memory, operator,  # noqa: F401
                    schedule, system, web)
 
 

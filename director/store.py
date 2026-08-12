@@ -190,7 +190,9 @@ def connect() -> sqlite3.Connection:
 ADDED_COLUMNS = {
     "agents": [("avatar", "TEXT NOT NULL DEFAULT ''"),
                ("auto_approve", "INTEGER NOT NULL DEFAULT 0"),
-               ("notify", "INTEGER NOT NULL DEFAULT 1")],
+               ("notify", "INTEGER NOT NULL DEFAULT 1"),
+               ("members", "TEXT NOT NULL DEFAULT '[]'"),
+               ("rules", "TEXT NOT NULL DEFAULT ''")],
     "threads": [("muted", "INTEGER NOT NULL DEFAULT 0"),
                 ("summary", "TEXT NOT NULL DEFAULT ''"),
                 ("compacted_through", "INTEGER NOT NULL DEFAULT 0"),
@@ -250,28 +252,41 @@ def _loads(raw: Any, fallback: Any) -> Any:
 
 # ---------------- agents ----------------
 
+def _decode_agent(row: dict) -> dict:
+    row["tools"] = _loads(row.get("tools"), [])
+    row["members"] = [str(item) for item in _loads(row.get("members"), []) if str(item).strip()]
+    row["rules"] = str(row.get("rules") or "")
+    row["auto_approve"] = int(row.get("auto_approve") or 0)
+    row["notify"] = int(row.get("notify") if row.get("notify") is not None else 1)
+    return row
+
+
+def is_group(agent: dict | None) -> bool:
+    return str((agent or {}).get("kind") or "") == "group"
+
+
 def create_agent(*, name: str, emoji: str = "", kind: str = "director",
                  subtitle: str = "", system_prompt: str = "", backend: str = "",
                  model: str = "", reasoning: str = "", tools: list[str] | None = None,
-                 sort: int = 0, agent_id: str = "", avatar: str = "") -> dict:
+                 sort: int = 0, agent_id: str = "", avatar: str = "",
+                 members: list[str] | None = None, rules: str = "") -> dict:
     now = time.time()
-    aid = agent_id or new_id("agt")
+    prefix = "grp" if kind == "group" else "agt"
+    aid = agent_id or new_id(prefix)
     _exec(
         "INSERT INTO agents (id, name, emoji, kind, subtitle, system_prompt, backend,"
-        " model, reasoning, tools, sort, archived, created_at, avatar)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?,?,0,?,?)",
+        " model, reasoning, tools, sort, archived, created_at, avatar, members, rules)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,0,?,?,?,?)",
         (aid, name, emoji, kind, subtitle, system_prompt, backend, model, reasoning,
-         json.dumps(list(tools or [])), sort, now, avatar),
+         json.dumps(list(tools or [])), sort, now, avatar,
+         json.dumps(list(members or [])), str(rules or "")),
     )
     return get_agent(aid) or {}
 
 
 def get_agent(agent_id: str) -> dict | None:
     row = _row("SELECT * FROM agents WHERE id = ?", (agent_id,))
-    if not row:
-        return None
-    row["tools"] = _loads(row.get("tools"), [])
-    return row
+    return _decode_agent(row) if row else None
 
 
 def list_agents(*, include_archived: bool = False) -> list[dict]:
@@ -279,21 +294,18 @@ def list_agents(*, include_archived: bool = False) -> list[dict]:
     if not include_archived:
         sql += " WHERE archived = 0"
     sql += " ORDER BY sort, created_at"
-    out = _rows(sql)
-    for row in out:
-        row["tools"] = _loads(row.get("tools"), [])
-    return out
+    return [_decode_agent(row) for row in _rows(sql)]
 
 
 def update_agent(agent_id: str, patch: dict) -> dict | None:
     allowed = {"name", "emoji", "kind", "subtitle", "system_prompt", "backend",
                "model", "reasoning", "tools", "sort", "archived", "avatar",
-               "auto_approve", "notify"}
+               "auto_approve", "notify", "members", "rules"}
     sets, params = [], []
     for key, value in (patch or {}).items():
         if key not in allowed:
             continue
-        if key == "tools":
+        if key in ("tools", "members"):
             value = json.dumps(list(value or []))
         if key in ("archived", "auto_approve", "notify"):
             value = 1 if value else 0

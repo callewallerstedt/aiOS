@@ -411,6 +411,10 @@ def test_house_instructions_reach_every_agent(director):
     assert "standing instructions for every agent" not in empty
     custom = director.create_agent(name="Shop", kind="custom", agent_id="agt_shop")
     assert "Always reply in Swedish" in agents.system_prompt(custom, settings)
+    members = [director.get_agent("agt_director"), director.get_agent("agt_operator")]
+    group_prompt = agents.group_system_prompt(
+        members[0], {"name": "Kitchen", "rules": ""}, members, settings)
+    assert "Always reply in Swedish" in group_prompt
     config.update_settings({"instructions": "Speak like a pirate."})
     loaded = agents.system_prompt(director.get_agent("agt_director"))
     assert "Speak like a pirate." in loaded
@@ -584,3 +588,347 @@ def test_ensure_running_starts_chrome_when_asked(monkeypatch):
     display_mod.reset_ready_cache()
     assert calls["chrome"] == 1
     assert calls["launch"] == 1
+
+
+def test_group_agents_store_members_and_rules(director):
+    from director import agents
+
+    agents.ensure_seeded()
+    group = director.create_agent(
+        name="Ops", kind="group",
+        members=["agt_coder", "agt_operator", "grp_nope"],
+        rules="Keep it short.")
+    assert group["id"].startswith("grp_")
+    assert director.is_group(group)
+    assert group["members"] == ["agt_coder", "agt_operator", "grp_nope"]
+    resolved = agents.resolve_member_ids(group["members"] + ["agt_coder", "missing"])
+    assert resolved == ["agt_coder", "agt_operator"]
+    prompt = agents.group_system_prompt(
+        director.get_agent("agt_coder"), group, agents.group_members(group), {})
+    assert "Keep it short." in prompt
+    assert "You are **Coder**" in prompt
+    assert "SILENT" in prompt
+    assert "start_work" in prompt
+    assert "`react`" in prompt or "react" in prompt
+    assert "@Coder" in prompt
+    assert "@Operator" in prompt
+
+
+def test_group_prompt_includes_private_thread_and_mentions(director):
+    from director import agents
+
+    agents.ensure_seeded()
+    private = director.latest_thread("agt_coder") or director.create_thread("agt_coder")
+    director.add_message(private["id"], "user", "Please tidy the login form.")
+    director.add_message(private["id"], "assistant", "I restyled the login form.")
+    group = director.create_agent(
+        name="Ops", kind="group", members=["agt_coder", "agt_operator"])
+    prompt = agents.group_system_prompt(
+        director.get_agent("agt_coder"), group, agents.group_members(group), {})
+    assert "restyled the login form" in prompt
+    assert "Please tidy the login form." in prompt
+    tagged = agents.mentions_in("@Operator take this", agents.group_members(group))
+    assert [row["id"] for row in tagged] == ["agt_operator"]
+    named = agents.mentions_in("yo Coder plan this with Operator", agents.group_members(group))
+    assert {row["id"] for row in named} == {"agt_coder", "agt_operator"}
+    assert agents.mentions_in("Codering around", agents.group_members(group)) == []
+
+
+def test_react_normalizes_heart_and_aliases():
+    from director.tools.group import normalize_react
+
+    assert normalize_react("❤️") == "❤️"
+    assert normalize_react("heart") == "❤️"
+    assert normalize_react("love") == "❤️"
+    assert normalize_react("+1") == "👍"
+
+
+def test_group_round_speaks_or_stays_quiet(director, monkeypatch):
+    import asyncio
+    import json
+
+    from director import agents, models, runtime
+
+    agents.ensure_seeded()
+    group = director.create_agent(
+        name="Ops", kind="group",
+        members=["agt_coder", "agt_operator"],
+        rules="Be brief.")
+    thread = director.create_thread(group["id"])
+    director.add_message(thread["id"], "user", "Coder, say hi. Operator stay quiet.")
+
+    async def fake_complete(**kwargs):
+        instructions = str(kwargs.get("instructions") or "")
+        tools = {item.get("name") for item in (kwargs.get("tools") or [])}
+        if "start_work" in tools and "You are **Coder**" in instructions:
+            items = kwargs.get("items") or []
+            blob = json.dumps(items)
+            if "Continue as yourself" in blob:
+                return {"text": "", "tool_calls": [], "usage": {},
+                        "backend": "openrouter", "model": "x"}
+            return {"text": "Hi — Coder here.", "tool_calls": [], "usage": {},
+                    "backend": "openrouter", "model": "x"}
+        if "start_work" in tools:
+            return {"text": "SILENT", "tool_calls": [], "usage": {},
+                    "backend": "openrouter", "model": "x"}
+        return {"text": "private done", "tool_calls": [], "usage": {},
+                "backend": "openrouter", "model": "x"}
+
+    monkeypatch.setattr(models, "complete", fake_complete)
+    hub = runtime.Runtime()
+
+    async def run():
+        await hub.run_group_round(thread["id"])
+        pending = [task for (tid, _), task in list(hub._group_speaks.items())
+                   if tid == thread["id"]]
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    asyncio.run(run())
+    rows = director.list_messages(thread["id"])
+    assistants = [row for row in rows if row["role"] == "assistant"]
+    assert len(assistants) == 1
+    assert assistants[0]["content"] == "Hi — Coder here."
+    assert assistants[0]["meta"]["speaker_id"] == "agt_coder"
+
+
+def test_group_start_work_runs_in_the_private_thread(director, monkeypatch):
+    import asyncio
+    import json
+
+    from director import agents, models, runtime
+
+    agents.ensure_seeded()
+    group = director.create_agent(
+        name="Ops", kind="group", members=["agt_coder", "agt_operator"])
+    group_thread = director.create_thread(group["id"])
+    private = director.latest_thread("agt_coder") or director.create_thread("agt_coder")
+    director.add_message(group_thread["id"], "user", "Coder, please fix the login bug.")
+
+    async def fake_complete(**kwargs):
+        instructions = str(kwargs.get("instructions") or "")
+        tools = {item.get("name") for item in (kwargs.get("tools") or [])}
+        if "start_work" in tools and "You are **Coder**" in instructions:
+            items = kwargs.get("items") or []
+            blob = json.dumps(items)
+            if "Continue as yourself" in blob:
+                return {"text": "", "tool_calls": [], "usage": {},
+                        "backend": "openrouter", "model": "x"}
+            return {
+                "text": "On it.",
+                "tool_calls": [{
+                    "call_id": "c1",
+                    "name": "start_work",
+                    "arguments": json.dumps({"task": "fix the login bug"}),
+                }],
+                "usage": {}, "backend": "openrouter", "model": "x",
+            }
+        if "start_work" in tools:
+            return {"text": "SILENT", "tool_calls": [], "usage": {},
+                    "backend": "openrouter", "model": "x"}
+        return {"text": "Fixed the login bug.", "tool_calls": [], "usage": {},
+                "backend": "openrouter", "model": "x"}
+
+    monkeypatch.setattr(models, "complete", fake_complete)
+    hub = runtime.Runtime()
+
+    async def run():
+        await hub.run_group_round(group_thread["id"])
+        for _ in range(80):
+            speaks = [task for task in hub._group_speaks.values() if not task.done()]
+            turns = [task for task in hub._turn_tasks.values() if not task.done()]
+            if not speaks and not turns:
+                break
+            await asyncio.sleep(0.02)
+        leftover = [task for task in list(hub._group_speaks.values()) + list(hub._turn_tasks.values())
+                    if not task.done()]
+        if leftover:
+            await asyncio.gather(*leftover, return_exceptions=True)
+
+    asyncio.run(run())
+    group_rows = director.list_messages(group_thread["id"])
+    spoken = [row for row in group_rows if row["role"] == "assistant"
+              and row["meta"].get("kind") != "work_done"]
+    assert any("On it" in row["content"] for row in spoken)
+    assert not any(row["role"] == "tool_call" and row["meta"].get("name") == "shell"
+                   for row in group_rows)
+    private_rows = director.list_messages(private["id"])
+    assert any("login bug" in row["content"] for row in private_rows if row["role"] == "user")
+    assert any("Fixed the login bug." in row["content"]
+               for row in private_rows if row["role"] == "assistant")
+    done = [row for row in group_rows if row["meta"].get("kind") == "work_done"]
+    assert done
+    assert done[0]["meta"]["speaker_id"] == "agt_coder"
+    assert not hub.working_from_group(group_thread["id"])
+
+
+def test_group_react_posts_a_reaction(director, monkeypatch):
+    import asyncio
+    import json
+
+    from director import agents, models, runtime
+
+    agents.ensure_seeded()
+    group = director.create_agent(
+        name="Ops", kind="group", members=["agt_coder", "agt_operator"])
+    thread = director.create_thread(group["id"])
+    director.add_message(thread["id"], "user", "sounds good?")
+
+    async def fake_complete(**kwargs):
+        instructions = str(kwargs.get("instructions") or "")
+        tools = {item.get("name") for item in (kwargs.get("tools") or [])}
+        items = kwargs.get("items") or []
+        blob = json.dumps(items)
+        if "start_work" in tools and "You are **Coder**" in instructions:
+            if "Continue as yourself" in blob:
+                return {"text": "", "tool_calls": [], "usage": {},
+                        "backend": "openrouter", "model": "x"}
+            return {
+                "text": "",
+                "tool_calls": [{
+                    "call_id": "r1",
+                    "name": "react",
+                    "arguments": json.dumps({"emoji": "👍"}),
+                }],
+                "usage": {}, "backend": "openrouter", "model": "x",
+            }
+        if "start_work" in tools:
+            return {"text": "SILENT", "tool_calls": [], "usage": {},
+                    "backend": "openrouter", "model": "x"}
+        return {"text": "private", "tool_calls": [], "usage": {},
+                "backend": "openrouter", "model": "x"}
+
+    monkeypatch.setattr(models, "complete", fake_complete)
+    hub = runtime.Runtime()
+
+    async def run():
+        await hub.run_group_round(thread["id"])
+        pending = [task for (tid, _), task in list(hub._group_speaks.items())
+                   if tid == thread["id"]]
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    asyncio.run(run())
+    rows = director.list_messages(thread["id"])
+    reacts = [row for row in rows if row["role"] == "reaction"]
+    assert len(reacts) == 1
+    assert reacts[0]["content"] == "👍"
+    assert reacts[0]["meta"]["speaker_id"] == "agt_coder"
+    assert reacts[0]["meta"].get("target_id")
+
+
+def test_group_tag_wakes_the_named_agent(director, monkeypatch):
+    import asyncio
+    import json
+
+    from director import agents, models, runtime
+
+    agents.ensure_seeded()
+    group = director.create_agent(
+        name="Ops", kind="group", members=["agt_coder", "agt_operator"])
+    thread = director.create_thread(group["id"])
+    director.add_message(thread["id"], "user", "Coder, plan this with Operator.")
+    operator_turns = {"n": 0}
+
+    async def fake_complete(**kwargs):
+        instructions = str(kwargs.get("instructions") or "")
+        tools = {item.get("name") for item in (kwargs.get("tools") or [])}
+        items = kwargs.get("items") or []
+        blob = json.dumps(items)
+        if "start_work" in tools and "You are **Coder**" in instructions:
+            if "Continue as yourself" in blob:
+                return {"text": "", "tool_calls": [], "usage": {},
+                        "backend": "openrouter", "model": "x"}
+            return {"text": "@Operator take the screen side.", "tool_calls": [],
+                    "usage": {}, "backend": "openrouter", "model": "x"}
+        if "start_work" in tools:
+            operator_turns["n"] += 1
+            if "@Operator take the screen side." in blob:
+                return {"text": "On it.", "tool_calls": [], "usage": {},
+                        "backend": "openrouter", "model": "x"}
+            return {"text": "SILENT", "tool_calls": [], "usage": {},
+                    "backend": "openrouter", "model": "x"}
+        return {"text": "private", "tool_calls": [], "usage": {},
+                "backend": "openrouter", "model": "x"}
+
+    monkeypatch.setattr(models, "complete", fake_complete)
+    hub = runtime.Runtime()
+
+    async def run():
+        await hub.run_group_round(thread["id"])
+        for _ in range(80):
+            pending = [task for task in hub._group_speaks.values() if not task.done()]
+            if not pending:
+                break
+            await asyncio.sleep(0.02)
+        leftover = [task for task in hub._group_speaks.values() if not task.done()]
+        assert leftover == []
+
+    asyncio.run(run())
+    rows = director.list_messages(thread["id"])
+    assistants = [row for row in rows if row["role"] == "assistant"]
+    texts = [row["content"] for row in assistants]
+    assert any("On it." in (text or "") for text in texts)
+    assert operator_turns["n"] >= 1
+
+
+def test_wake_packet_is_six_ff_then_the_mac_sixteen_times():
+    from director import wake
+
+    mac = wake.parse_mac("30-C5-99-D0-0D-4A")
+    packet = wake.magic_packet(mac)
+    assert packet[:6] == b"\xff" * 6
+    assert packet[6:12] == mac
+    assert len(packet) == 102
+    assert packet[6:] == mac * 16
+    assert wake.format_mac(mac) == "30:C5:99:D0:0D:4A"
+
+
+def test_wake_status_hides_the_button_while_windows_is_online(director):
+    from director import config, wake
+
+    assert config.DEFAULT_SETTINGS["wake"]["mac"] == "30:C5:99:D0:0D:4A"
+    asleep = wake.status(machines=[{
+        "name": "calle-windows", "platform": "windows", "online": False}])
+    assert asleep["available"] is True
+    assert asleep["online"] is False
+    awake = wake.status(machines=[{
+        "name": "calle-windows", "platform": "windows", "online": True}])
+    assert awake["online"] is True
+
+
+def test_wake_send_broadcasts_to_the_house_lan(director, monkeypatch):
+    from director import config, wake
+
+    sent = []
+
+    class FakeSock:
+        def setsockopt(self, *args):
+            return None
+        def settimeout(self, *args):
+            return None
+        def sendto(self, packet, addr):
+            sent.append((packet, addr))
+        def close(self):
+            return None
+
+    monkeypatch.setattr(wake.socket, "socket", lambda *a, **k: FakeSock())
+    result = wake.send(config.DEFAULT_SETTINGS)
+    assert result["ok"] is True
+    hosts = {addr[0] for _, addr in sent}
+    ports = {addr[1] for _, addr in sent}
+    assert "255.255.255.255" in hosts
+    assert "192.168.0.255" in hosts
+    assert "192.168.0.83" in hosts
+    assert ports == {9, 7}
+    assert sent[0][0][:6] == b"\xff" * 6
+
+
+def test_wake_remember_keeps_the_last_reported_nic(director):
+    from director import config, wake
+
+    wake.remember({"mac": "30-c5-99-d0-0d-4a", "ip": "192.168.0.99",
+                   "broadcast": "192.168.0.255"})
+    stored = config.load_settings(refresh=True)["wake"]
+    assert stored["mac"] == "30:C5:99:D0:0D:4A"
+    assert stored["ip"] == "192.168.0.99"

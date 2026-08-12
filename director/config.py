@@ -132,6 +132,14 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # Standing instructions every agent sees. Edited from the phone Settings
     # screen; empty means none.
     "instructions": "",
+    # Wake-on-LAN for calle-windows. The client refreshes ip/mac when it
+    # connects; these are the house Ethernet NIC so a cold box can still
+    # be woken before that hello arrives.
+    "wake": {
+        "mac": "30:C5:99:D0:0D:4A",
+        "broadcast": "192.168.0.255",
+        "ip": "192.168.0.83",
+    },
     "push": {
         "enabled": True,
         "public_key": "",
