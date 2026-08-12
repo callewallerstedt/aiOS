@@ -886,6 +886,52 @@ button { border: 0; background: none; cursor: pointer; }
 .avatar-actions { display: grid; gap: 6px; }
 .avatar-actions .btn { min-height: 34px; padding: 0 10px; }
 
+.blob-customize { display: grid; gap: 12px; }
+.blob-row { display: grid; gap: 6px; }
+.blob-label {
+  color: var(--ink-2);
+  font-size: 11.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+}
+.blob-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+}
+.blob-grid.eyes { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.blob-choice {
+  height: 52px;
+  padding: 4px;
+  border-radius: 12px;
+  background: var(--inset);
+  box-shadow: var(--shadow-hairline);
+}
+.blob-choice svg { width: 100%; height: 100%; display: block; }
+.blob-choice.on { box-shadow: 0 0 0 2px var(--accent); }
+.blob-swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+.blob-swatch {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  box-shadow: var(--shadow-hairline);
+}
+.blob-swatch.on { box-shadow: 0 0 0 2px var(--ink); }
+.blob-color {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
 /* a switch that reads as on or off at a glance */
 .line.toggle { align-items: center; }
 .switch {
