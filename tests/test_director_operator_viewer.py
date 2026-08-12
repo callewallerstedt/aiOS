@@ -1,4 +1,5 @@
 import asyncio
+from pathlib import Path
 
 
 def test_healthy_viewer_connection_does_not_probe_or_start_operator(monkeypatch):
@@ -71,3 +72,14 @@ def test_restart_viewer_preserves_display_and_browser(monkeypatch):
     assert commands == [[
         "systemctl", "--user", "restart", display.UNITS["vnc"],
     ]]
+
+
+def test_xvfb_is_owned_and_restarted_by_systemd():
+    root = Path(__file__).resolve().parents[1]
+    unit = (root / "director/deploy/aios-director-xvfb.service").read_text()
+    launcher = (root / "director/deploy/xvfb-start.sh").read_text()
+
+    assert "KillMode=control-group" in unit
+    assert "Restart=always" in unit
+    assert "exec tail --pid=" not in launcher
+    assert "exec /usr/bin/Xvfb" in launcher
