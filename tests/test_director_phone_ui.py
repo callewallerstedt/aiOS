@@ -52,11 +52,16 @@ def test_composer_reserves_layout_space_and_respects_the_safe_area():
     assert "position: relative" in block
     assert "flex: none" in block
     assert "max(12px, env(safe-area-inset-right, 0px))" in block
-    assert "max(12px, env(safe-area-inset-bottom, 0px))" in block
+    assert "var(--composer-bottom)" in block
     assert "max(12px, env(safe-area-inset-left, 0px))" in block
     assert "background: transparent" in block
     assert "bottom: 0;" not in block
     assert "position: absolute" not in block
+    assert "interactive-widget=resizes-visual" in HTML
+    assert "function syncKeyboardViewport()" in JS
+    assert 'style.setProperty("--visual-height"' in JS
+    assert 'keyboardOpen ? "8px"' in JS
+    assert 'visualViewport?.addEventListener("resize"' in JS
     transcript = _block(CSS, ".transcript {", ".transcript > *")
     assert "padding: 14px 12px" in transcript
     assert "safe-area-inset-bottom" not in transcript
@@ -93,6 +98,27 @@ def test_compacted_history_has_a_small_disclosure_control():
     history_css = _block(CSS, ".history-toggle {", ".history-toggle:hover")
     assert "position: sticky" in history_css
     assert "top: 0" in history_css
+
+
+def test_live_churning_grid_survives_into_real_thinking_and_history():
+    assert 'head.innerHTML = `${loadingPixels()}<span class="thinking-label">Thinking</span>' in JS
+    ensure = _block(JS, "function ensureThinking()", "function settleThinking()")
+    assert ensure.index("loadingPixels()") < ensure.index("settleWorking()")
+    settle = _block(JS, "function settleThinking()", "function toolCard")
+    assert 'querySelector(".loading-pixels")?.remove()' in settle
+    assert "addThinking(message.meta?.reasoning" in JS
+    assert '"reasoning": str(reply.get("reasoning")' in (
+        ROOT / "director" / "runtime.py").read_text(encoding="utf-8")
+
+
+def test_agent_relay_messages_are_attributed_and_destination_cards_open():
+    add_user = _block(JS, "function addUser", "function addAssistant")
+    assert 'extra.kind === "agent_message"' in add_user
+    assert "From ${sender.name" in add_user
+    tool = _block(JS, "function toolCard", "function finishTool")
+    assert "card?.agent_id" in tool
+    assert "openAgent(card.agent_id)" in tool
+    assert ".relay-message .relay-bubble" in CSS
 
 
 def test_user_bubbles_keep_the_selected_background_on_live_and_restored_messages():

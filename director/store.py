@@ -402,6 +402,24 @@ def list_messages(thread_id: str, *, limit: int = 5000,
     return rows
 
 
+def search_messages(query: str, *, limit: int = 20) -> list[dict]:
+    """Search readable transcript rows across live private and group chats."""
+    needle = f"%{str(query or '').strip().lower()}%"
+    rows = _rows(
+        "SELECT m.rowid AS sequence, m.*, a.id AS agent_id, "
+        "a.name AS agent_name, a.kind AS agent_kind "
+        "FROM messages m JOIN threads t ON t.id = m.thread_id "
+        "JOIN agents a ON a.id = t.agent_id "
+        "WHERE t.archived = 0 AND a.archived = 0 "
+        "AND m.role IN ('user','assistant','system') "
+        "AND lower(m.content) LIKE ? ORDER BY m.rowid DESC LIMIT ?",
+        (needle, max(1, int(limit or 20))),
+    )
+    for row in rows:
+        row["meta"] = _loads(row.get("meta"), {})
+    return rows
+
+
 def latest_message_sequence(thread_id: str) -> int:
     row = _row("SELECT COALESCE(MAX(rowid), 0) AS sequence FROM messages WHERE thread_id = ?",
                (thread_id,))

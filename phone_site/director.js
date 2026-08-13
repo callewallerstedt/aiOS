@@ -25,6 +25,7 @@ const state = {
   reconnect: 0,
   streaming: null,      // live assistant element
   thinking: null,       // live reasoning element
+  reasoningRendered: false,
   tools: new Map(),     // call_id -> element
   jobs: new Map(),      // job_id -> element
   jobMeta: new Map(),   // job_id -> { session_id, title, ... }
@@ -747,6 +748,24 @@ function stampIfNeeded(at) {
 
 function addUser(text, attachments, at, extra = {}) {
   stampIfNeeded(at);
+  if (extra.kind === "agent_message") {
+    const row = el("div", "row-agent relay-message");
+    if (extra.id) row.dataset.msgId = extra.id;
+    const sender = agentById(extra.sender_id) || {
+      id: extra.sender_id || "agent-relay",
+      name: extra.sender_name || "Agent",
+    };
+    row.append(avatarNode(sender, "tiny", "idle"));
+    const col = el("div", "speech");
+    col.append(el("div", "speaker-name", `From ${sender.name || "Agent"}`));
+    const node = el("div", "bubble-agent relay-bubble");
+    node.innerHTML = markdown(text);
+    col.append(node);
+    row.append(col);
+    appendTranscript(row);
+    scrollDown(true);
+    return node;
+  }
   const row = el("div", "row-user");
   if (extra.id) row.dataset.msgId = extra.id;
   const node = el("div", "bubble-user");
@@ -793,6 +812,21 @@ function addAssistant(text, at, extra = {}) {
   appendTranscript(row);
   scrollDown();
   return node;
+}
+
+function addThinking(reasoning, at) {
+  const text = String(reasoning || "").trim();
+  if (!text) return null;
+  stampIfNeeded(at);
+  const wrap = el("div", "thinking");
+  const head = el("button", "thinking-head");
+  head.type = "button";
+  head.innerHTML = `<span class="thinking-label">Thought</span>${svg('<path d="M6 9l6 6 6-6"/>', "thinking-chevron")}`;
+  const body = el("div", "thinking-body", text);
+  head.addEventListener("click", () => wrap.classList.toggle("expanded"));
+  wrap.append(head, body);
+  appendTranscript(wrap);
+  return wrap;
 }
 
 function addWorkDoneCard(extra, text, at) {
@@ -972,23 +1006,32 @@ function settleWorking() {
 }
 
 function ensureThinking() {
-  settleWorking();
   if (state.thinking) return state.thinking;
   const wrap = el("div", "thinking live");
   const head = el("button", "thinking-head");
-  head.innerHTML = `<span class="thinking-label">Thinking</span>${svg('<path d="M6 9l6 6 6-6"/>', "thinking-chevron")}`;
+  head.type = "button";
+  head.innerHTML = `${loadingPixels()}<span class="thinking-label">Thinking</span>${svg('<path d="M6 9l6 6 6-6"/>', "thinking-chevron")}`;
   const body = el("div", "thinking-body");
   head.addEventListener("click", () => wrap.classList.toggle("expanded"));
   wrap.append(head, body);
+  settleWorking();
   appendTranscript(wrap);
   state.thinking = wrap;
+  state.reasoningRendered = true;
   scrollDown();
   return wrap;
 }
 
 function settleThinking() {
   if (!state.thinking) return;
+  const body = state.thinking.querySelector(".thinking-body");
+  if (!String(body?.textContent || "").trim()) {
+    state.thinking.remove();
+    state.thinking = null;
+    return;
+  }
   state.thinking.classList.remove("live");
+  state.thinking.querySelector(".loading-pixels")?.remove();
   const label = state.thinking.querySelector(".thinking-label");
   if (label) label.textContent = "Thought";
   state.thinking = null;
@@ -1008,6 +1051,11 @@ function toolCard({ callId, name, args, card, running }) {
     svg('<path d="M6 9l6 6 6-6"/>', "card-chevron");
   const body = el("div", "tool-body", card?.body || "");
   chip.addEventListener("click", (event) => {
+    if (card?.agent_id) {
+      event.preventDefault();
+      openAgent(card.agent_id);
+      return;
+    }
     if (card?.job_id) {
       event.preventDefault();
       openCodeSession(card.job_id, card.session_id || "", card.preview || detail);
@@ -1018,6 +1066,7 @@ function toolCard({ callId, name, args, card, running }) {
   });
   wrap.append(chip, body);
   if (card?.tone) wrap.classList.add(card.tone);
+  if (card?.agent_id) wrap.classList.add("agent-link");
   if (card?.job_id) {
     wrap.classList.add("code-job");
     wrap.dataset.jobId = card.job_id;
@@ -1274,6 +1323,7 @@ function renderMessages(messages, thread = state.currentThread) {
   state.jobMeta.clear();
   state.streaming = null;
   state.thinking = null;
+  state.reasoningRendered = false;
   state.working = null;
   state.lastStampAt = 0;
   state.groupWorking = new Map();
@@ -1283,8 +1333,11 @@ function renderMessages(messages, thread = state.currentThread) {
 
   const pendingTools = new Map();
   for (const message of shown) {
-    if (message.role === "user") addUser(message.content, message.meta?.attachments, message.created_at, { id: message.id });
-    else if (message.role === "assistant") addAssistant(message.content, message.created_at, { ...(message.meta || {}), id: message.id });
+    if (message.role === "user") addUser(message.content, message.meta?.attachments, message.created_at, { ...(message.meta || {}), id: message.id });
+    else if (message.role === "assistant") {
+      addThinking(message.meta?.reasoning, message.created_at);
+      addAssistant(message.content, message.created_at, { ...(message.meta || {}), id: message.id });
+    }
     else if (message.role === "reaction") addReaction({
       emoji: message.content || message.meta?.emoji,
       speaker_id: message.meta?.speaker_id,
@@ -1341,7 +1394,8 @@ function handleEvent(event) {
       }
       if (!document.querySelector(`[data-user-pending="${payload.id}"]`)) {
         if (!state.lastSentText || state.lastSentText !== payload.text) {
-          addUser(payload.text, payload.attachments, event.created_at, { id: payload.id });
+          addUser(payload.text, payload.attachments, event.created_at,
+                  { ...payload, id: payload.id });
         }
       }
       state.lastSentText = "";
@@ -1369,8 +1423,11 @@ function handleEvent(event) {
       break;
     }
 
-    case "message.assistant":
+    case "message.assistant": {
+      const hadLiveThinking = state.reasoningRendered;
       settleThinking();
+      if (!hadLiveThinking && payload.reasoning) addThinking(payload.reasoning, event.created_at);
+      state.reasoningRendered = false;
       if (state.streaming) {
         state.streaming.classList.remove("streaming");
         state.streaming.innerHTML = markdown(payload.text || state.streaming.dataset.raw || "");
@@ -1380,6 +1437,7 @@ function handleEvent(event) {
       }
       scrollDown();
       break;
+    }
 
     case "message.reaction":
       addReaction(payload, event.created_at);
@@ -3165,6 +3223,21 @@ function autosize(node) {
   node.style.height = `${Math.min(node.scrollHeight, 148)}px`;
 }
 
+function syncKeyboardViewport() {
+  const viewport = window.visualViewport;
+  if (!viewport) return;
+  // iOS sometimes leaves the layout viewport at full screen while moving and
+  // shrinking the visual viewport for the keyboard. Pin the app to what is
+  // actually visible; the composer then stays exactly 8px above its bottom.
+  document.documentElement.style.setProperty("--visual-height", `${viewport.height}px`);
+  document.documentElement.style.setProperty("--visual-top", `${viewport.offsetTop}px`);
+  const keyboardOpen = window.innerHeight - viewport.height > 100;
+  document.documentElement.style.setProperty(
+    "--composer-bottom",
+    keyboardOpen ? "8px" : "max(8px, env(safe-area-inset-bottom, 0px))",
+  );
+}
+
 /* ---------------- desktop context pane ---------------- */
 
 async function refreshContext() {
@@ -3374,6 +3447,7 @@ function installEdgeSwipe() {
 /* ---------------- boot ---------------- */
 
 async function boot() {
+  syncKeyboardViewport();
   fillAvatar($("pair-mark"), { id: "agt_director" });
   fillAvatar($("device-blob"), { id: state.device || "device" });
   fillAvatar($("empty-blob"), { id: "agt_director" });
@@ -3498,6 +3572,8 @@ function wire() {
 
   const input = $("composer-input");
   input.addEventListener("input", () => autosize(input));
+  window.visualViewport?.addEventListener("resize", syncKeyboardViewport);
+  window.visualViewport?.addEventListener("scroll", syncKeyboardViewport);
   input.addEventListener("keydown", (event) => {
     if (event.key === "Enter" && !event.shiftKey && window.matchMedia("(min-width: 760px)").matches) {
       event.preventDefault();

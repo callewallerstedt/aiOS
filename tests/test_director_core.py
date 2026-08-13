@@ -83,6 +83,7 @@ def test_seeding_leaves_custom_agents_alone(director):
     mine = director.create_agent(name="Mine", kind="custom", tools=["recall"])
     agents.ensure_seeded()
     assert director.get_agent(mine["id"])["tools"] == ["recall"]
+    assert set(agents.COMMUNICATION_TOOLS) <= set(agents.tools_for(director.get_agent(mine["id"])))
 
 
 def test_the_schedule_tools_are_on_the_default_lineup():
@@ -99,6 +100,15 @@ def test_every_default_agent_has_web_search_and_fetch():
         names = spec["tools"]
         assert "web_search" in names, f"{spec['name']} cannot search the web"
         assert "web_fetch" in names, f"{spec['name']} cannot fetch a page"
+
+
+def test_default_agents_can_message_and_search_other_chats():
+    from director import agents
+
+    for spec in agents.DEFAULT_AGENTS:
+        assert "list_agents" in spec["tools"]
+        assert "message_agent" in spec["tools"]
+        assert "search_chats" in spec["tools"]
 
 
 def test_history_rebuilds_tool_calls(director):
@@ -870,6 +880,81 @@ def test_group_tag_wakes_the_named_agent(director, monkeypatch):
     texts = [row["content"] for row in assistants]
     assert any("On it." in (text or "") for text in texts)
     assert operator_turns["n"] >= 1
+
+
+def test_agent_message_is_visible_attributed_and_wakes_destination(director, monkeypatch):
+    import asyncio
+
+    from director import agents, runtime
+    from director.tools import ToolContext
+
+    agents.ensure_seeded()
+    source = director.get_agent("agt_director")
+    target = director.get_agent("agt_coder")
+    source_thread = director.latest_thread(source["id"]) or director.create_thread(source["id"])
+    target_thread = director.latest_thread(target["id"]) or director.create_thread(target["id"])
+    hub = runtime.Runtime()
+    started = []
+
+    async def start_turn(thread_id, trigger="user"):
+        started.append((thread_id, trigger))
+
+    monkeypatch.setattr(hub, "run_turn", start_turn)
+    monkeypatch.setattr(hub, "notify", lambda *args, **kwargs: asyncio.sleep(0))
+    ctx = ToolContext(
+        agent=source, thread_id=source_thread["id"], settings={},
+        emit=lambda *a, **k: asyncio.sleep(0),
+        request_approval=lambda **k: asyncio.sleep(0),
+        ask_user=lambda *a, **k: asyncio.sleep(0),
+        cancel=asyncio.Event(), hub=hub,
+    )
+    result = asyncio.run(hub.relay_agent_message(ctx, "Coder", "Please inspect the tests."))
+
+    assert result.error == ""
+    assert result.card["agent_id"] == target["id"]
+    row = director.list_messages(target_thread["id"])[-1]
+    assert row["role"] == "user"
+    assert row["content"] == "Please inspect the tests."
+    assert row["meta"]["kind"] == "agent_message"
+    assert row["meta"]["sender_id"] == source["id"]
+    assert started == [(target_thread["id"], "agent_message")]
+
+
+def test_agent_message_relay_has_a_hop_limit(director):
+    import asyncio
+
+    from director import agents, runtime
+    from director.tools import ToolContext
+
+    agents.ensure_seeded()
+    source = director.get_agent("agt_director")
+    thread = director.latest_thread(source["id"]) or director.create_thread(source["id"])
+    hub = runtime.Runtime()
+    ctx = ToolContext(
+        agent=source, thread_id=thread["id"], settings={},
+        emit=lambda *a, **k: asyncio.sleep(0),
+        request_approval=lambda **k: asyncio.sleep(0),
+        ask_user=lambda *a, **k: asyncio.sleep(0),
+        cancel=asyncio.Event(), hub=hub, depth=3,
+    )
+    result = asyncio.run(hub.relay_agent_message(ctx, "Coder", "loop"))
+    assert "relay limit" in result.error
+
+
+def test_search_messages_finds_private_and_group_chat_text(director):
+    from director import agents
+
+    agents.ensure_seeded()
+    private = director.latest_thread("agt_director") or director.create_thread("agt_director")
+    group = director.create_agent(
+        name="Ops room", kind="group", members=["agt_coder", "agt_operator"])
+    group_thread = director.create_thread(group["id"])
+    director.add_message(private["id"], "user", "purple lighthouse")
+    director.add_message(group_thread["id"], "assistant", "purple lighthouse found", {
+        "speaker_id": "agt_coder"})
+
+    rows = director.search_messages("PURPLE LIGHTHOUSE")
+    assert {row["agent_name"] for row in rows} >= {"Director", "Ops room"}
 
 
 def test_wake_packet_is_six_ff_then_the_mac_sixteen_times():

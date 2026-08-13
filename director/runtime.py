@@ -61,6 +61,9 @@ class Runtime:
         self._private_from_group: dict[str, dict] = {}
         # group_thread_id -> tag-follow-up hops since the last user message
         self._group_tag_hops: dict[str, int] = {}
+        # Relay hops carried by destination thread. Prevents two agents from
+        # automatically messaging each other forever.
+        self._relay_depth: dict[str, int] = {}
 
     # ---------------- events ----------------
 
@@ -561,6 +564,70 @@ class Runtime:
         await self.run_turn(thread_id, trigger="user")
         return message
 
+    async def relay_agent_message(self, ctx: tools_mod.ToolContext,
+                                  recipient: str, text: str) -> tools_mod.ToolResult:
+        """Deliver an attributed message into another chat and wake its owner."""
+        target_text = str(recipient or "").strip()
+        body = str(text or "").strip()
+        if not target_text or not body:
+            return tools_mod.ToolResult(error="recipient and message are required")
+        if len(body) > 8000:
+            return tools_mod.ToolResult(error="agent messages are limited to 8000 characters")
+
+        agents = store.list_agents()
+        lowered = target_text.casefold()
+        matches = [row for row in agents if str(row.get("id") or "").casefold() == lowered
+                   or str(row.get("name") or "").casefold() == lowered]
+        if not matches:
+            partial = [row for row in agents if lowered in str(row.get("name") or "").casefold()]
+            if len(partial) == 1:
+                matches = partial
+        if len(matches) != 1:
+            names = ", ".join(row.get("name") or row.get("id") for row in agents)
+            return tools_mod.ToolResult(
+                error=("recipient is ambiguous" if matches else "no such agent or group")
+                + f". Available: {names}")
+        target = matches[0]
+        source_id = str(ctx.agent.get("id") or "")
+        if str(target.get("id") or "") == source_id:
+            return tools_mod.ToolResult(error="that is this same chat")
+
+        source_depth = int(ctx.depth or self._relay_depth.get(ctx.thread_id, 0))
+        if source_depth >= 3:
+            return tools_mod.ToolResult(
+                error="agent relay limit reached; ask Calle before continuing the chain")
+        thread = store.latest_thread(target["id"]) or store.create_thread(target["id"])
+        meta = {
+            "kind": "agent_message",
+            "sender_id": source_id,
+            "sender_name": str(ctx.agent.get("name") or "Agent"),
+            "relay_depth": source_depth + 1,
+        }
+        message = store.add_message(thread["id"], "user", body, meta)
+        store.touch_thread(
+            thread["id"], preview=f"{meta['sender_name']}: {body}"[:280])
+        self._relay_depth[thread["id"]] = source_depth + 1
+        await self.emit("message.user", {
+            "id": message["id"], "text": body, "kind": "agent_message",
+            "sender_id": source_id, "sender_name": meta["sender_name"],
+        }, thread_id=thread["id"], agent_id=target["id"])
+        if store.is_group(target):
+            await self.run_group_round(thread["id"], trigger="agent_message")
+        elif not self.busy(thread["id"]):
+            await self.run_turn(thread["id"], trigger="agent_message")
+        else:
+            self._queued.setdefault(thread["id"], []).append(message)
+        await self.notify(
+            thread["id"], target,
+            f"{meta['sender_name']} messaged {target.get('name') or 'a chat'}",
+            body, tag=f"relay-{message['id']}")
+        return tools_mod.ToolResult(
+            output=f"delivered to {target.get('name')}; it is now in that chat",
+            card={"title": "message sent", "preview": target.get("name") or target["id"],
+                  "meta": "delivered", "tone": "accent", "body": body,
+                  "agent_id": target["id"]},
+        )
+
     async def run_group_round(self, thread_id: str, *, trigger: str = "user") -> None:
         """Fan the latest group message out to every member, in parallel.
 
@@ -582,7 +649,7 @@ class Runtime:
         store.touch_thread(thread_id, status="running")
         await self.emit("thread.status", {"status": "running", "trigger": trigger},
                         thread_id=thread_id, agent_id=group["id"])
-        if trigger == "user":
+        if trigger in {"user", "agent_message"}:
             self._group_tag_hops[thread_id] = 0
         await self.emit("group.considering", {
             "agent_ids": [row["id"] for row in members],
@@ -637,7 +704,10 @@ class Runtime:
             meta = row.get("meta") or {}
             content = str(row.get("content") or "").strip()
             if role == "user":
-                lines.append(f"Calle: {content}")
+                if meta.get("kind") == "agent_message":
+                    lines.append(f"{meta.get('sender_name') or 'Agent'} (relayed): {content}")
+                else:
+                    lines.append(f"Calle: {content}")
             elif role == "assistant":
                 speaker = names.get(str(meta.get("speaker_id") or ""), "Agent")
                 kind = str(meta.get("kind") or "")
@@ -908,6 +978,17 @@ class Runtime:
         agent = store.get_agent(thread["agent_id"])
         if not agent:
             return
+        source_note = ""
+        messages = store.list_messages(thread_id)
+        if messages:
+            latest = messages[-1]
+            latest_meta = latest.get("meta") or {}
+            if latest.get("role") == "user" and latest_meta.get("kind") == "agent_message":
+                source_note = (
+                    f"This turn was sent internally by {latest_meta.get('sender_name') or 'another agent'}. "
+                    "Treat it as an agent-to-agent request, not as words Calle typed. "
+                    "Reply in this destination chat so Calle can inspect the exchange."
+                )
         if store.is_group(agent):
             self._turn_tasks.pop(thread_id, None)
             await self.run_group_round(thread_id, trigger=trigger)
@@ -924,14 +1005,16 @@ class Runtime:
                                                  agent_id=agent["id"]),
             request_approval=lambda **kw: self.request_approval(thread_id, agent["id"], **kw),
             ask_user=lambda question, **kw: self.ask_user(thread_id, agent["id"], question, **kw),
-            cancel=cancel, hub=self)
+            cancel=cancel, hub=self,
+            depth=int(self._relay_depth.get(thread_id, 0)))
 
         allowed = agents_mod.tools_for(agent)
         schemas = tools_mod.schemas(allowed)
 
         try:
             await asyncio.wait_for(
-                self._tool_rounds(thread_id, agent, ctx, schemas, settings, cancel),
+                self._tool_rounds(thread_id, agent, ctx, schemas, settings, cancel,
+                                  source_note=source_note),
                 timeout=TURN_TIMEOUT)
         except asyncio.TimeoutError:
             await self.emit("thread.error", {"error": "the turn ran past its time limit"},
@@ -953,6 +1036,7 @@ class Runtime:
             self._turn_tasks.pop(thread_id, None)
             # "Approve everything" granted for one run expires with that run.
             self._run_approval.pop(agent["id"], None)
+            self._relay_depth.pop(thread_id, None)
 
         # Mid-run messages are already in the transcript, so the loop above
         # may have answered them. Only start a fresh turn if the last thing
@@ -966,12 +1050,14 @@ class Runtime:
 
     async def _tool_rounds(self, thread_id: str, agent: dict, ctx: tools_mod.ToolContext,
                            schemas: list[dict], settings: dict,
-                           cancel: asyncio.Event) -> None:
+                           cancel: asyncio.Event, *, source_note: str = "") -> None:
         for _round in range(MAX_TOOL_ROUNDS):
             if cancel.is_set():
                 return
             items = build_items(thread_id)
             instructions = agents_mod.system_prompt(agent, settings)
+            if source_note:
+                instructions += "\n\n" + source_note
 
             buffer: list[str] = []
 
@@ -1006,6 +1092,7 @@ class Runtime:
                     "id": message["id"], "text": text,
                     "usage": reply.get("usage") or {},
                     "model": reply.get("model"), "backend": reply.get("backend"),
+                    "reasoning": str(reply.get("reasoning") or "")[:4000],
                 }, thread_id=thread_id, agent_id=agent["id"])
                 if not calls:
                     # Only the finished answer buzzes the phone, not each step.
@@ -1023,6 +1110,7 @@ class Runtime:
                 if cancel.is_set():
                     return
                 await self._run_tool_call(thread_id, agent, ctx, call)
+
 
     async def _run_tool_call(self, thread_id: str, agent: dict,
                              ctx: tools_mod.ToolContext, call: dict) -> None:

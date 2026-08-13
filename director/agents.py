@@ -18,12 +18,15 @@ from .tools import memory as memory_tools
 
 # Tool groups, so an agent definition reads as intent rather than a list.
 CORE_TOOLS = ["ask_user", "confirm", "remember", "forget", "recall",
-              "schedule", "list_schedules", "cancel_schedule"]
+              "schedule", "list_schedules", "cancel_schedule",
+              "list_agents", "message_agent", "search_chats"]
+COMMUNICATION_TOOLS = ["list_agents", "message_agent", "search_chats"]
 WEB_TOOLS = ["web_fetch", "web_search"]
 BOX_TOOLS = ["shell", "read_file", "write_file", "list_dir", "processes"]
 OPERATOR_TOOLS = ["operator", "operator_screenshot", "operator_takeover", "handoff"]
 CODE_TOOLS = ["code_session", "code_status", "code_configs", "machines"]
-GROUP_TOOLS = ["start_work", "react", "recall", "remember"]
+GROUP_TOOLS = ["start_work", "react", "recall", "remember",
+               "list_agents", "message_agent", "search_chats"]
 
 DIRECTOR_TOOLS = CORE_TOOLS + WEB_TOOLS + BOX_TOOLS + OPERATOR_TOOLS + CODE_TOOLS
 
@@ -50,6 +53,10 @@ How to be useful here:
   and wait, and Calle can keep talking to you meanwhile.
 * Say what actually happened, including when it failed. Never claim a step
   succeeded that you did not see succeed.
+* You can coordinate directly with another agent or group using `message_agent`.
+  The message appears in that destination chat with your name on it and wakes
+  the destination. Use `list_agents` for exact names and `search_chats` when
+  Calle refers to a conversation without saying where it happened.
 
 Hard rules:
 
@@ -211,7 +218,11 @@ def ensure_seeded() -> list[dict]:
 
 def tools_for(agent: dict) -> list[str]:
     names = list(agent.get("tools") or [])
-    return names or DIRECTOR_TOOLS
+    # Communication is infrastructure, not a persona choice. Existing custom
+    # agents keep their curated tool sets but still gain the ability to find
+    # and talk to the rest of the house.
+    base = names or DIRECTOR_TOOLS
+    return list(dict.fromkeys(base + COMMUNICATION_TOOLS))
 
 
 def environment_block(settings: dict[str, Any] | None = None) -> str:
