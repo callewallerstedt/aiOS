@@ -2052,7 +2052,11 @@ async function stopTurn() {
   const stop = $("btn-stop");
   if (stop) stop.disabled = true;
   try {
-    await api(`/api/threads/${state.threadId}/stop`, { method: "POST" });
+    const result = await api(`/api/threads/${state.threadId}/stop`, { method: "POST" });
+    if (!result.hard_cancel) {
+      addStatus("Stop requested — Director needs the latest backend to force it.", true);
+      return;
+    }
     state.groupWorking.clear();
     paintGroupWorking();
     settleThinking();

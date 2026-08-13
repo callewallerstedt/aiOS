@@ -303,7 +303,7 @@ async def post_message(request: web.Request) -> web.Response:
 async def stop_thread(request: web.Request) -> web.Response:
     runtime = request.app["runtime"]
     stopped = runtime.stop_thread(request.match_info["thread_id"])
-    return json_response({"ok": True, "stopped": stopped})
+    return json_response({"ok": True, "stopped": stopped, "hard_cancel": True})
 
 
 @ROUTES.post("/api/threads/{thread_id}/clear")
