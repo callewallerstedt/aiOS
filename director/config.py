@@ -122,6 +122,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "agent_bubble": "#2b2c2f",
         "agent_text": "#f2f3f4",
     },
+    "phone": {
+        # Private chat that receives hold-to-talk recordings from the home page.
+        "pinned_agent_id": "agt_director",
+    },
     "safety": {
         # Tools that always raise an approval card before they run.
         "confirm_destructive": True,

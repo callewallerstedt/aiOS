@@ -47,6 +47,9 @@ const state = {
   groupWorking: new Map(),
   machines: [],
   wake: null,
+  pinnedAgentId: "agt_director",
+  homeRecording: false,
+  homePressed: false,
 };
 
 /* ---------------- storage ---------------- */
@@ -58,6 +61,7 @@ function load() {
     state.token = raw.token || "";
     state.device = raw.device || "";
     state.agentId = raw.agentId || "";
+    state.pinnedAgentId = raw.pinnedAgentId || "agt_director";
     if (raw.appearance) applyAppearance(raw.appearance);
   } catch {
     /* first run */
@@ -68,6 +72,7 @@ function save() {
   localStorage.setItem(STORE_KEY, JSON.stringify({
     url: state.url, token: state.token, device: state.device, agentId: state.agentId,
     appearance: state.appearance,
+    pinnedAgentId: state.pinnedAgentId,
   }));
 }
 
@@ -1698,8 +1703,10 @@ async function loadAgents() {
   state.agents = data.agents || [];
   state.machines = data.machines || [];
   state.wake = data.wake || null;
+  state.pinnedAgentId = data.phone?.pinned_agent_id || state.pinnedAgentId || "agt_director";
   renderAgents();
   paintWakeButton();
+  paintHomeVoice();
   setConnection(state.socket?.readyState === WebSocket.OPEN);
   prefetchThreads();
   return data;
@@ -1716,16 +1723,50 @@ function paintWakeButton() {
   // servers only returned online=false, which made a live PC show "Wake PC".
   // Wake is offered only when a current server explicitly confirms "off".
   const connected = wake.connected === true || windows?.online === true;
+  const isOn = connected || wake.power_state === "on" || wake.reachable === true;
+  // Power-off needs the outbound Windows bridge. Reachability alone proves
+  // the PC is on but cannot safely run shutdown.exe.
   const canPowerOff = connected && wake.can_power_off !== false;
   const canWake = !!wake.available && wake.power_state === "off";
-  const show = canWake || canPowerOff;
+  const show = canWake || isOn;
   btn.classList.toggle("hidden", !show);
-  btn.classList.toggle("is-on", canPowerOff);
+  btn.classList.toggle("is-on", isOn);
+  btn.classList.toggle("is-unavailable", isOn && !canPowerOff);
+  // Keep status visible when an older/unpaired desktop bridge is the problem,
+  // but do not let that stale state leave the control permanently disabled.
+  btn.disabled = false;
   screen?.classList.toggle("pc-asleep", canWake);
-  if (!btn.disabled) {
+  if (isOn && !canPowerOff) {
+    const message = "Windows PC is on · tap to reconnect power control";
     const label = btn.querySelector("span");
-    if (label) label.textContent = canPowerOff ? "Turn PC off" : "Wake PC";
+    if (label) label.textContent = message;
+    btn.title = message;
+    btn.setAttribute("aria-label", message);
+  } else {
+    const label = btn.querySelector("span");
+    const action = canPowerOff ? "Turn Windows PC off" : "Wake Windows PC";
+    if (label) label.textContent = action;
+    btn.title = action;
+    btn.setAttribute("aria-label", action);
   }
+}
+
+function pinnedAgent() {
+  return state.agents.find((agent) => agent.id === state.pinnedAgentId)
+    || state.agents.find((agent) => agent.id === "agt_director")
+    || state.agents.find((agent) => !isGroup(agent));
+}
+
+function paintHomeVoice(text = "") {
+  const label = $("home-voice-label");
+  const button = $("btn-home-voice");
+  if (!label || !button) return;
+  const agent = pinnedAgent();
+  const fallback = agent ? `Hold to talk to ${agent.name}` : "Choose a pinned agent in Settings";
+  label.textContent = text || fallback;
+  button.disabled = !agent;
+  button.title = fallback;
+  button.setAttribute("aria-label", fallback);
 }
 
 function markMachine(payload, online) {
@@ -1766,7 +1807,17 @@ async function refreshPowerStatus() {
 async function togglePcPower() {
   const btn = $("btn-wake-pc");
   if (!btn || btn.disabled) return;
-  const turningOff = !!state.wake?.online && !!state.wake?.can_power_off;
+  const knownOn = state.wake?.power_state === "on" || state.wake?.reachable === true;
+  let turningOff = !!state.wake?.online && !!state.wake?.can_power_off;
+  if (knownOn && !turningOff) {
+    await refreshPowerStatus();
+    if (!(state.wake?.online && state.wake?.can_power_off)) {
+      alert("The PC is on, but its Director bridge is not connected yet. "
+            + "aiOS will keep restarting that bridge automatically; try again in a moment.");
+      return;
+    }
+    turningOff = true;
+  }
   if (turningOff && !window.confirm(`Turn off ${state.wake?.name || "the PC"}?`)) return;
   const label = btn.querySelector("span");
   btn.disabled = true;
@@ -1774,7 +1825,10 @@ async function togglePcPower() {
   try {
     await api(turningOff ? "/api/power/off" : "/api/wake", { method: "POST" });
   } catch (error) {
-    if (label) label.textContent = String(error.message || error).slice(0, 40);
+    const message = String(error.message || error).slice(0, 120);
+    if (label) label.textContent = message;
+    btn.title = message;
+    alert(message);
     btn.disabled = false;
     return;
   }
@@ -1986,18 +2040,27 @@ async function stopTurn() {
 
 /* ---------------- voice ---------------- */
 
-async function toggleMic() {
-  const button = $("btn-mic");
-  if (state.recorder && state.recorder.state === "recording") {
-    state.recorder.stop();
-    return;
-  }
+async function transcribeAudio(blob) {
+  const form = new FormData();
+  form.append("audio", blob, "clip.webm");
+  const response = await fetch(apiUrl("/api/voice/transcribe"), {
+    method: "POST",
+    headers: { Authorization: `Bearer ${state.token}` },
+    body: form,
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
+  return String(data.text || "").trim();
+}
+
+async function beginRecording(button, onText, onError) {
+  if (state.recorder?.state === "recording") return false;
   let stream;
   try {
     stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-  } catch {
-    addStatus("Microphone permission was refused.", true);
-    return;
+  } catch (error) {
+    onError?.("Microphone permission was refused.");
+    return false;
   }
   const recorder = new MediaRecorder(stream);
   state.recorder = recorder;
@@ -2010,27 +2073,80 @@ async function toggleMic() {
     stream.getTracks().forEach((track) => track.stop());
     state.recorder = null;
     const blob = new Blob(state.chunks, { type: recorder.mimeType || "audio/webm" });
-    if (blob.size < 1200) return;
-    const form = new FormData();
-    form.append("audio", blob, "clip.webm");
+    if (blob.size < 1200) {
+      onError?.("Recording was too short.");
+      return;
+    }
     try {
-      const response = await fetch(apiUrl("/api/voice/transcribe"), {
-        method: "POST",
-        headers: { Authorization: `Bearer ${state.token}` },
-        body: form,
-      });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
-      const input = $("composer-input");
-      input.value = (input.value ? `${input.value} ` : "") + (data.text || "");
-      autosize(input);
-      if (data.text) await send();
+      button.classList.add("transcribing");
+      const text = await transcribeAudio(blob);
+      if (text) await onText(text);
     } catch (error) {
-      addStatus(String(error.message || error), true);
+      onError?.(String(error.message || error));
+    } finally {
+      button.classList.remove("transcribing");
     }
   });
   recorder.start();
   button.classList.add("recording");
+  return true;
+}
+
+function stopRecording() {
+  if (state.recorder?.state === "recording") state.recorder.stop();
+}
+
+async function toggleMic() {
+  const button = $("btn-mic");
+  if (state.recorder?.state === "recording") {
+    stopRecording();
+    return;
+  }
+  await beginRecording(button, async (text) => {
+    const input = $("composer-input");
+    input.value = (input.value ? `${input.value} ` : "") + text;
+    autosize(input);
+    await send();
+  }, (message) => addStatus(message, true));
+}
+
+async function startHomeVoice(event) {
+  event.preventDefault();
+  if (state.homeRecording || state.recorder?.state === "recording") return;
+  state.homePressed = true;
+  try { event.currentTarget.setPointerCapture(event.pointerId); } catch {}
+  const agent = pinnedAgent();
+  if (!agent) {
+    paintHomeVoice("Choose a pinned agent in Settings");
+    return;
+  }
+  const button = $("btn-home-voice");
+  state.homeRecording = await beginRecording(button, async (text) => {
+    paintHomeVoice(`Sending to ${agent.name}…`);
+    const threadData = await api(`/api/agents/${agent.id}/thread`);
+    await api(`/api/threads/${threadData.thread.id}/messages`, {
+      method: "POST", body: JSON.stringify({ text, attachments: [] }),
+    });
+    paintHomeVoice(`Sent to ${agent.name}`);
+    setTimeout(() => paintHomeVoice(), 1800);
+  }, (message) => {
+    paintHomeVoice(message);
+    setTimeout(() => paintHomeVoice(), 2600);
+  });
+  if (state.homeRecording && state.homePressed) {
+    paintHomeVoice(`Listening — release to send to ${agent.name}`);
+  } else if (state.homeRecording) {
+    stopHomeVoice();
+  }
+}
+
+function stopHomeVoice(event) {
+  event?.preventDefault();
+  state.homePressed = false;
+  if (!state.homeRecording) return;
+  state.homeRecording = false;
+  paintHomeVoice("Transcribing…");
+  stopRecording();
 }
 
 /* ---------------- notifications ---------------- */
@@ -2185,6 +2301,38 @@ async function openSettings() {
     return;
   }
   body.textContent = "";
+
+  const pinned = el("div", "group");
+  pinned.append(el("h3", null, "Homepage voice"));
+  pinned.append(el("div", "hint",
+    "Hold the microphone on the home page, speak, then release. The recording is "
+    + "transcribed and sent straight to this private agent chat."));
+  const pinnedField = el("div", "field");
+  pinnedField.append(el("label", null, "Pinned agent"));
+  const pinnedSelect = el("select");
+  for (const agent of state.agents.filter((row) => !isGroup(row))) {
+    const option = document.createElement("option");
+    option.value = agent.id;
+    option.textContent = agent.name;
+    pinnedSelect.append(option);
+  }
+  pinnedSelect.value = data.settings.phone?.pinned_agent_id
+    || state.pinnedAgentId || "agt_director";
+  pinnedField.append(pinnedSelect);
+  pinned.append(pinnedField);
+  const savePinned = el("button", "btn primary", "Save pinned agent");
+  savePinned.addEventListener("click", async () => {
+    await api("/api/settings", {
+      method: "PATCH",
+      body: JSON.stringify({ phone: { pinned_agent_id: pinnedSelect.value } }),
+    });
+    state.pinnedAgentId = pinnedSelect.value;
+    save();
+    paintHomeVoice();
+    savePinned.textContent = "Saved";
+  });
+  pinned.append(savePinned);
+  body.append(pinned);
 
   // notifications
   const alerts = el("div", "group");
@@ -2484,6 +2632,117 @@ function openSheet(title) {
   sheet.append(head, body);
   document.body.append(backdrop, sheet);
   return { body, dismiss, head };
+}
+
+function previewBlock(title, content, page) {
+  const block = el("section", "dev-preview-block");
+  block.dataset.previewPage = page;
+  block.append(el("h2", null, title));
+  const stage = el("div", "dev-stage");
+  stage.innerHTML = content;
+  block.append(stage);
+  return block;
+}
+
+function developerGallery() {
+  document.querySelector(".dev-gallery")?.remove();
+  const gallery = el("div", "dev-gallery");
+  const head = el("header", "dev-gallery-head");
+  const close = el("button", "icon-btn");
+  close.type = "button";
+  close.setAttribute("aria-label", "Close component gallery");
+  close.innerHTML = svg('<path d="M15 18l-6-6 6-6"/>');
+  close.addEventListener("click", () => gallery.remove());
+  const title = el("div", "title");
+  title.append(el("h1", null, "Director components"));
+  title.append(el("div", "sub", "Live UI states · development only"));
+  head.append(close, title);
+
+  const tabs = el("nav", "dev-tabs");
+  for (const [id, label] of [["all", "All"], ["chat", "Chat"],
+                             ["actions", "Actions"], ["operator", "Operator"]]) {
+    const tab = el("button", `dev-tab${id === "all" ? " on" : ""}`, label);
+    tab.type = "button";
+    tab.addEventListener("click", () => {
+      tabs.querySelectorAll(".dev-tab").forEach((node) => node.classList.toggle("on", node === tab));
+      gallery.querySelectorAll(".dev-preview-block").forEach((node) => {
+        node.classList.toggle("hidden", id !== "all" && node.dataset.previewPage !== id);
+      });
+    });
+    tabs.append(tab);
+  }
+
+  const body = el("main", "dev-gallery-body");
+  body.append(previewBlock("Churning / thinking",
+    `<div class="working-sentinel live">${loadingPixels()}<span class="working-label">Churning</span></div>`
+    + `<div class="thinking live expanded"><button class="thinking-head" type="button">`
+    + `${loadingPixels()}<span class="thinking-label">Thinking</span>`
+    + `${svg('<path d="M6 9l6 6 6-6"/>', "thinking-chevron")}</button>`
+    + `<div class="thinking-body">I’m checking the live machine state and comparing it with the latest bridge heartbeat.</div></div>`, "chat"));
+  body.append(previewBlock("Chat bubbles",
+    `<div class="row-agent"><div class="bubble-agent assistant"><p>Here’s the concise answer from your agent.</p></div></div>`
+    + `<div class="row-user"><div class="bubble-user">Can you check the latest version?</div></div>`
+    + `<div class="row-agent named"><div class="speech"><div class="speaker-name">Luna</div>`
+    + `<div class="bubble-agent assistant"><p>I found the issue and sent it to Director.</p></div></div></div>`
+    + `<div class="row-agent relay-message"><div class="speech"><div class="speaker-name">From Coder</div>`
+    + `<div class="bubble-agent relay-bubble">The tests are green.</div></div></div>`, "chat"));
+  body.append(previewBlock("Tool states",
+    `<div class="tool-card running"><button class="tool-chip"><span class="glyph">${loadingPixels()}</span>`
+    + `<span class="name">Searching chats</span><span class="detail">Windows power state</span><span class="meta">running</span></button></div>`
+    + `<div class="tool-card ok"><button class="tool-chip"><span class="glyph">✓</span>`
+    + `<span class="name">Sent to Luna</span><span class="detail">Please check this</span><span class="meta">done</span></button></div>`, "actions"));
+  body.append(previewBlock("Approval",
+    `<div class="action-card"><div class="kicker"><span>Needs your approval</span></div>`
+    + `<div class="summary">Turn off the Windows PC?</div><pre>shutdown.exe /s /t 5</pre>`
+    + `<div class="row"><button class="btn primary">Approve</button><button class="btn danger">Decline</button></div></div>`, "actions"));
+  body.append(previewBlock("Question",
+    `<div class="action-card"><div class="kicker"><span>Director is asking</span></div>`
+    + `<div class="summary">Which agent should receive the recording?</div>`
+    + `<div class="row"><button class="btn primary">Director</button><button class="btn">Luna</button></div></div>`, "actions"));
+  body.append(previewBlock("Operator screen",
+    `<div class="shot live dev-operator-shot"><div class="dev-screen-grid"><span></span><span></span><span></span></div>`
+    + `<div class="cap">Operator screen · live preview</div></div>`
+    + `<div class="action-card"><div class="kicker"><span>Your turn on the screen</span></div>`
+    + `<div class="summary">Director needs you to finish the sign-in.</div>`
+    + `<div class="row"><button class="btn primary">Open the screen</button><button class="btn">Done</button></div></div>`, "operator"));
+  body.append(previewBlock("PC power",
+    `<div class="dev-power-row"><button class="wake-pc" aria-label="Wake Windows PC">`
+    + `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3v8"/><path d="M8.5 6.2a7 7 0 1 0 7 0"/></svg><span>Wake PC</span></button>`
+    + `<button class="wake-pc is-on" aria-label="Turn Windows PC off"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3v8"/><path d="M8.5 6.2a7 7 0 1 0 7 0"/></svg><span>Turn PC off</span></button>`
+    + `<small>off / on</small></div>`, "actions"));
+
+  gallery.append(head, tabs, body);
+  document.body.append(gallery);
+}
+
+function openDeveloperMenu() {
+  const { body, dismiss } = openSheet("Developer");
+  const group = el("div", "group");
+  group.append(el("div", "hint", "Preview Director’s real interface states without waiting for an agent run."));
+  const components = el("button", "btn primary", "Open component gallery");
+  components.addEventListener("click", () => { dismiss(); developerGallery(); });
+  group.append(components);
+  const diagnostics = el("div", "line");
+  diagnostics.append(el("span", null, "Schedule timezone"));
+  diagnostics.append(el("span", "v", "Europe/Stockholm"));
+  group.append(diagnostics);
+  body.append(group);
+}
+
+function installDirectorDoubleTap() {
+  const logo = $("director-logo");
+  if (!logo) return;
+  let lastTap = 0;
+  logo.addEventListener("click", (event) => {
+    const now = performance.now();
+    if (now - lastTap < 420) {
+      event.preventDefault();
+      lastTap = 0;
+      openDeveloperMenu();
+    } else {
+      lastTap = now;
+    }
+  });
 }
 
 function field(label, node) {
@@ -2974,6 +3233,17 @@ function chatMenu() {
      () => { dismiss(); groupChat ? groupEditor(agent) : agentEditor(agent); }],
   ];
   if (!groupChat) {
+    options.push([agent.id === state.pinnedAgentId
+      ? "Pinned for homepage voice"
+      : "Pin for homepage voice", async () => {
+        state.pinnedAgentId = agent.id;
+        save();
+        paintHomeVoice();
+        await api("/api/settings", {
+          method: "PATCH", body: JSON.stringify({ phone: { pinned_agent_id: agent.id } }),
+        });
+        dismiss();
+      }]);
     options.push(["Routines", () => { dismiss(); routinesSheet(agent); }]);
     options.push(["Open the operator screen", () => { dismiss(); openTakeover(); }]);
   }
@@ -3451,6 +3721,10 @@ async function boot() {
   fillAvatar($("pair-mark"), { id: "agt_director" });
   fillAvatar($("device-blob"), { id: state.device || "device" });
   fillAvatar($("empty-blob"), { id: "agt_director" });
+  if (["localhost", "127.0.0.1"].includes(location.hostname)
+      && new URLSearchParams(location.search).get("components") === "1") {
+    developerGallery();
+  }
   if ($("pair-name") && !$("pair-name").value) {
     $("pair-name").placeholder = isWide() ? "Computer" : "iPhone";
   }
@@ -3510,6 +3784,12 @@ function wire() {
   $("btn-settings").addEventListener("click", openSettings);
   $("btn-settings-mobile")?.addEventListener("click", openSettings);
   $("btn-wake-pc")?.addEventListener("click", togglePcPower);
+  installDirectorDoubleTap();
+  const homeVoice = $("btn-home-voice");
+  homeVoice?.addEventListener("pointerdown", startHomeVoice);
+  homeVoice?.addEventListener("pointerup", stopHomeVoice);
+  homeVoice?.addEventListener("pointercancel", stopHomeVoice);
+  homeVoice?.addEventListener("contextmenu", (event) => event.preventDefault());
   $("btn-new-agent").addEventListener("click", newChatChooser);
   $("btn-search")?.addEventListener("click", () => {
     const box = $("sidebar-search");

@@ -404,3 +404,12 @@ def test_windows_power_off_is_scheduled_after_the_reply(monkeypatch):
     assert result["ok"] is True
     assert result["delay"] == 5
     assert seen[0][0][:4] == ("shutdown.exe", "/s", "/t", "5")
+
+
+def test_director_bridge_heartbeat_touches_its_watchdog_file(tmp_path, monkeypatch):
+    import director_client
+
+    marker = tmp_path / "heartbeat"
+    monkeypatch.setattr(director_client, "HEARTBEAT_PATH", marker)
+    director_client.heartbeat()
+    assert marker.is_file()

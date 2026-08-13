@@ -27,6 +27,7 @@ Configuration lives in aios_director_client.json next to this file:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import pathlib
@@ -48,6 +49,7 @@ except ImportError:  # pragma: no cover
 ROOT = pathlib.Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "aios_director_client.json"
 LOG_PATH = ROOT / ".aios-director-client.log"
+HEARTBEAT_PATH = ROOT / ".aios-director-client-heartbeat"
 
 RECONNECT_MIN = 2.0
 RECONNECT_MAX = 60.0
@@ -145,6 +147,13 @@ def log(message: str) -> None:
     try:
         with LOG_PATH.open("a", encoding="utf-8") as handle:
             handle.write(line + "\n")
+    except OSError:
+        pass
+
+
+def heartbeat() -> None:
+    try:
+        HEARTBEAT_PATH.touch()
     except OSError:
         pass
 
@@ -465,6 +474,7 @@ class DirectorClient:
                                           heartbeat=30.0) as socket:
                 self.socket = socket
                 log(f"connected to {self.url} as {self.name}")
+                heartbeat()
                 hello = lan_identity()
                 hello["type"] = "hello"
                 hello["name"] = self.name
@@ -474,17 +484,29 @@ class DirectorClient:
                     log(f"lan {hello.get('ip', '?')} {hello.get('mac', '?')}")
                 except Exception as exc:
                     log(f"hello failed: {type(exc).__name__}: {exc}")
-                async for message in socket:
-                    if message.type != aiohttp.WSMsgType.TEXT:
-                        continue
-                    try:
-                        payload = json.loads(message.data)
-                    except json.JSONDecodeError:
-                        continue
-                    if payload.get("type") == "call":
-                        asyncio.create_task(self.handle_call(payload))
+                pulse = asyncio.create_task(self._heartbeat_loop(socket))
+                try:
+                    async for message in socket:
+                        heartbeat()
+                        if message.type != aiohttp.WSMsgType.TEXT:
+                            continue
+                        try:
+                            payload = json.loads(message.data)
+                        except json.JSONDecodeError:
+                            continue
+                        if payload.get("type") == "call":
+                            asyncio.create_task(self.handle_call(payload))
+                finally:
+                    pulse.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await pulse
         self.socket = None
         log("socket closed")
+
+    async def _heartbeat_loop(self, socket) -> None:
+        while not socket.closed:
+            heartbeat()
+            await asyncio.sleep(30)
 
     async def reply(self, call_id: str, result: dict) -> None:
         if self.socket is None or self.socket.closed:

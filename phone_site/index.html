@@ -59,12 +59,22 @@
     <section id="screen-agents" class="screen hidden">
       <header class="topbar">
         <div class="brand-row">
-          <h1 class="brand-word">Director</h1>
+          <button class="brand-word" id="director-logo" type="button"
+                  aria-label="Director">Director</button>
           <span class="conn-dot" data-conn="off" aria-label="Offline"></span>
         </div>
         <button class="icon-btn" id="btn-search" aria-label="Search" title="Search">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
                stroke-linecap="round"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></svg>
+        </button>
+        <button class="wake-pc hidden" id="btn-wake-pc" type="button"
+                aria-label="Windows PC power" title="Windows PC power">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+               stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 3v8"/>
+            <path d="M8.5 6.2a7 7 0 1 0 7 0"/>
+          </svg>
+          <span>Wake PC</span>
         </button>
         <button class="icon-btn" id="btn-new-agent" aria-label="New chat" title="New chat">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
@@ -84,14 +94,17 @@
         <input id="agent-search" type="search" placeholder="Search" autocomplete="off" />
       </div>
       <div class="agent-list" id="agent-list"></div>
-      <button class="wake-pc hidden" id="btn-wake-pc" type="button">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
-             stroke-linecap="round" stroke-linejoin="round">
-          <path d="M12 3v8"/>
-          <path d="M8.5 6.2a7 7 0 1 0 7 0"/>
-        </svg>
-        <span>Wake PC</span>
-      </button>
+      <div class="home-voice-wrap" id="home-voice-wrap">
+        <button class="home-voice" id="btn-home-voice" type="button"
+                aria-label="Hold to talk" title="Hold to talk">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+               stroke-linecap="round">
+            <rect x="9" y="2.5" width="6" height="11" rx="3" />
+            <path d="M5 11a7 7 0 0 0 14 0M12 18v3.5" />
+          </svg>
+        </button>
+        <span id="home-voice-label">Hold to talk to Director</span>
+      </div>
       <footer class="sidebar-foot">
         <button class="foot-btn" id="btn-settings" type="button">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"

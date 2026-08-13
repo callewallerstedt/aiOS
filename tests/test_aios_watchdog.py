@@ -31,6 +31,15 @@ class WatchdogTests(unittest.TestCase):
             with mock.patch.object(aios_watchdog, "CONFIG_PATH", path):
                 self.assertEqual(aios_watchdog.load_config(), {})
 
+    def test_director_enabled_requires_a_complete_client_config(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "aios_director_client.json"
+            with mock.patch.object(aios_watchdog, "BASE_DIR", Path(folder)):
+                self.assertFalse(aios_watchdog.director_enabled())
+                path.write_text(json.dumps({"url": "https://director", "token": "secret"}),
+                                encoding="utf-8")
+                self.assertTrue(aios_watchdog.director_enabled())
+
 
 if __name__ == "__main__":
     unittest.main()

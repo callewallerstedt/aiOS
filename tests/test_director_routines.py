@@ -4,6 +4,8 @@ The schedule maths is the part worth being strict about: a wrong `next_run`
 either fires a reminder at the wrong time or, worse, loops it forever.
 """
 import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -65,7 +67,7 @@ def test_daily_next_run_is_always_in_the_future():
         when = routines.next_run(schedule, after=moment)
         assert when > moment
         assert when - moment <= 86400 + 3600      # never further than a day out
-        assert time.localtime(when).tm_hour == 8
+        assert datetime.fromtimestamp(when, ZoneInfo("Europe/Stockholm")).hour == 8
 
 
 def test_weekly_lands_on_the_right_weekday():
@@ -73,8 +75,9 @@ def test_weekly_lands_on_the_right_weekday():
 
     schedule = routines.normalize({"kind": "weekly", "time": "17:00", "weekday": 4})
     when = routines.next_run(schedule)
-    assert time.localtime(when).tm_wday == 4
-    assert time.localtime(when).tm_hour == 17
+    local = datetime.fromtimestamp(when, ZoneInfo("Europe/Stockholm"))
+    assert local.weekday() == 4
+    assert local.hour == 17
     assert when > time.time()
 
 
@@ -85,8 +88,21 @@ def test_weekdays_never_lands_on_a_weekend():
     moment = time.time()
     for _ in range(10):
         when = routines.next_run(schedule, after=moment)
-        assert time.localtime(when).tm_wday <= 4
+        assert datetime.fromtimestamp(when, ZoneInfo("Europe/Stockholm")).weekday() <= 4
         moment = when
+
+
+def test_wall_clock_schedules_ignore_the_server_timezone(monkeypatch):
+    from director import routines
+
+    # 06:15 UTC is 08:15 in Stockholm during summer. A daily 09:00 job must
+    # therefore be 45 minutes away even if the host process itself uses UTC.
+    moment = datetime(2026, 8, 13, 6, 15, tzinfo=ZoneInfo("UTC")).timestamp()
+    monkeypatch.setenv("TZ", "UTC")
+    when = routines.next_run({"kind": "daily", "time": "09:00"}, after=moment)
+    local = datetime.fromtimestamp(when, ZoneInfo("Europe/Stockholm"))
+    assert (local.hour, local.minute) == (9, 0)
+    assert when - moment == 45 * 60
 
 
 def test_interval_next_run_is_one_interval_out():

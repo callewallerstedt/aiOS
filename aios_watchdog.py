@@ -18,6 +18,7 @@ BASE_DIR = Path(__file__).resolve().parent
 HELPER_HEARTBEAT = BASE_DIR / ".aios-helper-heartbeat"
 AHK_HEARTBEAT = BASE_DIR / ".aios-ahk-heartbeat"
 RELAY_HEARTBEAT = BASE_DIR / ".aios-phone-relay-heartbeat"
+DIRECTOR_HEARTBEAT = BASE_DIR / ".aios-director-client-heartbeat"
 HEALTH_PATH = BASE_DIR / ".aios-health.json"
 UPDATE_HEALTH_PATH = BASE_DIR / ".aios-update-health.json"
 UPDATE_REQUEST_PATH = BASE_DIR / ".aios-update-request"
@@ -29,6 +30,7 @@ CHECK_INTERVAL = 10
 HELPER_TIMEOUT = 40
 AHK_TIMEOUT = 35
 RELAY_TIMEOUT = 90
+DIRECTOR_TIMEOUT = 90
 AUTO_UPDATE_INTERVAL = 60
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 DETACHED_PROCESS = 0x00000008 if os.name == "nt" else 0
@@ -81,6 +83,14 @@ def load_config() -> dict:
 def phone_enabled(config: dict) -> bool:
     relay = config.get("phone_relay") if isinstance(config, dict) else {}
     return bool(isinstance(relay, dict) and relay.get("enabled") and relay.get("machine_token"))
+
+
+def director_enabled() -> bool:
+    try:
+        data = json.loads((BASE_DIR / "aios_director_client.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return bool(str(data.get("url") or "").strip() and str(data.get("token") or "").strip())
 
 
 def find_pythonw() -> str:
@@ -260,11 +270,13 @@ def run() -> None:
     pythonw = find_pythonw()
     helper_grace_until = 0.0
     bridge_grace_until = 0.0
+    director_grace_until = 0.0
     next_update_check = time.time() + 12
     log("watchdog started")
     while True:
         now = time.time()
-        status = {"helper": "healthy", "hotkeys": "healthy", "phone": "not paired"}
+        status = {"helper": "healthy", "hotkeys": "healthy", "phone": "not paired",
+                  "director": "not paired"}
 
         updating = (BASE_DIR / ".aios_update_staging").exists()
         if not is_fresh(HELPER_HEARTBEAT, HELPER_TIMEOUT, now) and now >= helper_grace_until:
@@ -297,6 +309,15 @@ def run() -> None:
                 start_phone_bridge()
                 bridge_grace_until = now + 45
                 log("phone bridge recovery started")
+
+        if director_enabled():
+            director_ok = is_fresh(DIRECTOR_HEARTBEAT, DIRECTOR_TIMEOUT, now)
+            status["director"] = "healthy" if director_ok else "restarting"
+            if not director_ok and now >= director_grace_until:
+                stop_python_script("director_client.py")
+                spawn([pythonw, str(BASE_DIR / "director_client.py")])
+                director_grace_until = now + 45
+                log("Director Windows bridge restarted")
 
         requested = UPDATE_REQUEST_PATH.exists()
         if auto_update_enabled(config) and (requested or now >= next_update_check):

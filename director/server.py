@@ -170,6 +170,8 @@ async def state(request: web.Request) -> web.Response:
         "wake": await wake.status_with_probe(machines=machines, settings=settings),
         "cursor": store.latest_event_id(),
         "defaults": settings.get("defaults", {}),
+        "phone": settings.get("phone", {}),
+        "timezone": routines_mod.TIMEZONE_NAME,
         "operator": await display_mod.status(settings),
         "pending_approvals": store.list_approvals(status="pending"),
     })
@@ -926,10 +928,11 @@ async def _startup(app: web.Application) -> None:
         code = auth.new_pairing_code()
         print(f"[director] no devices paired yet — pairing code: {code['code']} "
               f"(valid {int(auth.CODE_TTL / 60)} minutes)", flush=True)
+    _realign_wall_clock_routines()
+    _catch_up_routines()
     app["runtime"].start_scheduler()
     if push.AVAILABLE:
         push.ensure_keys(settings)
-    _catch_up_routines()
     try:
         # Keep the viewer infrastructure warm. Chrome belongs to operator runs
         # and may already be in the middle of an action.
@@ -954,6 +957,21 @@ def _catch_up_routines() -> None:
         except routines_mod.ScheduleError:
             continue
         if now - row["next_run"] > 3600:
+            store.update_routine(row["id"], {"next_run": following})
+
+
+def _realign_wall_clock_routines() -> None:
+    """Migrate stored host-local slots to explicit Swedish wall-clock slots."""
+    now = time.time()
+    for row in store.list_routines(include_disabled=False):
+        if str((row.get("schedule") or {}).get("kind") or "") not in {
+                "daily", "weekdays", "weekly"}:
+            continue
+        try:
+            following = routines_mod.next_run(row["schedule"], after=now)
+        except routines_mod.ScheduleError:
+            continue
+        if abs(float(row.get("next_run") or 0) - following) > 1:
             store.update_routine(row["id"], {"next_run": following})
 
 

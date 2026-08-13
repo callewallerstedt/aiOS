@@ -177,6 +177,9 @@ button { border: 0; background: none; cursor: pointer; }
   letter-spacing: 0.12em;
   text-transform: uppercase;
   white-space: nowrap;
+  padding: 6px 0;
+  color: inherit;
+  text-align: left;
 }
 .topbar .title .sub {
   color: var(--ink-3);
@@ -368,7 +371,7 @@ button { border: 0; background: none; cursor: pointer; }
 
 /* ---------------- agent list ---------------- */
 
-#screen-agents { grid-template-rows: auto auto minmax(0, 1fr) auto; }
+#screen-agents { grid-template-rows: auto auto minmax(0, 1fr) auto auto; }
 
 .agent-list {
   min-height: 0;
@@ -381,35 +384,70 @@ button { border: 0; background: none; cursor: pointer; }
 }
 
 .wake-pc {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  justify-self: center;
-  width: fit-content;
-  max-width: calc(100% - 24px);
-  margin: 0 auto calc(7px + var(--bottom));
-  min-height: 28px;
-  padding: 4px 10px;
+  flex: none;
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  padding: 0;
   border: 1px solid var(--line-strong);
-  border-radius: 999px;
-  background: var(--field);
+  border-radius: 9px;
+  background: transparent;
   color: var(--ink-2);
-  font-size: 11px;
-  font-weight: 500;
-  line-height: 1;
   box-shadow: none;
 }
-#screen-agents.pc-asleep .wake-pc.hidden {
-  display: none !important;
+.wake-pc span {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
-.wake-pc svg { width: 13px; height: 13px; flex: none; }
+.wake-pc svg { width: 16px; height: 16px; }
 .wake-pc[disabled] { opacity: .55; }
 .wake-pc.is-on {
-  background: var(--red-tint);
-  color: #ff9c9f;
-  border-color: #ee5c6152;
+  background: transparent;
+  color: var(--green);
+  border-color: color-mix(in srgb, var(--green) 35%, var(--line-strong));
 }
+.wake-pc.is-unavailable { color: var(--orange); opacity: .8; }
+
+.home-voice-wrap {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  padding: 7px 12px calc(8px + var(--bottom));
+  color: var(--ink-3);
+  font-size: 11px;
+  border-top: 1px solid var(--line);
+}
+.home-voice {
+  width: 42px;
+  height: 42px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--field);
+  color: var(--ink-2);
+  box-shadow: var(--shadow-btn);
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.home-voice svg { width: 18px; height: 18px; pointer-events: none; }
+.home-voice.recording {
+  background: var(--red);
+  color: #fff;
+  transform: scale(1.06);
+  animation: pulse 1.1s ease-in-out infinite;
+}
+.home-voice.transcribing { color: var(--accent); }
 
 .agent-row {
   width: 100%;
@@ -942,6 +980,11 @@ button { border: 0; background: none; cursor: pointer; }
   transform-origin: center;
   animation: pixel-on var(--wave) ease-in-out infinite;
 }
+/* code-beautiful.css is shared with the embedded CODE viewer and loads after
+   this sheet. Its generic pixel rule uses --bui-accent-ink, which Director
+   does not define, leaving the cells transparent. The extra body specificity
+   keeps the actual Director glyph painted without changing CODE itself. */
+body .loading-pixels span { background: var(--accent); }
 @keyframes pixel-on {
   0%, 100% { opacity: .15; transform: scale(.85); }
   45% { opacity: .8; transform: scale(1); }
@@ -1770,7 +1813,7 @@ button { border: 0; background: none; cursor: pointer; }
   .mobile-only { display: none !important; }
   .sidebar-foot { display: flex; }
   .agent-list { padding: 4px 8px 8px; }
-  .wake-pc { margin: 0 auto 8px; }
+  .home-voice-wrap { padding-bottom: 8px; }
 
   #screen-chat {
     background: var(--canvas);
@@ -1895,7 +1938,97 @@ button { border: 0; background: none; cursor: pointer; }
   .thinking.live .thinking-label { animation: none; }
   .working-sentinel .working-label,
   .thinking.live .thinking-label { color: var(--ink-2); background: none; }
+  body .loading-pixels span { opacity: .72; transform: none; }
 }
+
+/* ---------------- developer component gallery ---------------- */
+
+.dev-gallery {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  background: var(--canvas);
+  color: var(--ink);
+}
+.dev-gallery-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: calc(var(--top) + 8px) 12px 8px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+.dev-gallery-head .title { min-width: 0; display: grid; gap: 1px; }
+.dev-gallery-head h1 { margin: 0; font-size: 15px; }
+.dev-gallery-head .sub { color: var(--ink-3); font-size: 11px; }
+.dev-tabs {
+  display: flex;
+  gap: 6px;
+  padding: 9px 12px;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--line);
+}
+.dev-tab {
+  flex: none;
+  min-height: 30px;
+  padding: 0 12px;
+  border-radius: 999px;
+  background: var(--field);
+  color: var(--ink-3);
+  font-size: 11.5px;
+}
+.dev-tab.on { background: var(--accent); color: #17181a; }
+.dev-gallery-body {
+  min-height: 0;
+  overflow-y: auto;
+  display: grid;
+  gap: 14px;
+  align-content: start;
+  padding: 14px 12px calc(var(--bottom) + 28px);
+}
+.dev-preview-block { display: grid; gap: 7px; }
+.dev-preview-block > h2 {
+  margin: 0 2px;
+  color: var(--ink-3);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+.dev-stage {
+  min-width: 0;
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border-radius: 14px;
+  background: var(--surface);
+  box-shadow: var(--shadow-hairline);
+  overflow: hidden;
+}
+.dev-stage .thinking-body { display: block; }
+.dev-stage .thinking.expanded .thinking-chevron { transform: rotate(180deg); }
+.dev-stage .row-agent.named .speech,
+.dev-stage .relay-message .speech { min-width: 0; }
+.dev-stage .tool-card { animation: none; }
+.dev-power-row { display: flex; align-items: center; gap: 10px; }
+.dev-power-row .wake-pc { position: relative; }
+.dev-power-row small { color: var(--ink-3); }
+.dev-operator-shot {
+  width: 100%;
+  background: #0d0e10;
+}
+.dev-screen-grid {
+  height: 130px;
+  display: grid;
+  grid-template-columns: 1.6fr 1fr;
+  grid-template-rows: 1fr 1fr;
+  gap: 6px;
+  padding: 12px;
+}
+.dev-screen-grid span { border-radius: 7px; background: #272a30; }
+.dev-screen-grid span:first-child { grid-row: 1 / 3; background: #30343b; }
 
 /* ---------------- CODE session viewer ---------------- */
 

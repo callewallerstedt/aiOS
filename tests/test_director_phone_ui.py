@@ -245,14 +245,29 @@ def test_homepage_has_a_wake_pc_button_for_an_offline_windows_box():
     assert '"/api/power/off"' in JS
     assert "Turn PC off" in JS
     assert "can_power_off" in JS
-    wake_css = _block(CSS, ".wake-pc {", "#screen-agents.pc-asleep")
-    assert "width: fit-content" in wake_css
-    assert "justify-self: center" in wake_css
-    assert "min-height: 28px" in wake_css
-    assert "border-radius: 999px" in wake_css
+    wake_css = _block(CSS, ".wake-pc {", ".wake-pc span")
+    assert "width: 34px" in wake_css
+    assert "height: 34px" in wake_css
+    assert "place-items: center" in wake_css
+    assert "border-radius: 9px" in wake_css
     paint = _block(JS, "function paintWakeButton()", "function markMachine")
     assert 'wake.power_state === "off"' in paint
     assert "windows?.online === true" in paint
+
+
+def test_homepage_voice_and_hidden_component_gallery_are_wired():
+    assert 'id="btn-home-voice"' in HTML
+    assert "startHomeVoice" in JS and "stopHomeVoice" in JS
+    assert "pinned_agent_id" in JS
+    assert 'id="director-logo"' in HTML
+    assert "installDirectorDoubleTap" in JS
+    assert "developerGallery" in JS
+
+
+def test_churning_pixels_survive_the_late_code_theme_override():
+    assert "body .loading-pixels span { background: var(--accent); }" in CSS
+    reduced = _block(CSS, "@media (prefers-reduced-motion: reduce)", "/* ---------------- CODE")
+    assert "body .loading-pixels span { opacity: .72" in reduced
 
 
 def test_supplied_eye_sheet_is_selectable_and_rotates_on_active_blobs():

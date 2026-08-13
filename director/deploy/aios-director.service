@@ -10,6 +10,7 @@ Restart=always
 RestartSec=3
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONPATH=%h/aios-director
+Environment=TZ=Europe/Stockholm
 StandardOutput=append:%h/.local/share/aios-director/director.log
 StandardError=append:%h/.local/share/aios-director/director.log
 

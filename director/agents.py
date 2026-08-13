@@ -229,7 +229,8 @@ def environment_block(settings: dict[str, Any] | None = None) -> str:
     cfg = settings if settings is not None else config.load_settings()
     machines = store.list_machines()
     lines = [
-        f"Right now it is {time.strftime('%A %d %B %Y, %H:%M')} local time.",
+        f"Right now it is {routines_mod.local_datetime().strftime('%A %d %B %Y, %H:%M')} "
+        f"in {routines_mod.TIMEZONE_NAME} (Swedish time).",
         f"You are running on {platform.node()} ({platform.system()} "
         f"{platform.release()}).",
     ]

@@ -15,18 +15,22 @@ writes them and a dict it can get right beats a five-field string it cannot:
     {"kind": "once",     "at": 1786550000.0}
     {"kind": "once",     "in_seconds": 1800}
 
-Times are local to the box, which is where Calle lives.
+Wall-clock schedules are always interpreted in Sweden, independently of the
+Linux host's timezone. Unix timestamps remain absolute.
 """
 from __future__ import annotations
 
-import calendar
 import time
+from datetime import datetime, time as datetime_time, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday",
             "saturday", "sunday"]
 KINDS = ("daily", "weekly", "weekdays", "interval", "once")
 MIN_INTERVAL = 60.0
+TIMEZONE_NAME = "Europe/Stockholm"
+TIMEZONE = ZoneInfo(TIMEZONE_NAME)
 
 
 class ScheduleError(ValueError):
@@ -101,9 +105,14 @@ def normalize(schedule: Any) -> dict:
     return {"kind": "once", "at": time.time() + in_seconds}
 
 
-def _at_time_on(day: time.struct_time, hour: int, minute: int) -> float:
-    return time.mktime((day.tm_year, day.tm_mon, day.tm_mday, hour, minute, 0,
-                        day.tm_wday, day.tm_yday, -1))
+def local_datetime(timestamp: float | None = None) -> datetime:
+    """Return an aware Swedish datetime for display and schedule maths."""
+    return datetime.fromtimestamp(time.time() if timestamp is None else timestamp,
+                                  TIMEZONE)
+
+
+def _at_time_on(day, hour: int, minute: int) -> float:
+    return datetime.combine(day, datetime_time(hour, minute), tzinfo=TIMEZONE).timestamp()
 
 
 def next_run(schedule: dict, *, after: float | None = None) -> float:
@@ -122,10 +131,11 @@ def next_run(schedule: dict, *, after: float | None = None) -> float:
         return moment + float(schedule.get("seconds") or MIN_INTERVAL)
 
     hour, minute = parse_time(schedule.get("time"))
+    local_now = local_datetime(moment)
 
     if kind == "daily":
         for offset in range(0, 3):
-            day = time.localtime(moment + offset * 86400)
+            day = local_now.date() + timedelta(days=offset)
             candidate = _at_time_on(day, hour, minute)
             if candidate > moment:
                 return candidate
@@ -133,8 +143,8 @@ def next_run(schedule: dict, *, after: float | None = None) -> float:
 
     if kind == "weekdays":
         for offset in range(0, 8):
-            day = time.localtime(moment + offset * 86400)
-            if day.tm_wday > 4:            # Saturday or Sunday
+            day = local_now.date() + timedelta(days=offset)
+            if day.weekday() > 4:            # Saturday or Sunday
                 continue
             candidate = _at_time_on(day, hour, minute)
             if candidate > moment:
@@ -144,8 +154,8 @@ def next_run(schedule: dict, *, after: float | None = None) -> float:
     if kind == "weekly":
         target = int(schedule.get("weekday") or 0)
         for offset in range(0, 15):
-            day = time.localtime(moment + offset * 86400)
-            if day.tm_wday != target:
+            day = local_now.date() + timedelta(days=offset)
+            if day.weekday() != target:
                 continue
             candidate = _at_time_on(day, hour, minute)
             if candidate > moment:
@@ -173,8 +183,8 @@ def describe(schedule: dict) -> str:
         minutes = max(1, int(seconds // 60))
         return f"every {minutes} minute{'s' if minutes != 1 else ''}"
     if kind == "once":
-        return "once, at " + time.strftime("%a %d %b %H:%M",
-                                           time.localtime(float(schedule.get("at") or 0)))
+        return "once, at " + local_datetime(float(schedule.get("at") or 0)).strftime(
+            "%a %d %b %H:%M")
     return "unscheduled"
 
 
@@ -192,4 +202,4 @@ def humanize_next(timestamp: float) -> str:
         return f"in {max(1, int(delta // 60))} min"
     if delta < 86400:
         return f"in {int(delta // 3600)} h"
-    return time.strftime("%a %d %b %H:%M", time.localtime(timestamp))
+    return local_datetime(timestamp).strftime("%a %d %b %H:%M")
