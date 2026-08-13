@@ -7,6 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 HTML = (ROOT / "phone_site" / "index.html").read_text(encoding="utf-8")
 CSS = (ROOT / "phone_site" / "director.css").read_text(encoding="utf-8")
 JS = (ROOT / "phone_site" / "director.js").read_text(encoding="utf-8")
+SW = (ROOT / "phone_site" / "sw.js").read_text(encoding="utf-8")
 
 
 def _block(source: str, start: str, end: str) -> str:
@@ -268,6 +269,13 @@ def test_churning_pixels_survive_the_late_code_theme_override():
     assert "body .loading-pixels span { background: var(--accent); }" in CSS
     reduced = _block(CSS, "@media (prefers-reduced-motion: reduce)", "/* ---------------- CODE")
     assert "body .loading-pixels span { opacity: .72" in reduced
+
+
+def test_push_uses_agent_heading_and_is_silent_while_app_is_visible():
+    assert 'payload.agent || payload.title || "Director"' in SW
+    assert 'client.visibilityState === "visible"' in SW
+    assert "showNotification(title" in SW
+    assert 'const VERSION = "director-v30"' in SW
 
 
 def test_supplied_eye_sheet_is_selectable_and_rotates_on_active_blobs():

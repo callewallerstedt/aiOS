@@ -138,7 +138,7 @@ class Runtime:
         store.touch_thread(thread_id, status="waiting")
         agent = store.get_agent(agent_id) or {}
         await self.notify(thread_id, agent,
-                          f"{agent.get('name', 'Director')} needs you",
+                          str(agent.get("name") or "Director"),
                           question, tag=f"q-{qid}", force=True)
         try:
             answer = await asyncio.wait_for(future, timeout=timeout)
@@ -189,7 +189,7 @@ class Runtime:
         store.touch_thread(thread_id, status="waiting")
         agent = store.get_agent(agent_id) or {}
         await self.notify(thread_id, agent,
-                          f"{agent.get('name', 'Director')} needs approval",
+                          str(agent.get("name") or "Director"),
                           summary, tag=f"a-{record['id']}", force=True)
         try:
             decision = await asyncio.wait_for(future, timeout=timeout)
@@ -619,7 +619,7 @@ class Runtime:
             self._queued.setdefault(thread["id"], []).append(message)
         await self.notify(
             thread["id"], target,
-            f"{meta['sender_name']} messaged {target.get('name') or 'a chat'}",
+            str(meta["sender_name"] or "Agent"),
             body, tag=f"relay-{message['id']}")
         return tools_mod.ToolResult(
             output=f"delivered to {target.get('name')}; it is now in that chat",
@@ -816,7 +816,7 @@ class Runtime:
                 self._nudge_mentions(thread_id, group, member, text)
                 if not calls:
                     await self.notify(thread_id, group,
-                                      f"{member.get('name') or 'Agent'} in {group.get('name') or 'group'}",
+                                      str(member.get("name") or "Agent"),
                                       text, tag=thread_id)
             if not calls:
                 if not spoke and not text:

@@ -8,7 +8,7 @@
    cleanUrls 308s /index.html -> /, and cache.addAll treats that as failure,
    so we cache each file on its own and never fall back a script to HTML. */
 
-const VERSION = "director-v29";
+const VERSION = "director-v30";
 const SHELL = [
   "/",
   "/director.css",
@@ -43,19 +43,27 @@ self.addEventListener("push", (event) => {
   try {
     payload = event.data ? event.data.json() : {};
   } catch {
-    payload = { title: "aiOS Director", body: event.data ? event.data.text() : "" };
+    payload = { title: "Director", body: event.data ? event.data.text() : "" };
   }
-  const title = payload.title || "aiOS Director";
-  event.waitUntil(
-    self.registration.showNotification(title, {
+  const title = payload.agent || payload.title || "Director";
+  event.waitUntil((async () => {
+    // A visible Director window is already showing the live message. This is
+    // deliberately app-wide rather than thread-specific: being on the home
+    // screen should not cause a push banner from a chat in the same app.
+    const windows = await self.clients.matchAll({
+      type: "window",
+      includeUncontrolled: true,
+    });
+    if (windows.some((client) => client.visibilityState === "visible")) return;
+    await self.registration.showNotification(title, {
       body: payload.body || "",
       tag: payload.tag || "director",
       renotify: true,
       icon: "/icons/aios-icon-192.png",
       badge: "/icons/aios-icon-192.png",
       data: { url: payload.url || "/" },
-    })
-  );
+    });
+  })());
 });
 
 self.addEventListener("notificationclick", (event) => {

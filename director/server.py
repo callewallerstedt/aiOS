@@ -441,7 +441,7 @@ async def push_unsubscribe(request: web.Request) -> web.Response:
 
 @ROUTES.post("/api/push/test")
 async def push_test(request: web.Request) -> web.Response:
-    result = await push.send("aiOS Director", "Notifications are working.",
+    result = await push.send("Director", "Notifications are working.",
                              tag="test")
     return json_response({"ok": True, **result})
 

@@ -232,6 +232,7 @@ def test_push_payload_is_trimmed_for_the_service(director, monkeypatch):
                                     "keys": {"p256dh": "x", "auth": "y"}})
     push.send_sync("a title", "b" * 900)
     assert len(sent["body"]) <= push.MAX_BODY
+    assert sent["agent"] == "a title"
 
 
 def test_the_signer_is_a_vapid_object_not_pem_text(director):

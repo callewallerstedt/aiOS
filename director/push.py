@@ -116,6 +116,9 @@ def send_sync(title: str, body: str, *, url: str = "", tag: str = "",
         return {"sent": 0, "skipped": "no VAPID keys"}
     payload = {
         "title": title[:80],
+        # Explicit semantic field lets the phone render the speaker without
+        # ever falling back to an application-name heading.
+        "agent": title[:80],
         "body": (body or "")[:MAX_BODY],
         "url": url or "/",
         "tag": tag or "director",
