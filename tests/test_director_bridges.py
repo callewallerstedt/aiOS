@@ -376,3 +376,31 @@ Wireless LAN adapter Local Area Connection* 10:
     assert got["mac"] == "30:C5:99:D0:0D:4A"
     assert got["ip"] == "192.168.0.83"
     assert got["name"] == "Ethernet"
+
+
+def test_windows_power_off_is_scheduled_after_the_reply(monkeypatch):
+    import asyncio
+
+    import director_client
+
+    seen = []
+
+    class FakeProcess:
+        returncode = 0
+
+        async def communicate(self):
+            return b"", None
+
+    async def create_process(*args, **kwargs):
+        seen.append((args, kwargs))
+        return FakeProcess()
+
+    monkeypatch.setattr(director_client.sys, "platform", "win32")
+    monkeypatch.setattr(director_client.asyncio, "create_subprocess_exec", create_process)
+    client = director_client.DirectorClient({
+        "url": "https://director.example", "token": "x", "name": "calle-windows"})
+    result = asyncio.run(client.do_power_off({}))
+
+    assert result["ok"] is True
+    assert result["delay"] == 5
+    assert seen[0][0][:4] == ("shutdown.exe", "/s", "/t", "5")

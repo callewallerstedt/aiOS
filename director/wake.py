@@ -7,8 +7,11 @@ Shutdown Wake-On-Lan are both enabled on that adapter).
 """
 from __future__ import annotations
 
+import asyncio
+import os
 import re
 import socket
+import time
 from typing import Any
 
 from . import config
@@ -19,6 +22,8 @@ HOUSE_BROADCAST = "192.168.0.255"
 HOUSE_IP = "192.168.0.83"
 
 _MAC_HEX = re.compile(r"[^0-9A-Fa-f]")
+_PROBE_TTL = 8.0
+_probe_cache: dict[str, Any] = {"ip": "", "at": 0.0, "online": False}
 
 
 def parse_mac(raw: str) -> bytes:
@@ -76,11 +81,66 @@ def status(*, machines: list[dict[str, Any]],
     except ValueError:
         available = False
     machine = windows_machine(machines)
+    connected = bool(machine and machine.get("online"))
     return {
         "available": available,
-        "online": bool(machine and machine.get("online")),
+        "online": connected,
+        "connected": connected,
+        "can_power_off": connected,
         "name": str((machine or {}).get("name") or "PC"),
     }
+
+
+async def _probe_host(ip: str) -> bool:
+    """Check the house PC independently of the Director client connection."""
+    args = (["ping", "-n", "1", "-w", "700", ip] if os.name == "nt" else
+            ["ping", "-c", "1", "-W", "1", ip])
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *args, stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL)
+        try:
+            if await asyncio.wait_for(proc.wait(), timeout=1.5) == 0:
+                return True
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+    except OSError:
+        pass
+
+    # ICMP can be disabled on Windows. These common Windows services provide
+    # a second signal without requiring credentials.
+    async def port_open(port: int) -> bool:
+        try:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(ip, port), timeout=0.25)
+            del reader
+            writer.close()
+            await writer.wait_closed()
+            return True
+        except (OSError, asyncio.TimeoutError):
+            return False
+
+    return any(await asyncio.gather(*(port_open(port) for port in (135, 445, 3389))))
+
+
+async def status_with_probe(*, machines: list[dict[str, Any]],
+                            settings: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Return power state, probing the LAN when the bridge is disconnected."""
+    result = status(machines=machines, settings=settings)
+    if result["connected"]:
+        return result
+    cfg = _wake_cfg(settings)
+    ip = str(cfg.get("ip") or "").strip()
+    if not ip:
+        return result
+    now = time.monotonic()
+    if (_probe_cache["ip"] != ip or
+            now - float(_probe_cache["at"] or 0.0) >= _PROBE_TTL):
+        _probe_cache.update(ip=ip, at=now, online=await _probe_host(ip))
+    result["online"] = bool(_probe_cache["online"])
+    result["reachable"] = result["online"]
+    return result
 
 
 def destinations(settings: dict[str, Any] | None = None) -> list[str]:

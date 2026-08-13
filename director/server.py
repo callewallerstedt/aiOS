@@ -167,7 +167,7 @@ async def state(request: web.Request) -> web.Response:
         "ok": True,
         "agents": agents,
         "machines": machines,
-        "wake": wake.status(machines=machines, settings=settings),
+        "wake": await wake.status_with_probe(machines=machines, settings=settings),
         "cursor": store.latest_event_id(),
         "defaults": settings.get("defaults", {}),
         "operator": await display_mod.status(settings),
@@ -728,7 +728,7 @@ async def list_machines(request: web.Request) -> web.Response:
     return json_response({
         "ok": True,
         "machines": machines,
-        "wake": wake.status(machines=machines, settings=settings),
+        "wake": await wake.status_with_probe(machines=machines, settings=settings),
     })
 
 
@@ -738,6 +738,20 @@ async def wake_pc(request: web.Request) -> web.Response:
     result = wake.send()
     if not result.get("ok"):
         return error(str(result.get("error") or "wake failed"))
+    return json_response(result)
+
+
+@ROUTES.post("/api/power/off")
+async def power_off_pc(request: web.Request) -> web.Response:
+    """Ask the connected Windows client to schedule a clean shutdown."""
+    runtime = request.app["runtime"]
+    machine = wake.windows_machine(runtime.online_machines())
+    if machine is None or not machine.get("online"):
+        return error("the Windows PC is not connected", status=409)
+    result = await runtime.call_machine(
+        str(machine["id"]), "power.off", {}, timeout=15.0)
+    if not result.get("ok"):
+        return error(str(result.get("error") or "could not turn off the PC"))
     return json_response(result)
 
 
@@ -813,8 +827,9 @@ async def machine_socket(request: web.Request) -> web.WebSocketResponse:
                 store.update_job(job_id, status=str(payload.get("status") or "done"),
                                  result={**previous, **incoming})
     finally:
-        runtime.detach_machine(machine["id"])
-        await runtime.emit("machine.offline", {"id": machine["id"], "name": machine["name"]})
+        if runtime.detach_machine(machine["id"], link):
+            await runtime.emit("machine.offline", {
+                "id": machine["id"], "name": machine["name"]})
     return ws
 
 

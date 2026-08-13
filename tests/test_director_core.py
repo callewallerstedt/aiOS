@@ -895,6 +895,45 @@ def test_wake_status_hides_the_button_while_windows_is_online(director):
     awake = wake.status(machines=[{
         "name": "calle-windows", "platform": "windows", "online": True}])
     assert awake["online"] is True
+    assert awake["can_power_off"] is True
+
+
+def test_wake_status_probes_a_pc_without_a_director_client(director, monkeypatch):
+    import asyncio
+
+    from director import wake
+
+    async def reachable(ip):
+        assert ip == "192.168.50.22"
+        return True
+
+    monkeypatch.setattr(wake, "_probe_host", reachable)
+    wake._probe_cache.update(ip="", at=0.0, online=False)
+    result = asyncio.run(wake.status_with_probe(
+        machines=[{"name": "calle-windows", "platform": "windows", "online": False}],
+        settings={"wake": {"mac": "30:C5:99:D0:0D:4A", "ip": "192.168.50.22"}}))
+    assert result["online"] is True
+    assert result["reachable"] is True
+    assert result["connected"] is False
+    assert result["can_power_off"] is False
+
+
+def test_stale_machine_socket_cannot_detach_a_reconnected_pc(director):
+    from director import runtime, store
+
+    machine = store.upsert_machine(
+        name="calle-windows", platform="windows", token_hash="token", caps={})
+    old_link = object()
+    new_link = object()
+    hub = runtime.Runtime()
+    hub.attach_machine(machine["id"], old_link)
+    hub.attach_machine(machine["id"], new_link)
+
+    assert hub.detach_machine(machine["id"], old_link) is False
+    assert hub.machine_link(machine["id"]) is new_link
+    assert hub.online_machines()[0]["online"] is True
+    assert hub.detach_machine(machine["id"], new_link) is True
+    assert hub.online_machines()[0]["online"] is False
 
 
 def test_wake_send_broadcasts_to_the_house_lan(director, monkeypatch):

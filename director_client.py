@@ -53,7 +53,8 @@ RECONNECT_MIN = 2.0
 RECONNECT_MAX = 60.0
 SHELL_TIMEOUT = 180
 
-CAPS = {"code": True, "shell": True, "files": True, "platform": "windows"}
+CAPS = {"code": True, "shell": True, "files": True, "power": True,
+        "platform": "windows"}
 
 _SKIP_ADAPTER = re.compile(
     r"WSL|Hyper-V|vEthernet|Bluetooth|Loopback|Tailscale|WireGuard|VPN|"
@@ -467,6 +468,7 @@ class DirectorClient:
                 hello = lan_identity()
                 hello["type"] = "hello"
                 hello["name"] = self.name
+                hello["caps"] = CAPS
                 try:
                     await socket.send_json(hello)
                     log(f"lan {hello.get('ip', '?')} {hello.get('mac', '?')}")
@@ -519,6 +521,21 @@ class DirectorClient:
 
     async def do_ping(self, payload: dict) -> dict:
         return {"ok": True, "name": self.name, "platform": platform.platform()}
+
+    async def do_power_off(self, payload: dict) -> dict:
+        """Schedule shutdown after replying, so Director receives the result."""
+        if sys.platform != "win32":
+            return {"ok": False, "error": "power off is only available on Windows"}
+        proc = await asyncio.create_subprocess_exec(
+            "shutdown.exe", "/s", "/t", "5", "/c",
+            "Turned off from aiOS Director",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        raw, _ = await proc.communicate()
+        if proc.returncode:
+            return {"ok": False, "error": raw.decode(
+                "utf-8", errors="replace").strip() or "shutdown.exe failed"}
+        return {"ok": True, "status": "shutdown scheduled", "delay": 5}
 
     async def do_code_start(self, payload: dict) -> dict:
         ready, message = self.code.available()

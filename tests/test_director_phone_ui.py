@@ -83,11 +83,16 @@ def test_compacted_history_has_a_small_disclosure_control():
     assert 'aria-expanded="false"' in HTML
     transcript = _block(HTML, '<div class="transcript" id="transcript">', '</div>\n\n      <div class="composer">')
     assert 'id="btn-history-toggle"' in transcript
+    assert "Older chats" in transcript
     header = _block(HTML, '<header class="topbar">', '</header>')
     assert 'id="btn-history-toggle"' not in header
     assert "compacted_through" in JS
     assert "togglePreviousMessages" in JS
     assert 'message.sequence' in JS
+    assert "thread?.hidden_count" in JS
+    history_css = _block(CSS, ".history-toggle {", ".history-toggle:hover")
+    assert "position: sticky" in history_css
+    assert "top: 0" in history_css
 
 
 def test_user_bubbles_keep_the_selected_background_on_live_and_restored_messages():
@@ -207,10 +212,15 @@ def test_homepage_has_a_wake_pc_button_for_an_offline_windows_box():
     assert 'id="btn-wake-pc"' in HTML
     assert "Wake PC" in HTML
     assert "function paintWakeButton()" in JS
-    assert 'api("/api/wake"' in JS
+    assert '"/api/wake"' in JS
     assert "wake.available" in JS
     assert "pc-asleep" in CSS
     assert ".wake-pc" in CSS
+    assert '"/api/power/off"' in JS
+    assert "Turn PC off" in JS
+    assert "can_power_off" in JS
+    wake_css = _block(CSS, ".wake-pc {", "#screen-agents.pc-asleep")
+    assert "min-height: 34px" in wake_css
 
 
 def test_supplied_eye_sheet_is_selectable_and_rotates_on_active_blobs():

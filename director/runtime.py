@@ -231,9 +231,19 @@ class Runtime:
         self._machines[machine_id] = link
         store.set_machine_online(machine_id, True)
 
-    def detach_machine(self, machine_id: str) -> None:
+    def detach_machine(self, machine_id: str, link: Any | None = None) -> bool:
+        """Detach only the socket that is actually closing.
+
+        A reconnect can install a fresh link before aiohttp finishes the old
+        socket's ``finally`` block. Letting that stale block pop by id marks a
+        live Windows PC offline and makes the phone offer Wake-on-LAN.
+        """
+        current = self._machines.get(machine_id)
+        if current is None or (link is not None and current is not link):
+            return False
         self._machines.pop(machine_id, None)
         store.set_machine_online(machine_id, False)
+        return True
 
     def machine_link(self, machine_id: str) -> Any:
         return self._machines.get(machine_id)

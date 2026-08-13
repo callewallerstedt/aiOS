@@ -1251,9 +1251,10 @@ function renderMessages(messages, thread = state.currentThread) {
   state.currentThread = thread || null;
   state.currentMessages = Array.isArray(messages) ? messages : [];
   const through = Number(thread?.compacted_through || 0);
-  const hidden = through
+  const derivedHidden = through
     ? state.currentMessages.filter((message) => Number(message.sequence || 0) <= through).length
     : 0;
+  const hidden = Math.max(Number(thread?.hidden_count || 0), derivedHidden);
   const historyButton = $("btn-history-toggle");
   historyButton?.classList.toggle("hidden", hidden === 0);
   historyButton?.setAttribute("aria-expanded", state.historyExpanded ? "true" : "false");
@@ -1651,12 +1652,15 @@ function paintWakeButton() {
   const screen = $("screen-agents");
   if (!btn) return;
   const wake = state.wake || {};
-  const show = !!wake.available && !wake.online;
+  const canWake = !!wake.available && !wake.online;
+  const canPowerOff = !!wake.online && !!wake.can_power_off;
+  const show = canWake || canPowerOff;
   btn.classList.toggle("hidden", !show);
-  screen?.classList.toggle("pc-asleep", show);
+  btn.classList.toggle("is-on", canPowerOff);
+  screen?.classList.toggle("pc-asleep", canWake);
   if (!btn.disabled) {
     const label = btn.querySelector("span");
-    if (label) label.textContent = "Wake PC";
+    if (label) label.textContent = canPowerOff ? "Turn PC off" : "Wake PC";
   }
 }
 
@@ -1671,32 +1675,51 @@ function markMachine(payload, online) {
   if (!state.wake) state.wake = { available: true, online: false, name: "PC" };
   const windows = machines.find((item) =>
     /windows/i.test(`${item.platform || ""} ${item.name || ""}`)) || machines[0];
-  state.wake.online = !!(windows && windows.online);
+  if (online) {
+    state.wake.online = true;
+    state.wake.connected = true;
+    state.wake.can_power_off = true;
+  } else {
+    state.wake.connected = false;
+    state.wake.can_power_off = false;
+    setTimeout(() => refreshPowerStatus(), 250);
+  }
   if (windows?.name) state.wake.name = windows.name;
   paintWakeButton();
 }
 
-async function wakePc() {
+async function refreshPowerStatus() {
+  try {
+    const data = await api("/api/machines");
+    state.machines = data.machines || [];
+    state.wake = data.wake || state.wake;
+    paintWakeButton();
+  } catch { /* the websocket/reconnect path will retry */ }
+}
+
+async function togglePcPower() {
   const btn = $("btn-wake-pc");
   if (!btn || btn.disabled) return;
+  const turningOff = !!state.wake?.online && !!state.wake?.can_power_off;
+  if (turningOff && !window.confirm(`Turn off ${state.wake?.name || "the PC"}?`)) return;
   const label = btn.querySelector("span");
   btn.disabled = true;
-  if (label) label.textContent = "Waking…";
+  if (label) label.textContent = turningOff ? "Turning off…" : "Waking…";
   try {
-    await api("/api/wake", { method: "POST" });
+    await api(turningOff ? "/api/power/off" : "/api/wake", { method: "POST" });
   } catch (error) {
     if (label) label.textContent = String(error.message || error).slice(0, 40);
     btn.disabled = false;
     return;
   }
   const start = Date.now();
-  while (Date.now() - start < 90000) {
+  while (Date.now() - start < (turningOff ? 45000 : 90000)) {
     await new Promise((resolve) => setTimeout(resolve, 2000));
     try {
       const data = await api("/api/state");
       state.machines = data.machines || [];
       state.wake = data.wake || state.wake;
-      if (data.wake?.online) break;
+      if (turningOff ? !data.wake?.online : data.wake?.online) break;
     } catch { /* keep waiting */ }
   }
   btn.disabled = false;
@@ -3381,6 +3404,9 @@ async function boot() {
     for (const agent of state.agents) paintAgentRow(agent);
   }, 60 * 1000);
   setInterval(rotateActiveBlobEyes, ACTIVE_EYE_INTERVAL);
+  setInterval(() => {
+    if (!document.hidden) refreshPowerStatus();
+  }, 10000);
 
   // Deep link from a notification tap: ?agent=agt_x
   const wanted = new URLSearchParams(location.search).get("agent");
@@ -3401,7 +3427,7 @@ function wire() {
   $("pair-form").addEventListener("submit", doPair);
   $("btn-settings").addEventListener("click", openSettings);
   $("btn-settings-mobile")?.addEventListener("click", openSettings);
-  $("btn-wake-pc")?.addEventListener("click", wakePc);
+  $("btn-wake-pc")?.addEventListener("click", togglePcPower);
   $("btn-new-agent").addEventListener("click", newChatChooser);
   $("btn-search")?.addEventListener("click", () => {
     const box = $("sidebar-search");
