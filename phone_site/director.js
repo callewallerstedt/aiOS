@@ -1652,8 +1652,14 @@ function paintWakeButton() {
   const screen = $("screen-agents");
   if (!btn) return;
   const wake = state.wake || {};
-  const canWake = !!wake.available && !wake.online;
-  const canPowerOff = !!wake.online && !!wake.can_power_off;
+  const windows = (state.machines || []).find((item) =>
+    /windows/i.test(`${item.platform || ""} ${item.name || ""}`));
+  // A disconnected bridge is not proof that the PC is off. Older Director
+  // servers only returned online=false, which made a live PC show "Wake PC".
+  // Wake is offered only when a current server explicitly confirms "off".
+  const connected = wake.connected === true || windows?.online === true;
+  const canPowerOff = connected && wake.can_power_off !== false;
+  const canWake = !!wake.available && wake.power_state === "off";
   const show = canWake || canPowerOff;
   btn.classList.toggle("hidden", !show);
   btn.classList.toggle("is-on", canPowerOff);
@@ -1679,9 +1685,11 @@ function markMachine(payload, online) {
     state.wake.online = true;
     state.wake.connected = true;
     state.wake.can_power_off = true;
+    state.wake.power_state = "on";
   } else {
     state.wake.connected = false;
     state.wake.can_power_off = false;
+    state.wake.power_state = "unknown";
     setTimeout(() => refreshPowerStatus(), 250);
   }
   if (windows?.name) state.wake.name = windows.name;

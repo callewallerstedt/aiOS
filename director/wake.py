@@ -23,7 +23,9 @@ HOUSE_IP = "192.168.0.83"
 
 _MAC_HEX = re.compile(r"[^0-9A-Fa-f]")
 _PROBE_TTL = 8.0
-_probe_cache: dict[str, Any] = {"ip": "", "at": 0.0, "online": False}
+_probe_cache: dict[str, Any] = {
+    "ip": "", "at": 0.0, "online": False, "misses": 0,
+}
 
 
 def parse_mac(raw: str) -> bytes:
@@ -87,6 +89,7 @@ def status(*, machines: list[dict[str, Any]],
         "online": connected,
         "connected": connected,
         "can_power_off": connected,
+        "power_state": "on" if connected else "unknown",
         "name": str((machine or {}).get("name") or "PC"),
     }
 
@@ -137,9 +140,17 @@ async def status_with_probe(*, machines: list[dict[str, Any]],
     now = time.monotonic()
     if (_probe_cache["ip"] != ip or
             now - float(_probe_cache["at"] or 0.0) >= _PROBE_TTL):
-        _probe_cache.update(ip=ip, at=now, online=await _probe_host(ip))
+        online = await _probe_host(ip)
+        misses = 0 if online else (
+            int(_probe_cache.get("misses") or 0) + 1
+            if _probe_cache.get("ip") == ip else 1)
+        _probe_cache.update(ip=ip, at=now, online=online, misses=misses)
     result["online"] = bool(_probe_cache["online"])
     result["reachable"] = result["online"]
+    result["power_state"] = (
+        "on" if result["online"] else
+        "off" if int(_probe_cache.get("misses") or 0) >= 3 else
+        "unknown")
     return result
 
 

@@ -220,7 +220,13 @@ def test_homepage_has_a_wake_pc_button_for_an_offline_windows_box():
     assert "Turn PC off" in JS
     assert "can_power_off" in JS
     wake_css = _block(CSS, ".wake-pc {", "#screen-agents.pc-asleep")
-    assert "min-height: 34px" in wake_css
+    assert "width: fit-content" in wake_css
+    assert "justify-self: center" in wake_css
+    assert "min-height: 28px" in wake_css
+    assert "border-radius: 999px" in wake_css
+    paint = _block(JS, "function paintWakeButton()", "function markMachine")
+    assert 'wake.power_state === "off"' in paint
+    assert "windows?.online === true" in paint
 
 
 def test_supplied_eye_sheet_is_selectable_and_rotates_on_active_blobs():

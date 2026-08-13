@@ -892,10 +892,12 @@ def test_wake_status_hides_the_button_while_windows_is_online(director):
         "name": "calle-windows", "platform": "windows", "online": False}])
     assert asleep["available"] is True
     assert asleep["online"] is False
+    assert asleep["power_state"] == "unknown"
     awake = wake.status(machines=[{
         "name": "calle-windows", "platform": "windows", "online": True}])
     assert awake["online"] is True
     assert awake["can_power_off"] is True
+    assert awake["power_state"] == "on"
 
 
 def test_wake_status_probes_a_pc_without_a_director_client(director, monkeypatch):
@@ -908,7 +910,7 @@ def test_wake_status_probes_a_pc_without_a_director_client(director, monkeypatch
         return True
 
     monkeypatch.setattr(wake, "_probe_host", reachable)
-    wake._probe_cache.update(ip="", at=0.0, online=False)
+    wake._probe_cache.update(ip="", at=0.0, online=False, misses=0)
     result = asyncio.run(wake.status_with_probe(
         machines=[{"name": "calle-windows", "platform": "windows", "online": False}],
         settings={"wake": {"mac": "30:C5:99:D0:0D:4A", "ip": "192.168.50.22"}}))
@@ -916,6 +918,29 @@ def test_wake_status_probes_a_pc_without_a_director_client(director, monkeypatch
     assert result["reachable"] is True
     assert result["connected"] is False
     assert result["can_power_off"] is False
+    assert result["power_state"] == "on"
+
+
+def test_wake_requires_repeated_probe_misses_before_calling_a_pc_off(
+        director, monkeypatch):
+    import asyncio
+
+    from director import wake
+
+    async def unreachable(ip):
+        return False
+
+    monkeypatch.setattr(wake, "_probe_host", unreachable)
+    settings = {"wake": {
+        "mac": "30:C5:99:D0:0D:4A", "ip": "192.168.50.22"}}
+    wake._probe_cache.update(ip="", at=0.0, online=False, misses=0)
+
+    states = []
+    for _ in range(3):
+        wake._probe_cache["at"] = 0.0
+        states.append(asyncio.run(wake.status_with_probe(
+            machines=[], settings=settings))["power_state"])
+    assert states == ["unknown", "unknown", "off"]
 
 
 def test_stale_machine_socket_cannot_detach_a_reconnected_pc(director):
