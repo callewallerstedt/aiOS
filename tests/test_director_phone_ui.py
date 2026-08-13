@@ -275,7 +275,16 @@ def test_push_uses_agent_heading_and_is_silent_while_app_is_visible():
     assert 'payload.agent || payload.title || "Director"' in SW
     assert 'client.visibilityState === "visible"' in SW
     assert "showNotification(title" in SW
-    assert 'const VERSION = "director-v31"' in SW
+    assert 'const VERSION = "director-v32"' in SW
+
+
+def test_stop_button_clears_stale_working_state_after_server_acknowledges():
+    stop = _block(JS, "async function stopTurn()", "/* ---------------- voice")
+    assert '/api/threads/${state.threadId}/stop' in stop
+    assert "state.groupWorking.clear()" in stop
+    assert "settleThinking()" in stop
+    assert "setBusy(false)" in stop
+    assert 'addStatus("Stopped.")' in stop
 
 
 def test_subtitle_rolls_seamlessly_only_when_it_overflows():

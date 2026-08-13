@@ -131,6 +131,10 @@ def _agent_row(agent: dict, runtime: runtime_mod.Runtime) -> dict:
     thread = store.latest_thread(agent["id"])
     routines = store.list_routines(agent_id=agent["id"], include_disabled=False)
     working = runtime.working_from_group(thread["id"]) if thread and store.is_group(agent) else []
+    busy = runtime.busy(thread["id"]) if thread else False
+    stored_status = str(thread.get("status") or "idle") if thread else "idle"
+    live_status = (stored_status if stored_status in {"running", "waiting"} else "running") \
+        if busy else "idle"
     return {
         "id": agent["id"],
         "name": agent["name"],
@@ -150,8 +154,8 @@ def _agent_row(agent: dict, runtime: runtime_mod.Runtime) -> dict:
         "thread_id": thread["id"] if thread else "",
         "preview": thread["preview"] if thread else "",
         "updated_at": thread["updated_at"] if thread else agent["created_at"],
-        "status": thread["status"] if thread else "idle",
-        "busy": runtime.busy(thread["id"]) if thread else False,
+        "status": live_status,
+        "busy": busy,
         "working": working,
     }
 
@@ -245,6 +249,11 @@ def _thread_payload(thread_id: str, runtime: runtime_mod.Runtime | None = None) 
     thread = store.get_thread(thread_id)
     if not thread:
         return {}
+    if runtime is not None:
+        busy = runtime.busy(thread_id)
+        stored_status = str(thread.get("status") or "idle")
+        thread["status"] = (stored_status if stored_status in {"running", "waiting"}
+                            else "running") if busy else "idle"
     messages = store.list_messages(thread_id)
     through = int(thread.get("compacted_through") or 0)
     thread["hidden_count"] = sum(

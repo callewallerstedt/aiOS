@@ -502,11 +502,22 @@ class Runtime:
         return event
 
     def stop_thread(self, thread_id: str) -> bool:
-        self.cancel_event(thread_id).set()
+        targets = {thread_id}
+        targets.update(
+            private_id for private_id, origin in self._private_from_group.items()
+            if origin.get("group_thread_id") == thread_id
+        )
         stopped = False
-        task = self._turn_tasks.get(thread_id)
-        if task and not task.done():
-            stopped = True
+        for target in targets:
+            self.cancel_event(target).set()
+            task = self._turn_tasks.get(target)
+            if task and not task.done():
+                task.cancel()
+                stopped = True
+            if store.get_thread(target):
+                # A task cancelled before its coroutine starts never reaches
+                # _turn's finally block. Repair the persisted status here too.
+                store.touch_thread(target, status="idle")
         for key, speak in list(self._group_speaks.items()):
             if key[0] == thread_id and speak and not speak.done():
                 speak.cancel()

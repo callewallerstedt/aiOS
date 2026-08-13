@@ -27,6 +27,43 @@ def test_pairing_code_is_single_use(director):
     assert auth.redeem_pairing_code(code) is None
 
 
+def test_stop_thread_hard_cancels_a_stuck_turn(director):
+    import asyncio
+
+    from director import runtime
+
+    thread = director.create_thread("agt_director")
+    hub = runtime.Runtime()
+
+    async def run():
+        task = asyncio.create_task(asyncio.Event().wait())
+        hub._turn_tasks[thread["id"]] = task
+        director.touch_thread(thread["id"], status="running")
+        assert hub.stop_thread(thread["id"]) is True
+        await asyncio.gather(task, return_exceptions=True)
+        assert task.cancelled()
+        assert hub.cancel_event(thread["id"]).is_set()
+        assert director.get_thread(thread["id"])["status"] == "idle"
+
+    asyncio.run(run())
+
+
+def test_thread_payload_does_not_resurrect_stale_working_state(director):
+    from director import agents, runtime, server
+
+    agents.ensure_seeded()
+    thread = director.create_thread("agt_director")
+    director.touch_thread(thread["id"], status="running")
+    hub = runtime.Runtime()
+
+    payload = server._thread_payload(thread["id"], hub)
+    row = server._agent_row(director.get_agent("agt_director"), hub)
+
+    assert payload["thread"]["status"] == "idle"
+    assert row["status"] == "idle"
+    assert row["busy"] is False
+
+
 def test_pairing_code_is_not_stored_in_the_clear(director):
     from director import auth
 

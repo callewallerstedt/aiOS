@@ -2049,10 +2049,20 @@ async function send() {
 
 async function stopTurn() {
   if (!state.threadId) return;
+  const stop = $("btn-stop");
+  if (stop) stop.disabled = true;
   try {
     await api(`/api/threads/${state.threadId}/stop`, { method: "POST" });
+    state.groupWorking.clear();
+    paintGroupWorking();
+    settleThinking();
+    state.streaming = null;
+    setBusy(false);
+    addStatus("Stopped.");
   } catch (error) {
     addStatus(String(error.message || error), true);
+  } finally {
+    if (stop) stop.disabled = false;
   }
 }
 
@@ -3295,7 +3305,7 @@ function chatMenu() {
     }],
     ["Stop the current run", async () => {
       dismiss();
-      await api(`/api/threads/${state.threadId}/stop`, { method: "POST" });
+      await stopTurn();
     }],
   );
   for (const [label, action] of options) {
