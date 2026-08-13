@@ -14,11 +14,34 @@
     color: #fff8; font: 12px/1.4 -apple-system, system-ui, sans-serif;
     pointer-events: none;
   }
+  #keyboardButton {
+    position: fixed; right: 14px; bottom: max(14px, env(safe-area-inset-bottom)); z-index: 4;
+    width: 48px; height: 48px; display: grid; place-items: center;
+    border: 0; border-radius: 50%; background: #f2f0df; color: #17181a;
+    box-shadow: 0 8px 28px #0009; touch-action: manipulation;
+  }
+  #keyboardButton svg { width: 23px; height: 23px; }
+  #keyboardButton.active { background: #3a5a8c; color: #fff; }
+  #keyboardInput {
+    position: fixed; left: 50%; bottom: 0; z-index: -1;
+    width: 2px; height: 2px; padding: 0; border: 0; opacity: .01;
+    font-size: 16px; transform: translateX(-50%);
+  }
 </style>
 </head>
 <body>
 <div id="status">Connecting…</div>
 <div id="screen"></div>
+<button id="keyboardButton" type="button" aria-label="Open keyboard" title="Open keyboard">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+       stroke-linecap="round" stroke-linejoin="round">
+    <rect x="2.5" y="5" width="19" height="14" rx="2"/>
+    <path d="M6 9h.01M9 9h.01M12 9h.01M15 9h.01M18 9h.01M6 12h.01M9 12h.01M12 12h.01M15 12h.01M18 12h.01M7 15h10"/>
+  </svg>
+</button>
+<textarea id="keyboardInput" rows="1" inputmode="text" enterkeyhint="enter"
+          autocomplete="off" autocorrect="on" autocapitalize="sentences"
+          aria-label="Type on operator screen"></textarea>
 <script type="module">
 import RFB from "./core/rfb.js";
 
@@ -30,6 +53,8 @@ const url = `${proto}://${location.host}${prefix}/vnc/ws?token=${encodeURICompon
 
 const status = document.getElementById("status");
 const screen = document.getElementById("screen");
+const keyboardButton = document.getElementById("keyboardButton");
+const keyboardInput = document.getElementById("keyboardInput");
 let rfb = null;
 let closed = false;
 let attempt = 0;
@@ -38,6 +63,44 @@ function showStatus(text) {
   status.textContent = text;
   if (!status.isConnected) document.body.append(status);
 }
+
+function sendKey(keysym) {
+  if (!rfb || !keysym) return;
+  rfb.sendKey(keysym, null, true);
+  rfb.sendKey(keysym, null, false);
+}
+
+function sendText(text) {
+  for (const char of String(text || "")) {
+    const point = char.codePointAt(0);
+    sendKey(point <= 0xff ? point : 0x01000000 | point);
+  }
+}
+
+function openKeyboard() {
+  keyboardInput.focus({ preventScroll: true });
+  keyboardButton.classList.add("active");
+}
+
+keyboardButton.addEventListener("click", openKeyboard);
+keyboardInput.addEventListener("blur", () => keyboardButton.classList.remove("active"));
+keyboardInput.addEventListener("input", (event) => {
+  if (event.inputType === "deleteContentBackward") sendKey(0xff08);
+  else if (event.inputType === "deleteContentForward") sendKey(0xffff);
+  else if (event.inputType === "insertLineBreak") sendKey(0xff0d);
+  else if (event.data) sendText(event.data);
+  keyboardInput.value = "";
+});
+keyboardInput.addEventListener("keydown", (event) => {
+  const special = { Backspace: 0xff08, Delete: 0xffff, Enter: 0xff0d,
+                    Tab: 0xff09, Escape: 0xff1b };
+  if (!special[event.key]) return;
+  event.preventDefault();
+  sendKey(special[event.key]);
+});
+window.addEventListener("message", (event) => {
+  if (event.data?.type === "director.open-keyboard") openKeyboard();
+});
 
 function connect() {
   if (closed) return;

@@ -2,6 +2,16 @@ import asyncio
 from pathlib import Path
 
 
+def test_operator_viewer_exposes_a_phone_keyboard_bridge():
+    root = Path(__file__).resolve().parents[1]
+    viewer = (root / "director/operator/viewer.html").read_text(encoding="utf-8")
+    assert 'id="keyboardButton"' in viewer
+    assert 'id="keyboardInput"' in viewer
+    assert "director.open-keyboard" in viewer
+    assert "rfb.sendKey" in viewer
+    assert "deleteContentBackward" in viewer
+
+
 def test_healthy_viewer_connection_does_not_probe_or_start_operator(monkeypatch):
     from director.operator import display
 

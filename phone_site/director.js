@@ -654,8 +654,28 @@ function paintAgentName(node, agent) {
   node.textContent = "";
   node.append(el("span", "name-text", agent.name || "Agent"));
   const sub = String(agent.subtitle || "").trim();
-  if (sub) node.append(el("span", "sub-pill", sub));
+  if (sub) node.append(subtitlePill(sub));
   if (agent.busy || agent.status === "waiting") node.append(el("span", "dot busy"));
+}
+
+function subtitlePill(text) {
+  const pill = el("span", "sub-pill");
+  const track = el("span", "sub-pill-track");
+  const original = el("span", "sub-pill-copy", text);
+  const duplicate = el("span", "sub-pill-copy", text);
+  duplicate.setAttribute("aria-hidden", "true");
+  track.append(original, duplicate);
+  pill.append(track);
+  requestAnimationFrame(() => {
+    const width = original.getBoundingClientRect().width;
+    const overflowing = width > pill.clientWidth;
+    pill.classList.toggle("scrolling", overflowing);
+    if (overflowing) {
+      pill.style.setProperty("--subtitle-roll",
+        `${Math.max(6, width / 18).toFixed(2)}s`);
+    }
+  });
+  return pill;
 }
 
 function updateAgentRow(row, agent) {
@@ -1758,15 +1778,13 @@ function pinnedAgent() {
 }
 
 function paintHomeVoice(text = "") {
-  const label = $("home-voice-label");
   const button = $("btn-home-voice");
-  if (!label || !button) return;
+  if (!button) return;
   const agent = pinnedAgent();
   const fallback = agent ? `Hold to talk to ${agent.name}` : "Choose a pinned agent in Settings";
-  label.textContent = text || fallback;
   button.disabled = !agent;
-  button.title = fallback;
-  button.setAttribute("aria-label", fallback);
+  button.title = text || fallback;
+  button.setAttribute("aria-label", text || fallback);
 }
 
 function markMachine(payload, online) {
@@ -1869,7 +1887,7 @@ function paintChatHeader(agent) {
   title.textContent = "";
   title.append(el("span", "name-text", agent.name || "Director"));
   const subLabel = String(agent.subtitle || "").trim();
-  if (subLabel) title.append(el("span", "sub-pill", subLabel));
+  if (subLabel) title.append(subtitlePill(subLabel));
   $("composer-input").placeholder = isGroup(agent)
     ? `Message ${agent.name || "the group"}…`
     : `Message ${agent.name || "Director"}…`;
@@ -2260,10 +2278,21 @@ function ensureTakeoverShell() {
   wrap.classList.add("hidden");
   const bar = el("div", "bar");
   bar.append(el("div", "label", "Operator screen — you are in control"));
+  const keyboard = el("button", "icon-btn keyboard-btn");
+  keyboard.type = "button";
+  keyboard.title = "Open keyboard";
+  keyboard.setAttribute("aria-label", "Open keyboard");
+  keyboard.innerHTML = svg(
+    '<rect x="2.5" y="5" width="19" height="14" rx="2"/>'
+    + '<path d="M6 9h.01M9 9h.01M12 9h.01M15 9h.01M18 9h.01M6 12h.01M9 12h.01M12 12h.01M15 12h.01M18 12h.01M7 15h10"/>');
+  keyboard.addEventListener("click", () => {
+    const frame = wrap.querySelector("iframe");
+    frame?.contentWindow?.postMessage({ type: "director.open-keyboard" }, "*");
+  });
   const close = el("button", "icon-btn");
   close.innerHTML = svg('<path d="M6 6l12 12M18 6L6 18"/>');
   close.addEventListener("click", closeTakeover);
-  bar.append(close);
+  bar.append(keyboard, close);
   const frame = document.createElement("iframe");
   frame.src = "about:blank";
   frame.allow = "clipboard-read; clipboard-write";
@@ -2686,6 +2715,17 @@ function developerGallery() {
     + `<div class="bubble-agent assistant"><p>I found the issue and sent it to Director.</p></div></div></div>`
     + `<div class="row-agent relay-message"><div class="speech"><div class="speaker-name">From Coder</div>`
     + `<div class="bubble-agent relay-bubble">The tests are green.</div></div></div>`, "chat"));
+  body.append(previewBlock("Scrolling subtitle",
+    `<div class="title"><h1><span class="name-text">Researcher</span>`
+    + `<span class="sub-pill scrolling" style="--subtitle-roll:8s;max-width:140px"><span class="sub-pill-track">`
+    + `<span class="sub-pill-copy">Product discovery and long-range planning</span>`
+    + `<span class="sub-pill-copy" aria-hidden="true">Product discovery and long-range planning</span>`
+    + `</span></span></h1></div>`, "chat"));
+  body.append(previewBlock("Homepage voice",
+    `<div class="home-voice-wrap"><button class="home-voice" type="button" aria-label="Hold to talk">`
+    + `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round">`
+    + `<rect x="9" y="2.5" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3.5"/>`
+    + `</svg></button></div>`, "actions"));
   body.append(previewBlock("Tool states",
     `<div class="tool-card running"><button class="tool-chip"><span class="glyph">${loadingPixels()}</span>`
     + `<span class="name">Searching chats</span><span class="detail">Windows power state</span><span class="meta">running</span></button></div>`

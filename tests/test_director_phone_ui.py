@@ -275,7 +275,40 @@ def test_push_uses_agent_heading_and_is_silent_while_app_is_visible():
     assert 'payload.agent || payload.title || "Director"' in SW
     assert 'client.visibilityState === "visible"' in SW
     assert "showNotification(title" in SW
-    assert 'const VERSION = "director-v30"' in SW
+    assert 'const VERSION = "director-v31"' in SW
+
+
+def test_subtitle_rolls_seamlessly_only_when_it_overflows():
+    assert "function subtitlePill(text)" in JS
+    assert 'duplicate.setAttribute("aria-hidden", "true")' in JS
+    assert 'width > pill.clientWidth' in JS
+    assert "@keyframes subtitle-roll" in CSS
+    assert "translateX(calc(-50% - 12px))" in CSS
+
+
+def test_chat_bubbles_share_padding_and_have_sharp_tails():
+    bubbles = _block(CSS, ".bubble-user, .bubble-agent {", ".bubble-user .attach-thumbs")
+    assert "padding: 10px 14px" in bubbles
+    assert "border-radius: 18px 18px 3px 18px" in bubbles
+    assert "border-radius: 18px 18px 18px 3px" in bubbles
+    beautiful = (ROOT / "phone_site/code/code-beautiful.css").read_text(encoding="utf-8")
+    override = _block(beautiful, ".bubble-user {", "/* Streaming Text answer surface. */")
+    assert "padding: 10px 14px" in override
+    assert "border-radius: 18px 18px 3px 18px" in override
+
+
+def test_home_voice_is_icon_only_accent_and_half_the_mobile_width():
+    assert "home-voice-label" not in HTML
+    voice = _block(CSS, ".home-voice {", ".home-voice:active")
+    assert "width: min(50vw" in voice
+    assert "aspect-ratio: 1" in voice
+    assert "background: var(--accent)" in voice
+
+
+def test_takeover_toolbar_can_request_the_software_keyboard():
+    shell = _block(JS, "function ensureTakeoverShell()", "function openTakeover")
+    assert 'aria-label", "Open keyboard"' in shell
+    assert "director.open-keyboard" in shell
 
 
 def test_supplied_eye_sheet_is_selectable_and_rotates_on_active_blobs():
