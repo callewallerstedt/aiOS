@@ -30,12 +30,6 @@ from . import ToolContext, ToolResult, tool
                 "description": "The goal, in plain language, including any value to "
                                "read back and what finished looks like.",
             },
-            "review_every": {
-                "type": "integer",
-                "minimum": 1,
-                "description": ("Progress-review interval. Default 30. This is not a hard "
-                                "step limit; work continues when meaningful progress is confirmed."),
-            },
         },
         "required": ["task"],
     },
@@ -48,11 +42,12 @@ async def operator(ctx: ToolContext, task: str = "", review_every: int = 0,
     if ctx.depth > 2:
         return ToolResult(error="operator dispatch nested too deep")
 
-    # Treat the old hidden max_steps argument as a review interval so an
-    # already-generated call cannot reintroduce a hard ceiling during deploy.
+    # The checkpoint cadence is a user setting, not a planning choice. Ignore
+    # legacy generated review_every/max_steps arguments so a coordinator cannot
+    # quietly shorten the requested 30-step interval.
     configured_interval = int(((ctx.settings.get("operator", {}) or {})
                                .get("review_every") or 30))
-    interval = max(1, int(review_every or max_steps or configured_interval))
+    interval = max(1, configured_interval)
     job = store.create_job(kind="operator", request={"task": goal,
                                                       "review_every": interval},
                            thread_id=ctx.thread_id, agent_id=ctx.agent.get("id", ""),
@@ -75,7 +70,7 @@ async def operator(ctx: ToolContext, task: str = "", review_every: int = 0,
         output=f"operator job {job['id']} started — it will report back here when it "
                "finishes. Tell Calle what you kicked off, then stop.",
         card={"title": "operator", "preview": goal[:90], "meta": "running",
-              "tone": "accent", "job_id": job["id"]},
+              "tone": "accent", "job_id": job["id"], "job_kind": "operator"},
     )
 
 

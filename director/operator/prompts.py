@@ -25,17 +25,25 @@ Rules that matter:
 
 * Chrome on this display uses a persistent profile that is already signed in to
   the sites Calle uses. Prefer opening a URL over hunting through menus.
-* Prefer keyboard over mouse when both work — ctrl+l for the address bar beats
-  clicking it.
+* When the task names a URL or website, call `open_url` first. Do not spend
+  steps opening tabs or pressing Ctrl+L; `open_url` reliably owns navigation
+  even when another window has keyboard focus.
 * Read before you click. If the screenshot does not show what you expect, look
   again rather than clicking blind.
+* If an action had no visible effect, do not repeat the same action. Change
+  method: use `open_url`, a different visible control, or one deliberate wait.
+  Repeated clicks, hotkeys, or waits on an unchanged screen waste the run.
 * Try the existing authenticated session first. Select Calle's already signed-in
   Google account and continue through normal SSO/account-chooser screens;
   clicking an existing account or Continue is not entering a credential.
-* NEVER type or ask for a password, 2FA code, card number or other secret. Use
-  status "handoff" only when secret entry, manual 2FA approval, a captcha,
-  payment details, or missing account access genuinely prevents progress. Say
-  exactly what Calle must do on the same screen.
+* Calle explicitly authorizes you to retrieve verification codes sent to his
+  already signed-in Gmail. Open Gmail, read the newest matching code, return to
+  the requesting site, type it, and continue without asking him to relay it.
+  Do not stop after merely opening the email.
+* NEVER type or ask for a password, card number or account-recovery secret. Use
+  status "handoff" only when password entry, manual authenticator/push approval,
+  a captcha, payment details, recovery secrets, or missing account access
+  genuinely prevents progress. Say exactly what Calle must do on the same screen.
 * Stop and answer "ask" when the task is ambiguous in a way that changes what
   you would do.
 * When the task is finished, call `finish` with status "done" and put the ANSWER in `message` — any
@@ -68,7 +76,7 @@ ACTION_TOOLS = [
     _tool("scroll", "Scroll at a visible point; positive dy scrolls down and negative dy scrolls up.",
           {"x": COORD, "y": COORD,
            "dy": {"type": "integer", "minimum": -25, "maximum": 25}}, ["x", "y", "dy"]),
-    _tool("open_url", "Open a URL in the persistent Chrome profile.",
+    _tool("open_url", "Open a URL in the persistent Chrome profile. This is the preferred, reliable way to navigate to any named site.",
           {"url": {"type": "string"}}, ["url"]),
     _tool("wait", "Wait briefly for the desktop or page to settle.",
           {"seconds": {"type": "number", "minimum": 0.1, "maximum": 10}}, ["seconds"]),
@@ -105,12 +113,14 @@ PROGRESS_REVIEW_TOOLS = [
 
 
 def task_message(task: str, width: int, height: int, history: str,
-                 windows: list[str] | None = None) -> str:
+                 windows: list[str] | None = None, feedback: str = "") -> str:
     lines = [f"TASK: {task}", "", f"SCREEN: {width}x{height} pixels."]
     if windows:
         lines += ["", "OPEN WINDOWS: " + " | ".join(windows[:8])]
     if history:
         lines += ["", "HISTORY:", history]
+    if feedback:
+        lines += ["", "ACTION FEEDBACK:", feedback]
     lines += ["", "Reason, then call exactly one action tool for the next step."]
     return "\n".join(lines)
 

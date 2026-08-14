@@ -94,6 +94,19 @@ def test_device_lookup_round_trips(director):
     assert auth.device_for_token("not-a-token") is None
 
 
+def test_job_events_are_filtered_to_the_exact_background_job(director):
+    first = director.create_job(kind="operator", request={"task": "first"})
+    second = director.create_job(kind="operator", request={"task": "second"})
+    director.add_event("operator.step", {"job_id": first["id"], "step": 1})
+    director.add_event("operator.step", {"job_id": second["id"], "step": 1})
+    director.add_event("operator.done", {"job_id": first["id"], "steps": 1})
+
+    events = director.list_job_events(first["id"])
+
+    assert [row["kind"] for row in events] == ["operator.step", "operator.done"]
+    assert all(row["payload"]["job_id"] == first["id"] for row in events)
+
+
 def test_wrong_token_never_matches_a_machine(director):
     from director import auth
 
@@ -761,6 +774,8 @@ def test_operator_progress_checkpoint_can_continue_past_the_interval(monkeypatch
     third_message = json.dumps(normal_messages[2])
     assert "Progress confirmed" in third_message
     assert "Open the artist and inspect Music analytics" in third_message
+    assert "ACTION FEEDBACK" in json.dumps(normal_messages[1])
+    assert "screen is unchanged" in json.dumps(normal_messages[1]).lower()
 
 
 def test_operator_defaults_to_progress_reviews_not_a_step_budget():
@@ -768,12 +783,68 @@ def test_operator_defaults_to_progress_reviews_not_a_step_budget():
 
     operator = next(tool for tool in tools.all_tools() if tool.name == "operator")
     properties = operator.parameters["properties"]
-    assert "review_every" in properties and "max_steps" not in properties
+    assert set(properties) == {"task"}
     assert config.DEFAULT_SETTINGS["operator"]["review_every"] == 30
     assert "max_steps" not in config.DEFAULT_SETTINGS["operator"]
     migrated = config._without_legacy_step_budget({
         "operator": {"max_steps": 40, "model": "gpt-5.6-luna"}})
     assert migrated["operator"] == {"model": "gpt-5.6-luna"}
+
+
+def test_operator_dispatch_ignores_legacy_short_checkpoint_arguments(director):
+    import asyncio
+
+    from director.tools import ToolContext
+    from director.tools import operator as operator_tool
+
+    agent = director.create_agent(name="T", agent_id="agt_operator_test")
+    thread = director.create_thread(agent["id"])
+    started = {}
+
+    class Hub:
+        def start_job(self, job, run):
+            started["job"] = job
+            started["run"] = run
+
+    ctx = ToolContext(
+        agent=agent, thread_id=thread["id"],
+        settings={"operator": {"review_every": 30}},
+        emit=lambda *a, **k: asyncio.sleep(0),
+        request_approval=lambda **k: asyncio.sleep(0),
+        ask_user=lambda *a, **k: asyncio.sleep(0),
+        cancel=asyncio.Event(), hub=Hub(),
+    )
+    result = asyncio.run(operator_tool.operator(
+        ctx, "Open the site", review_every=15, max_steps=10))
+
+    assert started["job"]["request"]["review_every"] == 30
+    assert result.card["job_kind"] == "operator"
+
+
+def test_operator_action_log_does_not_persist_typed_verification_code(monkeypatch):
+    import asyncio
+
+    from director.operator import loop, x11
+
+    async def type_text(text, settings=None):
+        assert text == "123456"
+
+    monkeypatch.setattr(x11, "type_text", type_text)
+    result = asyncio.run(loop.execute({"type": "type", "text": "123456"}, {}))
+
+    assert result == "typed 6 characters"
+    assert "123456" not in result
+
+
+def test_operator_prompt_uses_direct_urls_and_authorized_gmail_codes():
+    from director import agents
+    from director.operator import prompts
+
+    assert "call `open_url` first" in prompts.SYSTEM_PROMPT
+    assert "signed-in Gmail" in prompts.SYSTEM_PROMPT
+    assert "type it, and continue" in prompts.SYSTEM_PROMPT
+    assert "signed-in Gmail" in agents.BASE_PROMPT
+    assert "enter it, and keep" in agents.OPERATOR_PROMPT
 
 
 def test_keysym_aliases_cover_what_the_prompt_promises():

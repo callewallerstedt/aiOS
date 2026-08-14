@@ -29,6 +29,7 @@ const state = {
   tools: new Map(),     // call_id -> element
   jobs: new Map(),      // job_id -> element
   jobMeta: new Map(),   // job_id -> { session_id, title, ... }
+  operatorJobs: new Map(), // job_id -> inline Operator event viewer
   threads: new Map(),   // agentId -> last thread payload
   openGen: 0,
   shot: { image: "", at: 0 },
@@ -1077,14 +1078,21 @@ function toolCard({ callId, name, args, card, running }) {
     svg('<path d="M6 9l6 6 6-6"/>', "card-chevron");
   const body = el("div", "tool-body", card?.body || "");
   chip.addEventListener("click", (event) => {
+    if (wrap.dataset.operatorJobId) {
+      event.preventDefault();
+      wrap.classList.toggle("expanded");
+      if (wrap.classList.contains("expanded")) loadOperatorJob(wrap.dataset.operatorJobId);
+      return;
+    }
     if (card?.agent_id) {
       event.preventDefault();
       openAgent(card.agent_id);
       return;
     }
-    if (card?.job_id) {
+    if (wrap.dataset.jobId) {
       event.preventDefault();
-      openCodeSession(card.job_id, card.session_id || "", card.preview || detail);
+      openCodeSession(wrap.dataset.jobId, wrap.dataset.sessionId || "",
+                      wrap.dataset.jobTitle || detail);
       return;
     }
     if (!body.textContent) return;
@@ -1093,10 +1101,13 @@ function toolCard({ callId, name, args, card, running }) {
   wrap.append(chip, body);
   if (card?.tone) wrap.classList.add(card.tone);
   if (card?.agent_id) wrap.classList.add("agent-link");
-  if (card?.job_id) {
+  if (card?.job_id && (card?.job_kind === "operator" || name === "operator")) {
+    configureOperatorJob(wrap, card.job_id);
+  } else if (card?.job_id) {
     wrap.classList.add("code-job");
     wrap.dataset.jobId = card.job_id;
     if (card.session_id) wrap.dataset.sessionId = card.session_id;
+    wrap.dataset.jobTitle = card.preview || detail;
   }
   if (callId) state.tools.set(callId, wrap);
   appendTranscript(wrap);
@@ -1133,14 +1144,13 @@ function finishTool(callId, name, card) {
   chip.querySelector(".meta").textContent = card?.meta || "";
   const body = wrap.querySelector(".tool-body");
   body.textContent = card?.body || "";
-  if (card?.job_id) {
+  if (card?.job_id && (card?.job_kind === "operator" || name === "operator")) {
+    configureOperatorJob(wrap, card.job_id);
+  } else if (card?.job_id) {
     wrap.classList.add("code-job");
     wrap.dataset.jobId = card.job_id;
     if (card.session_id) wrap.dataset.sessionId = card.session_id;
-    chip.onclick = (event) => {
-      event.preventDefault();
-      openCodeSession(card.job_id, card.session_id || "", card.preview || "");
-    };
+    wrap.dataset.jobTitle = card.preview || "";
   }
   if (card?.takeover) {
     const open = el("button", "btn ghost", "Open the screen");
@@ -1148,6 +1158,107 @@ function finishTool(callId, name, card) {
     wrap.append(open);
   }
   scrollDown();
+}
+
+function configureOperatorJob(wrap, jobId) {
+  const id = String(jobId || "");
+  if (!id) return;
+  wrap.classList.add("operator-job");
+  wrap.dataset.operatorJobId = id;
+  const body = wrap.querySelector(".tool-body");
+  body.classList.add("operator-timeline");
+  if (!body.childNodes.length) body.append(el("div", "operator-empty", "Tap to view this run"));
+  const existing = state.operatorJobs.get(id);
+  state.operatorJobs.set(id, existing
+    ? { ...existing, wrap, body }
+    : { wrap, body, seen: new Set(), loaded: false, loading: false });
+}
+
+function operatorEventNode(event) {
+  const payload = event.payload || {};
+  const step = Number(payload.step || payload.steps || 0);
+  const label = step ? `Step ${step}` : "Operator";
+  if (event.kind === "operator.screenshot" && payload.image) {
+    const node = el("figure", "operator-frame");
+    const image = document.createElement("img");
+    image.src = payload.image;
+    image.alt = `${label} screenshot`;
+    image.loading = "lazy";
+    node.append(image, el("figcaption", null,
+      `${label} · ${payload.width || "?"}×${payload.height || "?"}`));
+    return node;
+  }
+  const node = el("div", `operator-event ${event.kind.replaceAll(".", "-")}`);
+  let title = label;
+  let text = "";
+  if (event.kind === "operator.started") {
+    title = "Task";
+    text = payload.task || "Operator started";
+  } else if (event.kind === "operator.step") {
+    title = `${label} · Thinking`;
+    text = payload.thought || payload.message || payload.native_tool || "Choosing the next action";
+  } else if (event.kind === "operator.actions") {
+    title = `${label} · Action`;
+    text = (payload.performed || []).join("\n") || "Action completed";
+  } else if (event.kind === "operator.progress_review") {
+    title = `${label} · Progress review`;
+    text = payload.progress
+      ? (payload.summary || "Progress confirmed")
+      : (payload.issue || "No progress detected");
+  } else if (event.kind === "operator.done") {
+    title = "Finished";
+    text = payload.summary || "Done";
+  } else if (event.kind === "operator.stuck") {
+    title = "Stopped · no progress";
+    text = payload.issue || "The run was stuck";
+  } else if (event.kind === "operator.failed") {
+    title = "Failed";
+    text = payload.error || "Operator failed";
+  } else if (event.kind === "operator.stopped") {
+    title = "Stopped";
+    text = payload.reason || "Stopped";
+  } else {
+    return null;
+  }
+  node.append(el("div", "operator-event-title", title));
+  node.append(el("div", "operator-event-text", text));
+  return node;
+}
+
+function recordOperatorEvent(event) {
+  const jobId = String(event.payload?.job_id || "");
+  const view = state.operatorJobs.get(jobId);
+  if (!jobId || !view || view.seen.has(event.id)) return;
+  view.seen.add(event.id);
+  view.body.querySelector(".operator-empty")?.remove();
+  const node = operatorEventNode(event);
+  if (node) view.body.append(node);
+  const meta = view.wrap.querySelector(".tool-chip .meta");
+  if (event.kind === "operator.done") meta.textContent = "done";
+  else if (event.kind === "operator.failed") meta.textContent = "failed";
+  else if (event.kind === "operator.stuck") meta.textContent = "stopped";
+  else if (event.kind === "operator.step") meta.textContent = `step ${event.payload?.step || ""}`.trim();
+}
+
+async function loadOperatorJob(jobId) {
+  const view = state.operatorJobs.get(String(jobId || ""));
+  if (!view || view.loaded || view.loading) return;
+  view.loading = true;
+  const empty = view.body.querySelector(".operator-empty");
+  if (empty) empty.textContent = "Loading run…";
+  try {
+    const data = await api(`/api/jobs/${encodeURIComponent(jobId)}/events?since=0`);
+    for (const event of data.events || []) recordOperatorEvent(event);
+    view.loaded = true;
+    if (!(data.events || []).length) {
+      view.body.querySelector(".operator-empty")?.remove();
+      view.body.append(el("div", "operator-empty", "No Operator events were recorded."));
+    }
+  } catch (error) {
+    if (empty) empty.textContent = String(error.message || error);
+  } finally {
+    view.loading = false;
+  }
 }
 
 function approvalCard(payload) {
@@ -1328,6 +1439,25 @@ function taskRow(jobId, label, stateText, sessionId = "") {
 
 /* ---------------- rendering stored history ---------------- */
 
+function ensureHistoryToggle() {
+  let button = $("btn-history-toggle");
+  if (!button) {
+    button = el("button", "history-toggle hidden");
+    button.id = "btn-history-toggle";
+    button.type = "button";
+    button.title = "Previous messages";
+    button.setAttribute("aria-label", "Show previous messages");
+    button.setAttribute("aria-expanded", "false");
+    button.innerHTML = `<span>Older chats</span>${svg(
+      '<path d="M7 9l5 5 5-5"/>', "history-chevron")}`;
+  }
+  if (!button.dataset.bound) {
+    button.addEventListener("click", togglePreviousMessages);
+    button.dataset.bound = "true";
+  }
+  return button;
+}
+
 function renderMessages(messages, thread = state.currentThread) {
   state.currentThread = thread || null;
   state.currentMessages = Array.isArray(messages) ? messages : [];
@@ -1336,7 +1466,7 @@ function renderMessages(messages, thread = state.currentThread) {
     ? state.currentMessages.filter((message) => Number(message.sequence || 0) <= through).length
     : 0;
   const hidden = Math.max(Number(thread?.hidden_count || 0), derivedHidden);
-  const historyButton = $("btn-history-toggle");
+  const historyButton = ensureHistoryToggle();
   historyButton?.classList.toggle("hidden", hidden === 0);
   historyButton?.setAttribute("aria-expanded", state.historyExpanded ? "true" : "false");
   historyButton?.setAttribute("aria-label", state.historyExpanded
@@ -1353,6 +1483,7 @@ function renderMessages(messages, thread = state.currentThread) {
   state.tools.clear();
   state.jobs.clear();
   state.jobMeta.clear();
+  state.operatorJobs.clear();
   state.streaming = null;
   state.thinking = null;
   state.reasoningRendered = false;
@@ -1523,10 +1654,12 @@ function handleEvent(event) {
     }
 
     case "operator.screenshot":
-      shotCard(payload);
+      if (payload.job_id) recordOperatorEvent(event);
+      else shotCard(payload);
       break;
 
     case "operator.stuck":
+      recordOperatorEvent(event);
       addStatus(`Operator stopped: ${payload.issue || "no meaningful progress"}`, true);
       break;
 
@@ -1537,6 +1670,7 @@ function handleEvent(event) {
     case "operator.done":
     case "operator.failed":
     case "operator.stopped":
+      recordOperatorEvent(event);
       break;
 
     case "operator.takeover":
@@ -4253,7 +4387,7 @@ function wire() {
   $("context-screen")?.addEventListener("click", () => openTakeover());
   $("btn-back").addEventListener("click", navigateBack);
   $("btn-code-back")?.addEventListener("click", navigateBack);
-  $("btn-history-toggle")?.addEventListener("click", togglePreviousMessages);
+  ensureHistoryToggle();
   installEdgeSwipe();
   window.addEventListener("popstate", (event) => {
     const target = event.state || { directorScreen: "agents" };

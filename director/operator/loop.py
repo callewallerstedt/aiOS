@@ -18,7 +18,7 @@ from . import prompts, x11
 
 Emit = Callable[[str, dict], Awaitable[None]]
 
-MAX_HISTORY_STEPS = 8
+MAX_HISTORY_STEPS = 12
 JSON_BLOCK = re.compile(r"(?s)\{.*\}")
 
 
@@ -202,7 +202,9 @@ async def execute(action: dict, settings: dict) -> str:
     if kind == "type":
         text = str(action.get("text") or "")
         await x11.type_text(text, settings)
-        return f"type {text[:40]!r}"
+        # A typed value can be a one-time verification code. Keep its content
+        # out of the persisted action trace while still recording the action.
+        return f"typed {len(text)} characters"
     if kind == "key":
         await x11.press(str(action.get("key") or ""), int(action.get("presses") or 1), settings)
         return f"key {action.get('key')}"
@@ -267,6 +269,7 @@ async def run_task(task: str, *, emit: Emit, settings: dict | None = None,
     checkpoint_shot: tuple[str, int, int] | None = None
     checkpoint_step = 0
     steps = 0
+    last_performed = ""
 
     await emit("operator.started", {"task": task, "display": state.get("display"),
                                     "review_every": review_interval})
@@ -278,6 +281,7 @@ async def run_task(task: str, *, emit: Emit, settings: dict | None = None,
         steps += 1
 
         width, height = await x11.screen_size(cfg)
+        previous_image = last_shot[0] if last_shot else ""
         if need_screen or last_shot is None:
             png = await x11.capture(cfg)
             data_url, shot_w, shot_h = x11.encode_jpeg(png)
@@ -288,10 +292,16 @@ async def run_task(task: str, *, emit: Emit, settings: dict | None = None,
                 checkpoint_shot = last_shot
         data_url, shot_w, shot_h = last_shot
         factor = (width / float(shot_w)) if shot_w else 1.0
+        feedback = ""
+        if previous_image and previous_image == data_url and last_performed:
+            feedback = (
+                f"The screen is unchanged after: {last_performed[:300]}. "
+                "Do not repeat that action; choose a different method.")
 
         windows = await x11.window_list(settings=cfg)
         message = prompts.task_message(task, shot_w, shot_h,
-                                       "\n".join(history[-MAX_HISTORY_STEPS:]), windows)
+                                       "\n".join(history[-MAX_HISTORY_STEPS:]),
+                                       windows, feedback)
         items = [models.user_message([models.text_part(message), models.image_part(data_url)])]
 
         try:
@@ -330,6 +340,7 @@ async def run_task(task: str, *, emit: Emit, settings: dict | None = None,
 
         if performed:
             await emit("operator.actions", {"step": steps, "performed": performed})
+        last_performed = "; ".join(performed)
 
         step_record = (f"[{steps}] {thought[:400]}\n    did: " +
                        ("; ".join(performed)[:400] if performed else "(nothing)"))

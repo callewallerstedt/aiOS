@@ -99,6 +99,25 @@ def test_compacted_history_has_a_small_disclosure_control():
     history_css = _block(CSS, ".history-toggle {", ".history-toggle:hover")
     assert "position: sticky" in history_css
     assert "top: 0" in history_css
+    assert "function ensureHistoryToggle()" in JS
+    ensure = _block(JS, "function ensureHistoryToggle()", "function renderMessages")
+    assert 'button.addEventListener("click", togglePreviousMessages)' in ensure
+    assert "const historyButton = ensureHistoryToggle()" in JS
+
+
+def test_operator_tool_card_opens_its_own_reasoning_and_screenshot_timeline():
+    tool = _block(JS, "function toolCard", "function markPendingTool")
+    assert "wrap.dataset.operatorJobId" in tool
+    assert "loadOperatorJob" in tool
+    finish = _block(JS, "function finishTool", "function configureOperatorJob")
+    assert 'card?.job_kind === "operator" || name === "operator"' in finish
+    assert "/events?since=0" in JS
+    assert "operatorEventNode" in JS
+    assert 'event.kind === "operator.screenshot"' in JS
+    assert 'event.kind === "operator.step"' in JS
+    assert 'event.kind === "operator.actions"' in JS
+    assert ".operator-frame" in CSS
+    assert ".operator-event-text" in CSS
 
 
 def test_live_churning_grid_survives_into_real_thinking_and_history():
@@ -327,7 +346,7 @@ def test_push_uses_agent_heading_and_is_silent_while_app_is_visible():
     assert 'payload.agent || payload.title || "Director"' in SW
     assert 'client.visibilityState === "visible"' in SW
     assert "showNotification(title" in SW
-    assert 'const VERSION = "director-v36"' in SW
+    assert 'const VERSION = "director-v37"' in SW
 
 
 def test_stop_button_clears_stale_working_state_after_server_acknowledges():
@@ -375,7 +394,7 @@ def test_takeover_toolbar_can_request_the_software_keyboard():
     assert "director.keyboard-input" in shell
     assert "director.keyboard-key" in shell
     assert ".takeover-keyboard-input" in CSS
-    assert 'const VERSION = "director-v36"' in SW
+    assert 'const VERSION = "director-v37"' in SW
 
 
 def test_supplied_eye_sheet_is_selectable_and_rotates_on_active_blobs():

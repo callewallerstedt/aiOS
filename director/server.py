@@ -480,6 +480,21 @@ async def get_job(request: web.Request) -> web.Response:
     return json_response({"ok": True, "job": job})
 
 
+@ROUTES.get("/api/jobs/{job_id}/events")
+async def job_events(request: web.Request) -> web.Response:
+    """Return the reasoning, actions and screenshots for one background job."""
+    job = store.get_job(request.match_info["job_id"])
+    if not job:
+        return error("no such job", status=404)
+    try:
+        since = max(0, int(request.query.get("since") or 0))
+    except (TypeError, ValueError):
+        since = 0
+    events = store.list_job_events(job["id"], since=since)
+    return json_response({"ok": True, "job": job, "events": events,
+                          "cursor": events[-1]["id"] if events else since})
+
+
 @ROUTES.get("/api/jobs/{job_id}/code-events")
 async def job_code_events(request: web.Request) -> web.Response:
     """Proxy the CODE transcript events for a Director-dispatched job.

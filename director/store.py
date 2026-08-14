@@ -478,6 +478,18 @@ def list_events(*, since: int = 0, thread_id: str = "", limit: int = 500) -> lis
     return rows
 
 
+def list_job_events(job_id: str, *, since: int = 0, limit: int = 1000) -> list[dict]:
+    """Return the persisted event stream for one background job."""
+    rows = _rows(
+        "SELECT * FROM events WHERE id > ? "
+        "AND json_extract(payload, '$.job_id') = ? ORDER BY id LIMIT ?",
+        (int(since or 0), str(job_id or ""), max(1, int(limit or 1000))),
+    )
+    for row in rows:
+        row["payload"] = _loads(row.get("payload"), {})
+    return rows
+
+
 def latest_event_id() -> int:
     row = _row("SELECT COALESCE(MAX(id), 0) AS id FROM events")
     return int(row["id"]) if row else 0
