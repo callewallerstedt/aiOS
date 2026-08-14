@@ -244,13 +244,18 @@ async def stroke(points: list[list[int]], button: str = "left", step_delay: floa
     await mouse_up(int(last[0]), int(last[1]), button, settings)
 
 
-async def scroll(x: int | None, y: int | None, dy: int = -3,
+async def scroll(x: int | None, y: int | None, dy: int = 3,
                  settings: dict[str, Any] | None = None) -> None:
     if x is not None and y is not None:
         await move(x, y, settings)
-    button = 5 if int(dy) < 0 else 4          # 4 = wheel up, 5 = wheel down
-    await xdotool("click", "--repeat", min(abs(int(dy)) or 1, 25), "--delay", "40",
-                  button, settings=settings)
+    amount = int(dy)
+    button = "5" if amount > 0 else "4"       # 4 = wheel up, 5 = wheel down
+    window = await pointer_window(settings)
+    args = ["click"]
+    if window:
+        args += ["--window", window]
+    args += ["--repeat", str(min(abs(amount) or 1, 25)), "--delay", "40", button]
+    await _checked_xdotool(*args, settings=settings)
 
 
 async def key_down(key: str, settings: dict[str, Any] | None = None) -> None:

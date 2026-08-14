@@ -515,6 +515,30 @@ def test_x11_click_surfaces_delivery_failure(monkeypatch):
         asyncio.run(x11.click(10, 20))
 
 
+def test_x11_scroll_uses_standard_direction_and_targets_window(monkeypatch):
+    import asyncio
+
+    from director.operator import x11
+
+    calls = []
+
+    async def fake_xdotool(*args, settings=None):
+        calls.append(args)
+        if args[:2] == ("getmouselocation", "--shell"):
+            return 0, "WINDOW=42"
+        return 0, ""
+
+    monkeypatch.setattr(x11, "xdotool", fake_xdotool)
+    asyncio.run(x11.scroll(400, 500, 6))
+    asyncio.run(x11.scroll(400, 500, -3))
+
+    wheel_calls = [call for call in calls if call[0] == "click"]
+    assert wheel_calls == [
+        ("click", "--window", "42", "--repeat", "6", "--delay", "40", "5"),
+        ("click", "--window", "42", "--repeat", "3", "--delay", "40", "4"),
+    ]
+
+
 def test_scaling_is_a_no_op_at_full_size():
     from director.operator import loop
 

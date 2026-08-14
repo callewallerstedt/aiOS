@@ -65,7 +65,7 @@ ACTION_TOOLS = [
            "presses": {"type": "integer", "minimum": 1, "maximum": 20}}, ["key"]),
     _tool("hotkey", "Press a keyboard shortcut such as ctrl+l.",
           {"keys": {"type": "array", "items": {"type": "string"}, "minItems": 1}}, ["keys"]),
-    _tool("scroll", "Scroll at a visible point; negative dy scrolls down.",
+    _tool("scroll", "Scroll at a visible point; positive dy scrolls down and negative dy scrolls up.",
           {"x": COORD, "y": COORD,
            "dy": {"type": "integer", "minimum": -25, "maximum": 25}}, ["x", "y", "dy"]),
     _tool("open_url", "Open a URL in the persistent Chrome profile.",

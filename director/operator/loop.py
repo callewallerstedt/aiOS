@@ -165,7 +165,7 @@ async def execute(action: dict, settings: dict) -> str:
         await x11.key_up(str(action.get("key") or ""), settings)
         return f"release {action.get('key') or 'modifiers'}"
     if kind == "scroll":
-        await x11.scroll(x, y, int(action.get("dy") or -3), settings)
+        await x11.scroll(x, y, int(action.get("dy") or 3), settings)
         return f"scroll {action.get('dy')}"
     if kind == "wait":
         seconds = max(0.0, min(float(action.get("seconds") or 0.5), 10.0))
