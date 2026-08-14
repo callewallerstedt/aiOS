@@ -32,6 +32,10 @@ COMPACTION_IDLE_SECONDS = 60 * 60
 COMPACTION_INPUT_CHARS = 120_000
 GROUP_TAG_HOPS = 12
 GROUP_QUIET_TOOLS = {"start_work", "react"}
+INTERRUPTED_TOOL_OUTPUT = (
+    "Tool execution was interrupted before completion. Treat this call as cancelled; "
+    "do not assume it succeeded."
+)
 
 
 class Runtime:
@@ -843,13 +847,18 @@ class Runtime:
                                     + "\n\nContinue as yourself. If you already "
                                       "reacted or answered, stop. Do not narrate a reaction.")
             ]
-            for row in store.list_messages(thread_id)[-12:]:
+            member_tool_rows = [
+                row for row in store.list_messages(thread_id)
+                if row["role"] in {"tool_call", "tool_result"}
+                and str((row.get("meta") or {}).get("speaker_id") or "") == member["id"]
+            ]
+            for row in _complete_tool_rows(member_tool_rows)[-12:]:
                 meta = row.get("meta") or {}
-                if row["role"] == "tool_call" and str(meta.get("speaker_id") or "") == member["id"]:
+                if row["role"] == "tool_call":
                     items.append(models.tool_call(str(meta.get("call_id") or ""),
                                                   str(meta.get("name") or ""),
                                                   str(meta.get("arguments") or "{}")))
-                elif row["role"] == "tool_result" and str(meta.get("speaker_id") or "") == member["id"]:
+                elif row["role"] == "tool_result":
                     items.append(models.tool_result(str(meta.get("call_id") or ""),
                                                     str(meta.get("output") or "")))
 
@@ -1146,35 +1155,43 @@ class Runtime:
 
         tool = tools_mod.get(name)
         image = ""
-        if tool is None:
-            output = f"unknown tool: {name}"
-            card = {"title": name, "preview": "unknown tool", "meta": "", "tone": "danger"}
-        else:
-            gate = (ctx.settings.get("safety", {}) or {}).get("confirm_destructive", True)
-            if tool.destructive and gate and not self.auto_approved(agent, ctx.settings):
-                summary = (tool.approval_summary(args) if tool.approval_summary
-                           else f"Run {name}")
-                decision = await ctx.request_approval(
-                    tool=name, summary=summary, detail=json.dumps(args, indent=2)[:1500],
-                    payload=args)
-                if str(decision.get("status")) != "approved":
-                    output = f"declined by Calle: {decision.get('note') or 'no reason given'}"
-                    card = {"title": name, "preview": summary[:90], "meta": "declined",
-                            "tone": "danger"}
-                    await self._finish_tool(thread_id, agent, call_id, name, output, card,
-                                            source=getattr(ctx, "source", ""))
-                    return
-            try:
-                result = await tool.run(ctx, **args)
-            except TypeError as exc:
-                result = tools_mod.ToolResult(error=f"bad arguments for {name}: {exc}")
-            except Exception as exc:
-                result = tools_mod.ToolResult(error=f"{type(exc).__name__}: {exc}")
-            output = result.as_output()
-            card = result.card or {"title": name, "preview": "", "meta": "", "tone": "ok"}
-            if result.error and not card.get("tone"):
-                card["tone"] = "danger"
-            image = str(result.image or "")
+        try:
+            if tool is None:
+                output = f"unknown tool: {name}"
+                card = {"title": name, "preview": "unknown tool", "meta": "", "tone": "danger"}
+            else:
+                gate = (ctx.settings.get("safety", {}) or {}).get("confirm_destructive", True)
+                if tool.destructive and gate and not self.auto_approved(agent, ctx.settings):
+                    summary = (tool.approval_summary(args) if tool.approval_summary
+                               else f"Run {name}")
+                    decision = await ctx.request_approval(
+                        tool=name, summary=summary, detail=json.dumps(args, indent=2)[:1500],
+                        payload=args)
+                    if str(decision.get("status")) != "approved":
+                        output = f"declined by Calle: {decision.get('note') or 'no reason given'}"
+                        card = {"title": name, "preview": summary[:90], "meta": "declined",
+                                "tone": "danger"}
+                        await self._finish_tool(thread_id, agent, call_id, name, output, card,
+                                                source=getattr(ctx, "source", ""))
+                        return
+                try:
+                    result = await tool.run(ctx, **args)
+                except TypeError as exc:
+                    result = tools_mod.ToolResult(error=f"bad arguments for {name}: {exc}")
+                except Exception as exc:
+                    result = tools_mod.ToolResult(error=f"{type(exc).__name__}: {exc}")
+                output = result.as_output()
+                card = result.card or {"title": name, "preview": "", "meta": "", "tone": "ok"}
+                if result.error and not card.get("tone"):
+                    card["tone"] = "danger"
+                image = str(result.image or "")
+        except asyncio.CancelledError:
+            card = {"title": name, "preview": "interrupted", "meta": "cancelled",
+                    "tone": "danger"}
+            await self._finish_tool(thread_id, agent, call_id, name,
+                                    INTERRUPTED_TOOL_OUTPUT, card,
+                                    source=getattr(ctx, "source", ""))
+            raise
 
         await self._finish_tool(thread_id, agent, call_id, name, output, card, image=image,
                                 source=getattr(ctx, "source", ""))
@@ -1193,6 +1210,53 @@ class Runtime:
                             thread_id=thread_id, agent_id=agent["id"])
 
 
+def _complete_tool_rows(rows: list[dict]) -> list[dict]:
+    """Keep every stored function call and output as one protocol-safe pair.
+
+    A user can send another message while an interactive tool is waiting, and a
+    process restart can permanently interrupt that tool. Model APIs reject both
+    an interleaved output and a call with no output, so pair known results with
+    their calls and synthesize a cancellation result for unfinished calls.
+    Result rows whose call is outside this history window are omitted.
+    """
+    results: dict[str, dict] = {}
+    for row in rows:
+        if row.get("role") != "tool_result":
+            continue
+        call_id = str((row.get("meta") or {}).get("call_id") or "")
+        if call_id and call_id not in results:
+            results[call_id] = row
+
+    completed: list[dict] = []
+    for row in rows:
+        role = row.get("role")
+        if role == "tool_result":
+            continue
+        if role != "tool_call":
+            completed.append(row)
+            continue
+        meta = row.get("meta") or {}
+        call_id = str(meta.get("call_id") or "")
+        if not call_id:
+            continue
+        completed.append(row)
+        result = results.get(call_id)
+        if result is not None:
+            completed.append(result)
+        else:
+            completed.append({
+                "role": "tool_result",
+                "content": "",
+                "meta": {
+                    "call_id": call_id,
+                    "name": str(meta.get("name") or ""),
+                    "output": INTERRUPTED_TOOL_OUTPUT,
+                    **({"speaker_id": meta["speaker_id"]} if meta.get("speaker_id") else {}),
+                },
+            })
+    return completed
+
+
 def build_items(thread_id: str) -> list[dict]:
     """Rebuild the model's item list from stored messages."""
     items: list[dict] = []
@@ -1202,7 +1266,8 @@ def build_items(thread_id: str) -> list[dict]:
     if summary and compacted_through:
         items.append(models.user_message(
             "[Compacted conversation context]\n" + summary))
-    for row in store.list_messages(thread_id, after_sequence=compacted_through):
+    rows = store.list_messages(thread_id, after_sequence=compacted_through)
+    for row in _complete_tool_rows(rows):
         role = row["role"]
         meta = row.get("meta") or {}
         if role == "user":

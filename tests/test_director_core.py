@@ -210,6 +210,87 @@ def test_history_rebuilds_tool_calls(director):
     assert "48%" in items[2]["output"]
 
 
+def test_history_keeps_tool_protocol_atomic_across_interleaved_user_message(director):
+    from director import runtime
+
+    agent = director.create_agent(name="T", agent_id="agt_atomic")
+    thread = director.create_thread(agent["id"])
+    director.add_message(thread["id"], "tool_call", "", {
+        "call_id": "call_wait", "name": "handoff", "arguments": '{}'})
+    director.add_message(thread["id"], "user", "I have more context")
+    director.add_message(thread["id"], "tool_result", "", {
+        "call_id": "call_wait", "name": "handoff", "output": "answered"})
+
+    items = runtime.build_items(thread["id"])
+
+    assert [item["type"] for item in items] == [
+        "tool_call", "tool_result", "message"]
+    assert items[0]["call_id"] == items[1]["call_id"] == "call_wait"
+    assert items[2]["content"][0]["text"] == "I have more context"
+
+
+def test_history_closes_interrupted_call_and_omits_orphan_result(director):
+    from director import runtime
+
+    agent = director.create_agent(name="T", agent_id="agt_interrupted")
+    thread = director.create_thread(agent["id"])
+    director.add_message(thread["id"], "tool_call", "", {
+        "call_id": "call_lost", "name": "handoff", "arguments": '{}'})
+    director.add_message(thread["id"], "user", "continue anyway")
+    director.add_message(thread["id"], "tool_result", "", {
+        "call_id": "call_before_window", "name": "shell", "output": "orphan"})
+
+    items = runtime.build_items(thread["id"])
+
+    assert [item["type"] for item in items] == [
+        "tool_call", "tool_result", "message"]
+    assert items[0]["call_id"] == items[1]["call_id"] == "call_lost"
+    assert "interrupted" in items[1]["output"]
+    assert "orphan" not in json.dumps(items)
+
+
+def test_cancelling_running_tool_persists_its_result(director, monkeypatch):
+    import asyncio
+
+    from director import runtime
+    from director.tools import Tool, ToolContext
+
+    agent = director.create_agent(name="T", agent_id="agt_cancel_tool")
+    thread = director.create_thread(agent["id"])
+    hub = runtime.Runtime()
+
+    async def run():
+        entered = asyncio.Event()
+
+        async def wait_forever(ctx):
+            entered.set()
+            await asyncio.Event().wait()
+
+        fake_tool = Tool(name="waiting_tool", description="", parameters={},
+                         run=wait_forever)
+        monkeypatch.setattr(runtime.tools_mod, "get", lambda name: fake_tool)
+        ctx = ToolContext(
+            agent=agent, thread_id=thread["id"], settings={},
+            emit=lambda *a, **k: asyncio.sleep(0),
+            request_approval=lambda **k: asyncio.sleep(0),
+            ask_user=lambda *a, **k: asyncio.sleep(0),
+            cancel=asyncio.Event(), hub=hub,
+        )
+        task = asyncio.create_task(hub._run_tool_call(
+            thread["id"], agent, ctx,
+            {"call_id": "call_cancel", "name": "waiting_tool", "arguments": "{}"}))
+        await entered.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(run())
+    rows = director.list_messages(thread["id"])
+    assert [row["role"] for row in rows] == ["tool_call", "tool_result"]
+    assert rows[1]["meta"]["call_id"] == "call_cancel"
+    assert "interrupted" in rows[1]["meta"]["output"]
+
+
 def test_system_messages_become_user_items(director):
     """Job results are injected as system rows; the backends only take
     user/assistant, so they must be translated rather than dropped."""
