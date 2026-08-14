@@ -280,7 +280,8 @@ def _usage_from(raw: dict) -> dict:
 
 
 async def complete(*, model: str, instructions: str, items: list[dict],
-                   tools: list[dict], reasoning: str, timeout: float,
+                   tools: list[dict], tool_choice: str = "auto",
+                   reasoning: str, timeout: float,
                    on_delta: Callable[[str], Awaitable[None]] | None = None,
                    on_reasoning: Callable[[str], Awaitable[None]] | None = None,
                    settings: dict[str, Any] | None = None) -> dict:
@@ -289,7 +290,7 @@ async def complete(*, model: str, instructions: str, items: list[dict],
         "instructions": instructions or "You are a helpful assistant.",
         "input": to_input(items),
         "tools": to_tools(tools),
-        "tool_choice": "auto",
+        "tool_choice": tool_choice,
         "parallel_tool_calls": False,
         "reasoning": reasoning_block(reasoning),
         "store": False,

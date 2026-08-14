@@ -1,14 +1,9 @@
-"""The operator's screen.
+"""The operator's Linux desktop.
 
-Director drives a virtual X display (Xvfb :99) rather than the laptop's own
-panel, for three reasons: the box is a laptop that is usually closed, a
-virtual screen never fights the human for the mouse, and it can be handed over
-from anywhere — x11vnc exports it and noVNC puts it in the phone's browser, so
-"you do the login yourself" works on a train.
-
-Xvfb, x11vnc and websockify run as systemd --user units so they outlive a
-Director restart. This module starts them if they are not already up and
-answers questions about their state.
+Director normally drives Calle's real GNOME/Xorg session on display ``:0``.
+x11vnc exports that same session so the phone handoff and the physical laptop
+show exactly what the agent sees. The old Xvfb path remains available only as
+an explicit legacy mode.
 """
 from __future__ import annotations
 
@@ -49,13 +44,25 @@ def operator_settings(settings: dict[str, Any] | None = None) -> dict:
 
 
 def display_name(settings: dict[str, Any] | None = None) -> str:
-    return str(operator_settings(settings).get("display") or ":99")
+    return str(operator_settings(settings).get("display") or ":0")
+
+
+def real_desktop(settings: dict[str, Any] | None = None) -> bool:
+    return str(operator_settings(settings).get("mode") or "real").lower() != "virtual"
+
+
+def xauthority(settings: dict[str, Any] | None = None) -> str:
+    cfg = operator_settings(settings)
+    configured = str(cfg.get("xauthority") or "").strip()
+    if configured:
+        return configured
+    return f"/run/user/{os.getuid()}/gdm/Xauthority" if real_desktop(settings) else ""
 
 
 def display_env(settings: dict[str, Any] | None = None) -> dict[str, str]:
     env = dict(os.environ)
     env["DISPLAY"] = display_name(settings)
-    env.setdefault("XAUTHORITY", "")
+    env["XAUTHORITY"] = xauthority(settings)
     return env
 
 
@@ -93,10 +100,15 @@ async def status(settings: dict[str, Any] | None = None) -> dict:
     cfg = operator_settings(settings)
     active = await asyncio.gather(*(unit_active(unit) for unit in UNITS.values()))
     states = dict(zip(UNITS, active))
+    desktop = await display_alive(settings)
+    ready = desktop and states.get("vnc", False) if real_desktop(settings) else (
+        desktop and all(states.get(key) for key in ("xvfb", "wm", "vnc")))
     return {
+        "mode": "real" if real_desktop(settings) else "virtual",
         "display": display_name(settings),
+        "desktop": desktop,
         "units": states,
-        "ready": all(states.get(key) for key in ("xvfb", "wm", "vnc")),
+        "ready": ready,
         "vnc_port": int(cfg.get("vnc_port") or 5999),
         "novnc_port": int(cfg.get("novnc_port") or 6080),
         "width": int(cfg.get("width") or 1600),
@@ -151,6 +163,26 @@ async def ensure_running(settings: dict[str, Any] | None = None, *,
     cached = _cached_ready()
     if cached is not None and not with_chrome:
         return cached
+    if real_desktop(settings):
+        states = {"xvfb": False, "wm": False,
+                  "vnc": await unit_active(UNITS["vnc"]), "chrome": False}
+        desktop_up = await display_alive(settings)
+        if desktop_up and not states["vnc"]:
+            await _run(["systemctl", "--user", "start", UNITS["vnc"]], timeout=25)
+            states["vnc"] = await unit_active(UNITS["vnc"])
+        if with_chrome and desktop_up and not await chrome_running(settings):
+            await launch_chrome("", settings)
+            states["chrome"] = True
+        cfg = operator_settings(settings)
+        return _remember_ready({
+            "mode": "real", "display": display_name(settings),
+            "desktop": desktop_up, "units": states,
+            "ready": desktop_up and states["vnc"],
+            "vnc_port": int(cfg.get("vnc_port") or 5999),
+            "novnc_port": int(cfg.get("novnc_port") or 6080),
+            "width": int(cfg.get("width") or 1280),
+            "height": int(cfg.get("height") or 720),
+        })
     started_xvfb = False
     states: dict[str, bool] = {}
     display_up = await display_alive(settings)
@@ -245,12 +277,12 @@ def chrome_binary() -> str:
 
 
 def chrome_argv(url: str = "", settings: dict[str, Any] | None = None) -> list[str]:
-    """Flags that make Chrome paint on Xvfb instead of a black window."""
+    """Build Chrome flags for the real desktop or legacy Xvfb mode."""
     binary = chrome_binary()
     cfg = operator_settings(settings)
     profile = str(config.chrome_profile_dir())
-    width = int(cfg.get("width") or 1600)
-    height = int(cfg.get("height") or 900)
+    width = int(cfg.get("width") or 1280)
+    height = int(cfg.get("height") or 720)
     argv = [
         binary,
         f"--user-data-dir={profile}",
@@ -259,16 +291,14 @@ def chrome_argv(url: str = "", settings: dict[str, Any] | None = None) -> list[s
         "--disable-session-crashed-bubble",
         "--restore-last-session",
         "--password-store=basic",
-        "--disable-gpu",
-        "--use-gl=angle",
-        "--use-angle=swiftshader",
         "--disable-dev-shm-usage",
-        "--no-sandbox",
         "--ozone-platform=x11",
         f"--window-size={width},{height}",
         "--window-position=0,0",
         "--start-maximized",
     ]
+    if not real_desktop(settings):
+        argv[7:7] = ["--disable-gpu", "--use-gl=angle", "--use-angle=swiftshader"]
     if url:
         argv.append(url)
     return argv

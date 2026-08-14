@@ -65,6 +65,7 @@ class ModelError(RuntimeError):
 
 async def complete(*, backend: str = "", model: str = "", instructions: str = "",
                    items: list[dict], tools: list[dict] | None = None,
+                   tool_choice: str = "auto",
                    reasoning: str = "", timeout: float = 180.0,
                    on_delta: Callable[[str], Awaitable[None]] | None = None,
                    on_reasoning: Callable[[str], Awaitable[None]] | None = None,
@@ -84,12 +85,14 @@ async def complete(*, backend: str = "", model: str = "", instructions: str = ""
         from . import codex
         return await codex.complete(
             model=model, instructions=instructions, items=items, tools=tools or [],
+            tool_choice=tool_choice,
             reasoning=reasoning, timeout=timeout, on_delta=on_delta,
             on_reasoning=on_reasoning, settings=cfg)
     if backend == "openrouter":
         from . import openrouter
         return await openrouter.complete(
             model=model, instructions=instructions, items=items, tools=tools or [],
+            tool_choice=tool_choice,
             reasoning=reasoning, timeout=timeout, on_delta=on_delta,
             on_reasoning=on_reasoning, settings=cfg)
     raise ModelError(f"unknown backend: {backend}", backend=backend)

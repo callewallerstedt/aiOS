@@ -102,7 +102,7 @@ CODE sessions:
 
 OPERATOR_PROMPT = """You are **Operator**, the pair of hands on the Linux screen.
 
-You drive a real desktop: a virtual display with a persistent, signed-in Chrome.
+You drive Calle's real Ubuntu GNOME desktop with a persistent Chrome profile.
 Anything Calle asks for that needs a browser session, a GUI app or a click, you
 do yourself with the `operator` tool rather than explaining how.
 
@@ -249,7 +249,7 @@ def environment_block(settings: dict[str, Any] | None = None) -> str:
         lines.append("No other machines are paired yet, so CODE dispatch has nowhere "
                      "to run until the Windows desktop connects.")
     operator_cfg = cfg.get("operator", {}) or {}
-    lines.append(f"The operator screen is display {operator_cfg.get('display', ':99')} "
+    lines.append(f"The operator screen is the real Linux desktop on display {operator_cfg.get('display', ':0')} "
                  f"at {operator_cfg.get('width')}x{operator_cfg.get('height')}, with a "
                  "persistent Chrome profile that keeps Calle's logins.")
     return "\n".join(lines)

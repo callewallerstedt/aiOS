@@ -6,54 +6,20 @@ bash, and the escalation path is Director's handoff rather than a Tk dialog.
 """
 from __future__ import annotations
 
-SYSTEM_PROMPT = """You are the aiOS OPERATOR: a computer-use agent driving a real
-Linux desktop (X11) with a real mouse and keyboard.
+SYSTEM_PROMPT = """You are the aiOS OPERATOR: a computer-use agent driving Calle's
+real Ubuntu GNOME desktop (Xorg) with a real mouse and keyboard.
 
 Each step you get:
   - the TASK you were dispatched with
   - the current SCREENSHOT of the whole screen
   - a short HISTORY of what you already thought and did
 
-Reply with strict JSON and nothing else:
-
-{
-  "thought": "What you see, any FACT the task will need later written down
-              literally, the plan for this step, and why these actions.",
-  "status":  "continue" | "done" | "ask" | "handoff" | "fail",
-  "need_screen": true | false,
-  "message": "one short line for the activity log",
-  "actions": [ <action>, ... ]
-}
-
-need_screen decides whether the NEXT step carries a fresh screenshot. Set it
-true after UI work or when you must look; false when a shell result already
-told you what you need. Screenshots cost real money — do not ask for one every
-round out of habit.
+Reason about the screenshot, then call exactly one supplied tool. Use the mouse
+and keyboard tools for visible interaction. After each action you receive a new
+screenshot. Call `finish` only when the task is done, blocked, or needs Calle.
 
 Coordinates are screen pixels, top-left is (0,0). The user message states the
 exact width and height; every x,y you emit must be inside that rectangle.
-
-Actions (they run in order):
-
-  {"type":"move",         "x":int, "y":int}
-  {"type":"click",        "x":int, "y":int, "button":"left"|"right"|"middle", "clicks":1}
-  {"type":"double_click", "x":int, "y":int}
-  {"type":"right_click",  "x":int, "y":int}
-  {"type":"drag",         "from":[x,y], "to":[x,y], "button":"left"}
-  {"type":"path",         "points":[[x,y],[x,y],...], "button":"left"}
-        // one continuous stroke through every point: press, glide, release
-  {"type":"mouse_down",   "x":int, "y":int, "button":"left"}
-  {"type":"mouse_up",     "x":int, "y":int, "button":"left"}
-  {"type":"type",         "text":"hello"}            // Unicode is fine
-  {"type":"key",          "key":"enter", "presses":1}
-  {"type":"hotkey",       "keys":["ctrl","l"]}
-  {"type":"key_down",     "key":"shift"}
-  {"type":"key_up",       "key":"shift"}
-  {"type":"scroll",       "x":int, "y":int, "dy":-5}  // negative scrolls down
-  {"type":"wait",         "seconds":0.5}
-  {"type":"open_url",     "url":"https://..."}        // opens the signed-in Chrome
-  {"type":"shell",        "command":"ls ~/Downloads"} // bash on this same box
-  {"type":"launch",       "command":"gnome-terminal"} // start an app on the display
 
 Rules that matter:
 
@@ -69,12 +35,48 @@ Rules that matter:
   takes over the same screen from his phone.
 * Stop and answer "ask" when the task is ambiguous in a way that changes what
   you would do.
-* When the task is finished, answer "done" and put the ANSWER in `thought` — any
+* When the task is finished, call `finish` with status "done" and put the ANSWER in `message` — any
   value you were sent to find (a price, a name, a code, a status) must appear
   there literally, because that text is what gets reported back.
 * Do not do anything the task did not ask for. No installing, no sending, no
   deleting, no purchases.
 """
+
+
+def _tool(name: str, description: str, properties: dict, required: list[str]) -> dict:
+    return {"name": name, "description": description,
+            "parameters": {"type": "object", "properties": properties,
+                           "required": required}}
+
+
+COORD = {"type": "integer", "minimum": 0}
+ACTION_TOOLS = [
+    _tool("click", "Click a visible point on the current screenshot.",
+          {"x": COORD, "y": COORD,
+           "button": {"type": "string", "enum": ["left", "right", "middle"]},
+           "clicks": {"type": "integer", "minimum": 1, "maximum": 2}}, ["x", "y"]),
+    _tool("type_text", "Type text into the currently focused control.",
+          {"text": {"type": "string"}}, ["text"]),
+    _tool("key", "Press a keyboard key one or more times.",
+          {"key": {"type": "string"},
+           "presses": {"type": "integer", "minimum": 1, "maximum": 20}}, ["key"]),
+    _tool("hotkey", "Press a keyboard shortcut such as ctrl+l.",
+          {"keys": {"type": "array", "items": {"type": "string"}, "minItems": 1}}, ["keys"]),
+    _tool("scroll", "Scroll at a visible point; negative dy scrolls down.",
+          {"x": COORD, "y": COORD,
+           "dy": {"type": "integer", "minimum": -25, "maximum": 25}}, ["x", "y", "dy"]),
+    _tool("open_url", "Open a URL in the persistent Chrome profile.",
+          {"url": {"type": "string"}}, ["url"]),
+    _tool("wait", "Wait briefly for the desktop or page to settle.",
+          {"seconds": {"type": "number", "minimum": 0.1, "maximum": 10}}, ["seconds"]),
+    _tool("launch_app", "Launch a GUI application on the real desktop.",
+          {"command": {"type": "string"}}, ["command"]),
+    _tool("shell", "Run a bounded shell command on this Linux machine.",
+          {"command": {"type": "string"}}, ["command"]),
+    _tool("finish", "Finish, ask Calle, hand off for credentials, or report failure.",
+          {"status": {"type": "string", "enum": ["done", "ask", "handoff", "fail"]},
+           "message": {"type": "string"}}, ["status", "message"]),
+]
 
 
 def task_message(task: str, width: int, height: int, history: str,
@@ -84,5 +86,5 @@ def task_message(task: str, width: int, height: int, history: str,
         lines += ["", "OPEN WINDOWS: " + " | ".join(windows[:8])]
     if history:
         lines += ["", "HISTORY:", history]
-    lines += ["", "Reply with the JSON object described in the system prompt."]
+    lines += ["", "Reason, then call exactly one action tool for the next step."]
     return "\n".join(lines)

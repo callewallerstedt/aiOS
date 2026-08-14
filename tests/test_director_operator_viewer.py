@@ -84,12 +84,25 @@ def test_restart_viewer_preserves_display_and_browser(monkeypatch):
     ]]
 
 
-def test_xvfb_is_owned_and_restarted_by_systemd():
+def test_real_desktop_units_attach_to_xorg_and_retire_xvfb():
     root = Path(__file__).resolve().parents[1]
-    unit = (root / "director/deploy/aios-director-xvfb.service").read_text()
-    launcher = (root / "director/deploy/xvfb-start.sh").read_text()
+    vnc = (root / "director/deploy/aios-director-x11vnc.service").read_text()
+    chrome = (root / "director/deploy/aios-director-chrome.service").read_text()
+    install = (root / "director/deploy/install.sh").read_text()
+    desktop = (root / "director/deploy/real-desktop-start.sh").read_text()
 
-    assert "KillMode=control-group" in unit
-    assert "Restart=always" in unit
-    assert "exec tail --pid=" not in launcher
-    assert "exec /usr/bin/Xvfb" in launcher
+    assert "-display :0" in vnc
+    assert "-auth /run/user/1000/gdm/Xauthority" in vnc
+    assert "Environment=DISPLAY=:0" in chrome
+    assert "disable --now aios-director-xvfb.service aios-director-wm.service" in install
+    assert "--mode 1280x720 --scale 1x1" in desktop
+    assert "aios-director-real-desktop.service" in install
+
+
+def test_real_desktop_environment_uses_gdm_xauthority():
+    from director.operator import display
+
+    env = display.display_env({"operator": {"mode": "real", "display": ":0",
+                                            "xauthority": "/run/user/1000/gdm/Xauthority"}})
+    assert env["DISPLAY"] == ":0"
+    assert env["XAUTHORITY"] == "/run/user/1000/gdm/Xauthority"

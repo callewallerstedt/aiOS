@@ -79,6 +79,41 @@ def scale_actions(actions: list[dict], factor: float) -> list[dict]:
     return out
 
 
+TOOL_ACTIONS = {
+    "click": "click", "type_text": "type", "key": "key", "hotkey": "hotkey",
+    "scroll": "scroll", "open_url": "open_url", "wait": "wait",
+    "launch_app": "launch", "shell": "shell",
+}
+
+
+def tool_decision(reply: dict) -> dict:
+    """Translate Luna's native function call into one operator action."""
+    calls = list(reply.get("tool_calls") or [])
+    if not calls:
+        return parse_reply(reply.get("text") or "")
+    call = calls[0]
+    name = str(call.get("name") or "")
+    try:
+        args = json.loads(str(call.get("arguments") or "{}"))
+    except json.JSONDecodeError:
+        return {"thought": "", "status": "fail", "actions": [],
+                "message": f"{name} returned malformed arguments"}
+    if not isinstance(args, dict):
+        args = {}
+    thought = str(reply.get("reasoning") or reply.get("text") or "").strip()
+    if name == "finish":
+        return {"thought": thought, "status": str(args.get("status") or "done"),
+                "actions": [], "message": str(args.get("message") or ""),
+                "native_tool": name}
+    kind = TOOL_ACTIONS.get(name)
+    if not kind:
+        return {"thought": thought, "status": "fail", "actions": [],
+                "message": f"unknown operator tool {name!r}", "native_tool": name}
+    return {"thought": thought, "status": "continue",
+            "actions": [{"type": kind, **args}], "message": name,
+            "need_screen": True, "native_tool": name}
+
+
 async def execute(action: dict, settings: dict) -> str:
     """Run one action; return a one-line description for the log."""
     kind = str(action.get("type") or "").strip().lower()
@@ -207,13 +242,13 @@ async def run_task(task: str, *, emit: Emit, settings: dict | None = None,
                 backend=str(operator_cfg.get("backend") or ""),
                 model=str(operator_cfg.get("model") or ""),
                 reasoning=str(operator_cfg.get("reasoning") or ""),
-                instructions=prompts.SYSTEM_PROMPT,
-                items=items, tools=[], timeout=180.0, settings=cfg)
+                instructions=prompts.SYSTEM_PROMPT, tool_choice="required",
+                items=items, tools=prompts.ACTION_TOOLS, timeout=180.0, settings=cfg)
         except models.ModelError as exc:
             await emit("operator.failed", {"error": str(exc), "step": steps})
             return {"status": "fail", "summary": str(exc), "steps": steps}
 
-        parsed = parse_reply(reply.get("text") or "")
+        parsed = tool_decision(reply)
         thought = str(parsed.get("thought") or "")
         status = str(parsed.get("status") or "continue").lower()
         actions = scale_actions(parsed.get("actions") or [], factor)
@@ -222,6 +257,8 @@ async def run_task(task: str, *, emit: Emit, settings: dict | None = None,
             "step": steps, "thought": thought, "status": status,
             "message": str(parsed.get("message") or ""),
             "actions": [str(a.get("type") or "?") for a in actions],
+            "native_tool": str(parsed.get("native_tool") or ""),
+            "model": str(reply.get("model") or operator_cfg.get("model") or ""),
         })
 
         performed: list[str] = []
@@ -241,13 +278,15 @@ async def run_task(task: str, *, emit: Emit, settings: dict | None = None,
                        ("; ".join(performed)[:400] if performed else "(nothing)"))
 
         if status == "done":
-            await emit("operator.done", {"steps": steps, "summary": thought})
-            return {"status": "done", "summary": thought or "done", "steps": steps}
+            summary = str(parsed.get("message") or thought or "done")
+            await emit("operator.done", {"steps": steps, "summary": summary})
+            return {"status": "done", "summary": summary, "steps": steps}
         if status == "fail":
-            await emit("operator.failed", {"steps": steps, "error": thought})
-            return {"status": "fail", "summary": thought or "failed", "steps": steps}
+            summary = str(parsed.get("message") or thought or "failed")
+            await emit("operator.failed", {"steps": steps, "error": summary})
+            return {"status": "fail", "summary": summary, "steps": steps}
         if status in ("ask", "handoff") and ask_user is not None:
-            question = thought or str(parsed.get("message") or "")
+            question = str(parsed.get("message") or thought or "")
             answer = await ask_user(
                 question,
                 options=["Done", "Cancel"] if status == "handoff" else [],

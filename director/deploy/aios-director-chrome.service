@@ -1,17 +1,16 @@
 [Unit]
 Description=aiOS Director Chrome on the operator screen
-After=aios-director-wm.service
-Wants=aios-director-wm.service
+After=aios-director-real-desktop.service
+Wants=aios-director-real-desktop.service
 
 [Service]
 Type=simple
-Environment=DISPLAY=:99
-Environment=XAUTHORITY=
+Environment=DISPLAY=:0
+Environment=XAUTHORITY=/run/user/1000/gdm/Xauthority
 Environment=GDK_BACKEND=x11
 Environment=OZONE_PLATFORM=x11
-# Force X11: this box's Chrome defaults to Wayland and dies on Xvfb.
-# Restore the last session so a bounce does not wipe the tabs the operator had open.
-ExecStart=/usr/bin/google-chrome-stable --user-data-dir=%h/.local/share/aios-director/chrome-profile --no-first-run --no-default-browser-check --disable-session-crashed-bubble --restore-last-session --password-store=basic --disable-gpu --use-gl=angle --use-angle=swiftshader --disable-dev-shm-usage --no-sandbox --ozone-platform=x11 --window-size=1600,900 --window-position=0,0 --start-maximized
+# Attach the persistent Operator profile to Calle's real GNOME/Xorg desktop.
+ExecStart=/usr/bin/google-chrome-stable --user-data-dir=%h/.local/share/aios-director/chrome-profile --no-first-run --no-default-browser-check --disable-session-crashed-bubble --restore-last-session --password-store=basic --disable-dev-shm-usage --ozone-platform=x11 --window-size=1280,720 --window-position=0,0 --start-maximized
 Restart=on-failure
 RestartSec=5
 

@@ -1,0 +1,12 @@
+[Unit]
+Description=Prepare Calle's real GNOME desktop for aiOS Operator
+After=graphical-session.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/aios-director/director/deploy/real-desktop-start.sh
+RemainAfterExit=yes
+TimeoutStartSec=75
+
+[Install]
+WantedBy=default.target

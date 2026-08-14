@@ -100,7 +100,8 @@ def to_tools(tools: list[dict]) -> list[dict]:
 
 
 async def complete(*, model: str, instructions: str, items: list[dict],
-                   tools: list[dict], reasoning: str, timeout: float,
+                   tools: list[dict], tool_choice: str = "auto",
+                   reasoning: str, timeout: float,
                    on_delta: Callable[[str], Awaitable[None]] | None = None,
                    on_reasoning: Callable[[str], Awaitable[None]] | None = None,
                    settings: dict[str, Any] | None = None) -> dict:
@@ -117,7 +118,7 @@ async def complete(*, model: str, instructions: str, items: list[dict],
     }
     if tools:
         payload["tools"] = to_tools(tools)
-        payload["tool_choice"] = "auto"
+        payload["tool_choice"] = tool_choice
 
     text_chunks: list[str] = []
     reasoning_chunks: list[str] = []

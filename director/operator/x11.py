@@ -120,9 +120,37 @@ def encode_jpeg(png_bytes: bytes, *, max_width: int = 1400, quality: int = 68) -
 
 
 async def type_text(text: str, settings: dict[str, Any] | None = None) -> None:
-    """Type Unicode text. --clearmodifiers stops a stuck Ctrl from mangling it."""
+    """Paste text without translating punctuation through the keyboard layout.
+
+    ``xdotool type`` turns ``:`` into ``ö`` on Calle's Swedish X11 layout.
+    Sending UTF-8 through the X clipboard keeps URLs and Unicode exact.
+    """
     if not text:
         return
+    if shutil.which("xclip"):
+        proc = await asyncio.create_subprocess_exec(
+            "xclip", "-selection", "clipboard", "-in",
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT, env=display_mod.display_env(settings))
+        try:
+            assert proc.stdin is not None
+            proc.stdin.write(text.encode("utf-8"))
+            await proc.stdin.drain()
+            proc.stdin.close()
+            # xclip owns the selection until another X client requests it, so
+            # Paste must happen before waiting for the process to exit.
+            await asyncio.sleep(0.05)
+            await hotkey(["ctrl", "v"], settings)
+            await asyncio.sleep(0.05)
+            return
+        finally:
+            if proc.returncode is None:
+                proc.terminate()
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=2)
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    await proc.wait()
     await xdotool("type", "--clearmodifiers", "--delay", "12", text, settings=settings)
 
 

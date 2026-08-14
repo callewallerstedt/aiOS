@@ -338,6 +338,33 @@ def test_scaling_is_a_no_op_at_full_size():
     assert loop.scale_actions(actions, 1.0) == actions
 
 
+def test_operator_native_click_tool_becomes_a_scaled_action():
+    from director.operator import loop
+
+    decision = loop.tool_decision({
+        "reasoning": "The Spotify card is visible.",
+        "tool_calls": [{"name": "click", "arguments": '{"x":120,"y":80,"clicks":1}'}],
+    })
+    actions = loop.scale_actions(decision["actions"], 2.0)
+
+    assert decision["native_tool"] == "click"
+    assert decision["status"] == "continue"
+    assert actions == [{"type": "click", "x": 240, "y": 160, "clicks": 1}]
+
+
+def test_operator_native_finish_tool_reports_completion():
+    from director.operator import loop
+
+    decision = loop.tool_decision({
+        "tool_calls": [{"name": "finish",
+                        "arguments": '{"status":"done","message":"Google login is open"}'}],
+    })
+
+    assert decision["status"] == "done"
+    assert decision["message"] == "Google login is open"
+    assert decision["actions"] == []
+
+
 def test_keysym_aliases_cover_what_the_prompt_promises():
     from director.operator import x11
 
@@ -345,6 +372,53 @@ def test_keysym_aliases_cover_what_the_prompt_promises():
     assert x11.keysym("ctrl") == "ctrl"
     assert x11.keysym("f5") == "F5"
     assert x11.keysym("a") == "a"
+
+
+def test_x11_text_uses_clipboard_so_swedish_layout_does_not_mangle_urls(monkeypatch):
+    import asyncio
+
+    from director.operator import x11
+
+    seen = {}
+
+    class Stdin:
+        def write(self, data):
+            seen["data"] = data
+
+        async def drain(self):
+            seen["drained"] = True
+
+        def close(self):
+            seen["closed"] = True
+
+    class Proc:
+        returncode = None
+        stdin = Stdin()
+
+        def terminate(self):
+            seen["terminated"] = True
+
+        async def wait(self):
+            self.returncode = 0
+            return 0
+
+    async def create(*args, **kwargs):
+        seen["argv"] = args
+        return Proc()
+
+    async def hotkey(keys, settings=None):
+        seen["keys"] = keys
+
+    monkeypatch.setattr(x11.shutil, "which", lambda name: "/usr/bin/xclip")
+    monkeypatch.setattr(x11.asyncio, "create_subprocess_exec", create)
+    monkeypatch.setattr(x11, "hotkey", hotkey)
+
+    asyncio.run(x11.type_text("https://artists.spotify.com/"))
+
+    assert seen["argv"][:3] == ("xclip", "-selection", "clipboard")
+    assert seen["data"] == b"https://artists.spotify.com/"
+    assert seen["drained"] and seen["closed"] and seen["terminated"]
+    assert seen["keys"] == ["ctrl", "v"]
 
 
 # ---------------- tools ----------------
@@ -483,16 +557,20 @@ def test_takeover_path_is_the_chrome_free_viewer():
     assert display_mod.takeover_path() == "/vnc/view"
 
 
-def test_chrome_flags_paint_on_a_virtual_screen(director, monkeypatch):
+def test_chrome_flags_use_hardware_on_the_real_desktop(director, monkeypatch):
     from director.operator import display as display_mod
 
     monkeypatch.setattr(display_mod, "chrome_binary", lambda: "/usr/bin/google-chrome-stable")
     argv = display_mod.chrome_argv("https://example.com")
     assert "--ozone-platform=x11" in argv
-    assert "--use-angle=swiftshader" in argv
-    assert "--no-sandbox" in argv
+    assert "--use-angle=swiftshader" not in argv
+    assert "--no-sandbox" not in argv
     assert "--restore-last-session" in argv
     assert argv[-1] == "https://example.com"
+
+    virtual = display_mod.chrome_argv("", {"operator": {"mode": "virtual"}})
+    assert "--use-angle=swiftshader" in virtual
+    assert "--disable-gpu" in virtual
 
 
 def test_appearance_defaults_cover_both_bubbles():
@@ -596,7 +674,7 @@ def test_ensure_running_skips_probes_when_the_display_is_already_ready(monkeypat
     display_mod.reset_ready_cache()
     assert first["ready"] is True
     assert second is first
-    assert calls["active"] == 2  # wm + vnc; xvfb skipped because the display is up
+    assert calls["active"] == 1  # only the real desktop's VNC exporter
     assert calls["chrome"] == 0
     assert calls["run"] == 0
     assert calls["launch"] == 0
