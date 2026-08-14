@@ -345,6 +345,53 @@ def test_code_bridge_refuses_a_missing_project(monkeypatch):
     assert got["ok"] is False and "no such project" in got["error"]
 
 
+def test_code_bridge_returns_full_terminal_result_instead_of_truncated_meta(monkeypatch):
+    import director_client
+
+    full = "Origin/main is missing the compact mic styles. " + ("detail " * 100)
+
+    class FakeJobs:
+        @staticmethod
+        def get_job(_session_id):
+            return {
+                "status": "completed",
+                "title": "Mic audit",
+                "last_summary": "The mic changes are already present there.",
+            }
+
+        @staticmethod
+        def read_events(_session_id, _since):
+            return {"ok": True, "events": [
+                {"kind": "result", "text": full},
+            ]}
+
+    bridge = director_client.CodeBridge()
+    monkeypatch.setattr(bridge, "harness", lambda: FakeJobs)
+
+    got = bridge.status("sess_done")
+
+    assert got["ok"] is True
+    assert got["status"] == "completed"
+    assert got["summary"] == full
+
+
+def test_code_bridge_does_not_scan_event_history_while_session_is_running(monkeypatch):
+    import director_client
+
+    class FakeJobs:
+        @staticmethod
+        def get_job(_session_id):
+            return {"status": "running", "last_summary": "Still working"}
+
+        @staticmethod
+        def read_events(*_args):
+            raise AssertionError("running status should stay cheap")
+
+    bridge = director_client.CodeBridge()
+    monkeypatch.setattr(bridge, "harness", lambda: FakeJobs)
+    assert bridge.status("sess_running")["summary"] == "Still working"
+
+
 def test_terminal_states_split_success_from_failure():
     import director_client
 

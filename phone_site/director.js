@@ -2259,6 +2259,7 @@ async function beginRecording(button, onText, onError) {
   });
   recorder.addEventListener("stop", async () => {
     button.classList.remove("recording");
+    button.setAttribute("aria-pressed", "false");
     stream.getTracks().forEach((track) => track.stop());
     state.recorder = null;
     const blob = new Blob(state.chunks, { type: recorder.mimeType || "audio/webm" });
@@ -2278,6 +2279,7 @@ async function beginRecording(button, onText, onError) {
   });
   recorder.start();
   button.classList.add("recording");
+  button.setAttribute("aria-pressed", "true");
   return true;
 }
 

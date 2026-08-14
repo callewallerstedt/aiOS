@@ -397,6 +397,21 @@ def test_takeover_toolbar_can_request_the_software_keyboard():
     assert 'const VERSION = "director-v37"' in SW
 
 
+def test_chat_microphone_is_compact_tap_to_toggle_with_recording_state():
+    mic_button = _block(CSS, "#btn-mic {", "#btn-mic svg")
+    mic_icon = _block(CSS, "#btn-mic svg {", ".pill-btn.send")
+    toggle = _block(JS, "async function toggleMic()", "async function startHomeVoice")
+    recording = _block(JS, "async function beginRecording", "function stopRecording")
+
+    assert "width: 31px" in mic_button and "height: 31px" in mic_button
+    assert "width: 15px" in mic_icon and "height: 15px" in mic_icon
+    assert 'id="btn-mic"' in HTML and 'aria-pressed="false"' in HTML
+    assert '$("btn-mic").addEventListener("click", toggleMic)' in JS
+    assert "pointerdown" not in toggle and "pointerup" not in toggle
+    assert 'setAttribute("aria-pressed", "true")' in recording
+    assert 'setAttribute("aria-pressed", "false")' in recording
+
+
 def test_supplied_eye_sheet_is_selectable_and_rotates_on_active_blobs():
     supplied = [
         "frustrated", "annoyed", "thinking",

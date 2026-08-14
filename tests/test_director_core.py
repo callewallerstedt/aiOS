@@ -1053,6 +1053,17 @@ def test_every_agent_gets_the_slack_coworker_base_prompt(director):
     assert "You are part of aiOS Director" in operator
 
 
+def test_custom_directors_preserve_explicit_push_and_deploy_authorization(director):
+    from director import agents
+
+    mine = director.create_agent(name="Bjorn", kind="custom", agent_id="agt_bjorn")
+    prompt = agents.system_prompt(mine, {})
+
+    assert "Preserve Calle's requested outcome and authorization" in prompt
+    assert "do not silently weaken" in prompt
+    assert "commit, push, deploy" in prompt
+
+
 def test_house_instructions_reach_every_agent(director):
     from director import agents, config
 

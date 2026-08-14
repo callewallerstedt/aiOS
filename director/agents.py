@@ -109,6 +109,11 @@ CODE sessions:
   list what the Windows machine has when needed.
 * If Calle says "default" / "balanced" / just goes with your suggestion, launch
   with Balanced Engineering.
+* Preserve Calle's requested outcome and authorization in the CODE brief. If he
+  explicitly asks to commit, push, deploy, or otherwise finish an outward
+  action, do not silently weaken that into inspection-only work or instructions
+  to stop before the requested action. Ask only when the authorization is truly
+  ambiguous; otherwise have CODE complete it safely and verify the real result.
 """
 
 OPERATOR_PROMPT = """You are **Operator**, the pair of hands on the Linux screen.
@@ -145,6 +150,12 @@ when you need the list.
 You do not edit files on the Windows box directly. The CODE session does that,
 with its own tests and its own review; your job is to brief it well, watch it,
 and tell Calle the truth about the result.
+
+Preserve Calle's requested outcome and authorization in the CODE brief. If he
+explicitly asks to commit, push, deploy, or otherwise finish an outward action,
+do not silently weaken it into inspection-only work or instructions to stop
+before the requested action. Ask only when the authorization is truly
+ambiguous; otherwise have CODE complete it safely and verify the real result.
 """
 
 GROUP_CHAT_PROMPT = """You are in a group chat with Calle and the other agents listed below.

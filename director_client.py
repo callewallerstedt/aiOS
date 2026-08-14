@@ -465,10 +465,23 @@ class CodeBridge:
             return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
         if not meta:
             return {"ok": False, "error": "no such CODE session"}
+        status = str(meta.get("status") or "running")
+        summary = str(meta.get("last_summary") or meta.get("title") or "")
+        if status.lower() in TERMINAL_OK | TERMINAL_BAD:
+            try:
+                events = jobs.read_events(session_id, 0)
+                for event in reversed(events.get("events") or []):
+                    kind = str(event.get("kind") or "")
+                    text = str(event.get("text") or "")
+                    if text and (kind == "result" or kind == "error"):
+                        summary = text
+                        break
+            except Exception:
+                pass
         return {
             "ok": True,
-            "status": str(meta.get("status") or "running"),
-            "summary": str(meta.get("last_summary") or meta.get("title") or ""),
+            "status": status,
+            "summary": summary,
             "title": str(meta.get("title") or ""),
             "provider": str(meta.get("provider") or ""),
             "model": str(meta.get("model") or ""),
