@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import os
 import pathlib
+import re
 import shlex
 
 from . import ToolContext, ToolResult, tool
@@ -21,10 +22,22 @@ DESTRUCTIVE_HINTS = (
     "curl", "wget", "ssh ", "scp ",
 )
 
+# The pixel operator owns all GUI input. Keeping this boundary in the tool
+# implementation prevents a coordinator from silently bypassing the operator's
+# screenshot/reason/action loop when a GUI task becomes difficult.
+GUI_AUTOMATION_HINTS = re.compile(
+    r"(?<![\w.-])(xdotool|wmctrl|xte|ydotool|dotool|pyautogui)(?![\w.-])",
+    re.IGNORECASE,
+)
+
 
 def looks_destructive(command: str) -> bool:
     lowered = f" {str(command or '').lower().strip()} "
     return any(hint in lowered for hint in DESTRUCTIVE_HINTS)
+
+
+def looks_like_gui_automation(command: str) -> bool:
+    return bool(GUI_AUTOMATION_HINTS.search(str(command or "")))
 
 
 def _clip(text: str, limit: int = MAX_OUTPUT) -> str:
@@ -40,7 +53,9 @@ def _clip(text: str, limit: int = MAX_OUTPUT) -> str:
     "shell",
     "Run a shell command on the Director Linux box and return its output. "
     "Use for scripts, services, package state and anything the box can answer "
-    "faster than a browser. Destructive commands need the user's approval.",
+    "faster than a browser. Never use it to drive the desktop or browser GUI; "
+    "all GUI input must use the operator tool. Destructive commands need the "
+    "user's approval.",
     {
         "type": "object",
         "properties": {
@@ -58,6 +73,13 @@ async def shell(ctx: ToolContext, command: str = "", cwd: str = "",
     command = str(command or "").strip()
     if not command:
         return ToolResult(error="no command given")
+    if looks_like_gui_automation(command):
+        return ToolResult(
+            error=("GUI automation is not available through shell. Use the operator "
+                   "tool so clicks are reasoned from the current screenshot."),
+            card={"title": "shell", "preview": command[:90],
+                  "meta": "use operator", "tone": "danger"},
+        )
     workdir = pathlib.Path(cwd).expanduser() if cwd else pathlib.Path.home()
     if not workdir.is_dir():
         return ToolResult(error=f"no such directory: {workdir}")

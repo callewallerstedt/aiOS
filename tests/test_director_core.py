@@ -686,6 +686,20 @@ def test_shell_destructive_hints_catch_the_obvious():
     assert not system.looks_destructive("ls -la ~/aios-director")
 
 
+def test_shell_gui_automation_is_reserved_for_operator():
+    import asyncio
+
+    from director.tools import system
+
+    assert system.looks_like_gui_automation("DISPLAY=:0 xdotool click 1")
+    assert system.looks_like_gui_automation("python -c 'import pyautogui; pyautogui.click()'")
+    assert system.looks_like_gui_automation("bash -lc 'wmctrl -a Chrome'")
+    assert not system.looks_like_gui_automation("journalctl -u aios-director")
+    result = asyncio.run(system.shell(None, "DISPLAY=:0 xdotool click 1"))
+    assert "Use the operator tool" in result.error
+    assert result.card["meta"] == "use operator"
+
+
 def test_readable_text_strips_scripts_and_keeps_words():
     from director.tools import web
 
@@ -723,6 +737,8 @@ def test_every_agent_gets_the_slack_coworker_base_prompt(director):
     prompt = agents.system_prompt(director.get_agent("agt_director"), {})
     assert "sharp coworker in Slack" in prompt
     assert "operator_screenshot" in prompt
+    assert "All GUI input belongs to the `operator` tool" in prompt
+    assert "do not take over its clicks from the shell" in prompt
     operator = agents.system_prompt(director.get_agent("agt_operator"), {})
     assert "sharp coworker in Slack" in operator
     assert "You are part of aiOS Director" in operator

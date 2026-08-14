@@ -1206,7 +1206,10 @@ class Runtime:
         store.add_message(thread_id, "tool_result", "", meta)
         quiet = source == "group" and name in GROUP_QUIET_TOOLS
         if not quiet:
-            await self.emit("tool.done", {"call_id": call_id, "name": name, "card": card},
+            payload = {"call_id": call_id, "name": name, "card": card}
+            if image:
+                payload["image"] = image
+            await self.emit("tool.done", payload,
                             thread_id=thread_id, agent_id=agent["id"])
 
 

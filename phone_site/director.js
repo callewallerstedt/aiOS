@@ -1264,22 +1264,28 @@ async function answer(id, text, wrap) {
   }
 }
 
-function shotCard(payload) {
+function shotCard(payload, persistent = false) {
   if (!payload || !payload.image) return;
   let row = $("live-shot");
+  if (persistent && row) {
+    row.removeAttribute("id");
+    row.querySelector(".shot")?.classList.remove("live");
+  }
   if (!row) {
     row = el("div", "row-agent");
-    row.id = "live-shot";
-    const wrap = el("div", "shot live");
+    if (!persistent) row.id = "live-shot";
+    const wrap = el("div", `shot${persistent ? "" : " live"}`);
     const img = document.createElement("img");
-    img.alt = "Operator screen";
+    img.alt = payload.caption || "Operator screen";
     wrap.append(img);
-    wrap.append(el("div", "cap", "Operator screen"));
+    wrap.append(el("div", "cap", payload.caption || "Operator screen"));
     img.addEventListener("click", () => openTakeover("/vnc/view"));
     row.append(wrap);
     appendTranscript(row);
   }
   row.querySelector("img").src = payload.image;
+  const caption = row.querySelector(".cap");
+  if (caption && payload.caption) caption.textContent = payload.caption;
   const preview = $("context-screen-img");
   if (preview) {
     preview.src = payload.image;
@@ -1391,6 +1397,9 @@ function renderMessages(messages, thread = state.currentThread) {
         args: pending.args,
         card,
       });
+      if (message.meta?.image) {
+        shotCard({ image: message.meta.image, caption: card.title || "Image" }, true);
+      }
     }
   }
   paintGroupWorking();
@@ -1477,6 +1486,9 @@ function handleEvent(event) {
     case "tool.done":
       if (payload.name === "start_work" || payload.name === "react") break;
       finishTool(payload.call_id, payload.name, payload.card);
+      if (payload.image) {
+        shotCard({ image: payload.image, caption: payload.card?.title || "Image" }, true);
+      }
       break;
 
     case "approval":

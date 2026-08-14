@@ -112,6 +112,20 @@ def test_live_churning_grid_survives_into_real_thinking_and_history():
         ROOT / "director" / "runtime.py").read_text(encoding="utf-8")
 
 
+def test_tool_result_images_are_visible_live_and_after_reopening_chat():
+    history = _block(JS, "function renderMessages", "/* ---------------- events")
+    assert "message.meta?.image" in history
+    assert "shotCard({ image: message.meta.image" in history
+    live = _block(JS, 'case "tool.done":', 'case "approval":')
+    assert "payload.image" in live
+    assert "shotCard({ image: payload.image" in live
+    shots = _block(JS, "function shotCard", "function taskRow")
+    assert "persistent = false" in shots
+    assert 'row.removeAttribute("id")' in shots
+    runtime = (ROOT / "director" / "runtime.py").read_text(encoding="utf-8")
+    assert 'payload["image"] = image' in runtime
+
+
 def test_agent_relay_messages_are_attributed_and_destination_cards_open():
     add_user = _block(JS, "function addUser", "function addAssistant")
     assert 'extra.kind === "agent_message"' in add_user
