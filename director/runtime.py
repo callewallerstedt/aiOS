@@ -319,8 +319,9 @@ class Runtime:
             try:
                 result = await coro_factory()
             except asyncio.CancelledError:
-                result = {"status": "stopped", "summary": "cancelled"}
-                raise
+                current = store.get_job(job["id"]) or {}
+                result = dict(current.get("result") or {})
+                result.update({"status": "stopped", "summary": "Stopped by request"})
             except Exception as exc:
                 result = {"status": "fail", "summary": f"{type(exc).__name__}: {exc}"}
             finally:
@@ -347,12 +348,35 @@ class Runtime:
                           {"job_id": job["id"], "kind": job["kind"]})
         await self.run_turn(thread_id, trigger="job")
 
-    def stop_job(self, job_id: str) -> bool:
+    async def stop_job(self, job_id: str) -> dict:
+        row = store.get_job(job_id)
+        if row is None:
+            return {"ok": False, "error": "no such job"}
+
+        if row.get("kind") == "code":
+            result = dict(row.get("result") or {})
+            session_id = str(result.get("session_id") or "")
+            machine_id = str(row.get("machine_id") or "")
+            if session_id and machine_id:
+                remote = await self.call_machine(
+                    machine_id, "code.stop", {"session_id": session_id}, timeout=30.0)
+                if not remote.get("ok"):
+                    return {"ok": False,
+                            "error": str(remote.get("error") or "Windows CODE session did not stop")}
+
         task = self._jobs.get(job_id)
-        if task is None:
-            return False
-        task.cancel()
-        return True
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        else:
+            result = dict(row.get("result") or {})
+            result.update({"status": "stopped", "summary": "Stopped by request"})
+            store.update_job(job_id, status="stopped", result=result)
+            await self.emit("job.finished", {"id": job_id, "kind": row["kind"], **result},
+                            thread_id=row.get("thread_id", ""),
+                            agent_id=row.get("agent_id", ""))
+            await self._report_job(row, result)
+        return {"ok": True, "job_id": job_id, "status": "stopped"}
 
     # ---------------- routines ----------------
 

@@ -61,6 +61,41 @@ def test_stop_thread_hard_cancels_a_stuck_turn(director):
     asyncio.run(run())
 
 
+def test_stop_code_job_stops_the_remote_session_and_marks_the_job(director):
+    import asyncio
+
+    from director import runtime
+
+    job = director.create_job(
+        kind="code", request={"task": "change it"}, machine_id="mch_windows",
+        status="running")
+    director.update_job(job["id"], result={"session_id": "session-123", "summary": "running"})
+    hub = runtime.Runtime()
+    calls = []
+
+    async def call_machine(machine_id, action, payload, *, timeout=120.0):
+        calls.append((machine_id, action, payload, timeout))
+        return {"ok": True, "status": "stopped"}
+
+    hub.call_machine = call_machine
+    result = asyncio.run(hub.stop_job(job["id"]))
+
+    assert result == {"ok": True, "job_id": job["id"], "status": "stopped"}
+    assert calls == [("mch_windows", "code.stop", {"session_id": "session-123"}, 30.0)]
+    assert director.get_job(job["id"])["status"] == "stopped"
+
+
+def test_custom_code_agents_automatically_gain_code_stop(director):
+    from director import agents, tools
+
+    custom = director.create_agent(
+        agent_id="agt_old_coder", name="Old coder", tools=["code_session", "code_status"])
+    offered = agents.tools_for(custom)
+
+    assert "code_stop" in offered
+    assert tools.get("code_stop") is not None
+
+
 def test_thread_payload_does_not_resurrect_stale_working_state(director):
     from director import agents, runtime, server
 

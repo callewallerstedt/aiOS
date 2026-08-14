@@ -24,7 +24,7 @@ COMMUNICATION_TOOLS = ["list_agents", "message_agent", "search_chats"]
 WEB_TOOLS = ["web_fetch", "web_search"]
 BOX_TOOLS = ["shell", "read_file", "write_file", "list_dir", "processes"]
 OPERATOR_TOOLS = ["operator", "operator_screenshot", "operator_takeover", "handoff"]
-CODE_TOOLS = ["code_session", "code_status", "code_configs", "machines"]
+CODE_TOOLS = ["code_session", "code_status", "code_stop", "code_configs", "machines"]
 GROUP_TOOLS = ["start_work", "react", "recall", "remember",
                "list_agents", "message_agent", "search_chats"]
 
@@ -266,6 +266,11 @@ def tools_for(agent: dict) -> list[str]:
     # agents keep their curated tool sets but still gain the ability to find
     # and talk to the rest of the house.
     base = names or DIRECTOR_TOOLS
+    # Stopping is part of CODE control, not a persona preference. Custom agents
+    # created before code_stop existed must not be able to launch and poll a job
+    # while being unable to obey a direct "stop it" request.
+    if any(name in base for name in ("code_session", "code_status")):
+        base = list(base) + ["code_stop"]
     return list(dict.fromkeys(base + COMMUNICATION_TOOLS))
 
 

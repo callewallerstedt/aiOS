@@ -269,3 +269,35 @@ async def code_status(ctx: ToolContext, job_id: str = "") -> ToolResult:
     return ToolResult(output=listing,
                       card={"title": "code", "preview": f"{len(rows)} jobs", "meta": "",
                             "tone": "ok", "body": listing})
+
+
+@tool(
+    "code_stop",
+    "Stop a running CODE job and its real session on the paired machine. Use this when "
+    "Calle asks to stop, cancel, or abort a CODE session; do not merely poll code_status.",
+    {
+        "type": "object",
+        "properties": {"job_id": {"type": "string", "description": "Director CODE job id."}},
+        "required": ["job_id"],
+    },
+)
+async def code_stop(ctx: ToolContext, job_id: str = "") -> ToolResult:
+    job_id = str(job_id or "").strip()
+    if not job_id:
+        return ToolResult(error="job_id is required")
+    row = store.get_job(job_id)
+    if not row:
+        return ToolResult(error=f"no such job: {job_id}")
+    if row.get("kind") != "code":
+        return ToolResult(error=f"job is not a CODE session: {job_id}")
+    if row.get("status") in ("done", "fail", "stopped"):
+        return ToolResult(
+            output=f"CODE job {job_id} is already {row['status']}.",
+            card={"title": "code", "preview": job_id, "meta": row["status"], "tone": "muted"})
+    result = await ctx.hub.stop_job(job_id)
+    if not result.get("ok"):
+        return ToolResult(error=str(result.get("error") or "could not stop CODE job"))
+    return ToolResult(
+        output=f"Stopped CODE job {job_id} on its paired machine.",
+        card={"title": "code", "preview": job_id, "meta": "stopped", "tone": "ok",
+              "job_id": job_id})

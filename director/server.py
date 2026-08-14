@@ -532,7 +532,7 @@ async def job_code_events(request: web.Request) -> web.Response:
 
 @ROUTES.post("/api/jobs/{job_id}/stop")
 async def stop_job(request: web.Request) -> web.Response:
-    return json_response({"ok": request.app["runtime"].stop_job(request.match_info["job_id"])})
+    return json_response(await request.app["runtime"].stop_job(request.match_info["job_id"]))
 
 
 # ---------------- events ----------------
