@@ -9,6 +9,8 @@
    CODE job cards open the real aiOS CODE transcript renderer
    (aios_ui/web/js/transcript.js), fed by events proxied through Director. */
 
+import { inlineMarkdown } from "./inline-markdown.js";
+
 const STORE_KEY = "aios-director";
 
 const state = {
@@ -480,7 +482,9 @@ function renderAgents() {
       name.append(document.createTextNode(agent.name));
       if (agent.busy || agent.status === "waiting") name.append(el("span", "dot busy"));
       meta.append(name);
-      meta.append(el("div", "preview", agent.preview || agent.subtitle || ""));
+      const preview = el("div", "preview");
+      preview.innerHTML = inlineMarkdown(agent.preview || agent.subtitle || "");
+      meta.append(preview);
       row.append(meta);
       row.append(el("div", "when", relativeTime(agent.updated_at)));
       row.addEventListener("click", () => openAgent(agent.id));
@@ -504,7 +508,7 @@ function updateAgentRow(row, agent) {
     if (agent.busy || agent.status === "waiting") name.append(el("span", "dot busy"));
   }
   const preview = row.querySelector(".preview");
-  if (preview) preview.textContent = agent.preview || agent.subtitle || "";
+  if (preview) preview.innerHTML = inlineMarkdown(agent.preview || agent.subtitle || "");
   const when = row.querySelector(".when");
   if (when) when.textContent = relativeTime(agent.updated_at);
   const av = row.querySelector(".avatar");

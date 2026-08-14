@@ -17,6 +17,7 @@ for (const name of [
   'index.html',
   'director.css',
   'director.js',
+  'inline-markdown.js',
   'manifest.webmanifest',
   'sw.js',
   'og-aios-remote.png',
