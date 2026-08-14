@@ -169,6 +169,13 @@ DEFAULT_AGENTS = [
         "tools": DIRECTOR_TOOLS,
         "sort": 0,
     },
+]
+
+# Coder and Operator used to be permanent built-ins. Every ordinary agent has
+# the full Director toolset, so forcing specialist rows into every lineup adds
+# no capability. Archive the legacy rows during upgrade so their conversations
+# are preserved without keeping mandatory bots in the UI.
+RETIRED_SPECIALIST_AGENTS = [
     {
         "id": "agt_operator",
         "name": "Operator",
@@ -191,27 +198,49 @@ DEFAULT_AGENTS = [
     },
 ]
 
+RETIRED_SPECIALIST_IDS = {
+    spec["id"] for spec in RETIRED_SPECIALIST_AGENTS
+}
+
 
 def ensure_seeded() -> list[dict]:
-    """Create the default lineup, and keep its tool lists current.
+    """Bootstrap Director when needed and retire mandatory specialists.
 
     An agent's tools are stored per row, so a built-in seeded before a tool
     existed would never learn about it. That is not a quiet degradation: asked
     to schedule something, Director went and edited the database by hand
-    instead, because the tool it needed was not on its list. Built-ins are
-    reconciled on every boot; a custom agent Calle made keeps whatever it has.
+    instead, because the tool it needed was not on its list. The bootstrap
+    Director is reconciled while it exists; a custom agent keeps its choices.
+
+    Director is created only when no usable ordinary agent exists, so it is a
+    first-run bootstrap rather than a mandatory identity. Legacy Coder and
+    Operator rows are archived, preserving their history.
     """
     existing = {agent["id"]: agent for agent in store.list_agents(include_archived=True)}
+    for agent_id in RETIRED_SPECIALIST_IDS:
+        current = existing.get(agent_id)
+        if current is not None and not int(current.get("archived") or 0):
+            store.update_agent(agent_id, {"archived": True})
+
+    has_ordinary_agent = any(
+        not int(agent.get("archived") or 0)
+        and not store.is_group(agent)
+        and agent_id not in RETIRED_SPECIALIST_IDS
+        for agent_id, agent in existing.items()
+    )
     for spec in DEFAULT_AGENTS:
         current = existing.get(spec["id"])
         if current is None:
+            if has_ordinary_agent:
+                continue
             store.create_agent(
                 agent_id=spec["id"], name=spec["name"], emoji=spec["emoji"],
                 kind=spec["kind"], subtitle=spec["subtitle"],
                 system_prompt=spec["system_prompt"], tools=spec["tools"],
                 sort=spec["sort"], backend="", model="", reasoning="")
             continue
-        if sorted(current.get("tools") or []) != sorted(spec["tools"]):
+        if (not int(current.get("archived") or 0)
+                and sorted(current.get("tools") or []) != sorted(spec["tools"])):
             store.update_agent(spec["id"], {"tools": spec["tools"]})
     return store.list_agents()
 

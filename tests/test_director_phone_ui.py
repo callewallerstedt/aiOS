@@ -191,6 +191,13 @@ def test_group_chat_has_a_chooser_editor_and_working_chips():
     assert "margin-inline: auto" not in _block(CSS, ".transcript > * {", ".transcript > .thinking")
 
 
+def test_no_agent_kind_is_mandatory_in_the_editor():
+    editor = _block(JS, "async function agentEditor", "function toggleRow")
+    assert 'if (!creating && !isGroup(agent))' in editor
+    assert 'agent.kind === "custom"' not in editor
+    assert "Delete this agent" in editor
+
+
 def test_agent_markdown_renders_pipe_tables(tmp_path):
     """Agent bubbles used to print | tables as paragraphs. GFM tables,
     including blank lines between rows, have to become a real <table>."""
@@ -275,7 +282,7 @@ def test_push_uses_agent_heading_and_is_silent_while_app_is_visible():
     assert 'payload.agent || payload.title || "Director"' in SW
     assert 'client.visibilityState === "visible"' in SW
     assert "showNotification(title" in SW
-    assert 'const VERSION = "director-v34"' in SW
+    assert 'const VERSION = "director-v35"' in SW
 
 
 def test_stop_button_clears_stale_working_state_after_server_acknowledges():
@@ -323,7 +330,7 @@ def test_takeover_toolbar_can_request_the_software_keyboard():
     assert "director.keyboard-input" in shell
     assert "director.keyboard-key" in shell
     assert ".takeover-keyboard-input" in CSS
-    assert 'const VERSION = "director-v34"' in SW
+    assert 'const VERSION = "director-v35"' in SW
 
 
 def test_supplied_eye_sheet_is_selectable_and_rotates_on_active_blobs():

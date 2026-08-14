@@ -3132,7 +3132,7 @@ async function agentEditor(agent) {
     }
   });
   actions.append(save);
-  if (!creating && agent.kind === "custom") {
+  if (!creating && !isGroup(agent)) {
     const remove = el("button", "btn danger", "Delete this agent");
     remove.addEventListener("click", async () => {
       if (!confirm(`Delete ${agent.name} and its conversation?`)) return;
@@ -3253,7 +3253,7 @@ async function groupEditor(group) {
   rulesInput.placeholder = "How this room works. Everyone in the group sees these.";
   rulesBox.append(rulesInput);
   rulesBox.append(el("div", "hint",
-    "Examples: keep it short, Coder owns code, Operator owns the screen, don't pile on."));
+    "Examples: keep it short, one person owns each task, don't pile on."));
   body.append(rulesBox);
 
   const actions = el("div", "group");

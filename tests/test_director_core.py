@@ -18,6 +18,19 @@ def director(tmp_path, monkeypatch):
     store.close()
 
 
+def _add_retired_specialists_for_group_tests(director):
+    """Exercise named-agent mechanics without making specialists defaults."""
+    from director import agents
+
+    for spec in agents.RETIRED_SPECIALIST_AGENTS:
+        if director.get_agent(spec["id"]) is None:
+            director.create_agent(
+                agent_id=spec["id"], name=spec["name"], emoji=spec["emoji"],
+                kind=spec["kind"], subtitle=spec["subtitle"],
+                system_prompt=spec["system_prompt"], tools=spec["tools"],
+                sort=spec["sort"])
+
+
 def test_pairing_code_is_single_use(director):
     from director import auth
 
@@ -94,7 +107,18 @@ def test_agents_seed_once(director):
     first = agents.ensure_seeded()
     second = agents.ensure_seeded()
     assert [a["id"] for a in first] == [a["id"] for a in second]
-    assert {"agt_director", "agt_operator", "agt_coder"} <= {a["id"] for a in second}
+    assert {a["id"] for a in second} == {"agt_director"}
+
+
+def test_seeding_archives_the_old_mandatory_specialists(director):
+    from director import agents
+
+    _add_retired_specialists_for_group_tests(director)
+    agents.ensure_seeded()
+
+    assert director.get_agent("agt_operator")["archived"] == 1
+    assert director.get_agent("agt_coder")["archived"] == 1
+    assert {row["id"] for row in director.list_agents()} == {"agt_director"}
 
 
 def test_seeding_refreshes_builtin_tool_lists(director):
@@ -121,6 +145,25 @@ def test_seeding_leaves_custom_agents_alone(director):
     agents.ensure_seeded()
     assert director.get_agent(mine["id"])["tools"] == ["recall"]
     assert set(agents.COMMUNICATION_TOOLS) <= set(agents.tools_for(director.get_agent(mine["id"])))
+
+
+def test_no_named_bot_is_recreated_when_an_ordinary_agent_exists(director):
+    from director import agents
+
+    agents.ensure_seeded()
+    mine = director.create_agent(name="Mine", kind="custom")
+    director.delete_agent("agt_director")
+
+    assert {row["id"] for row in agents.ensure_seeded()} == {mine["id"]}
+
+
+def test_an_ordinary_agent_can_do_code_and_operator_work(director):
+    from director import agents
+
+    mine = director.create_agent(name="Mine", kind="custom")
+    tools = agents.tools_for(mine)
+    assert "code_session" in tools
+    assert "operator" in tools
 
 
 def test_the_schedule_tools_are_on_the_default_lineup():
@@ -511,6 +554,7 @@ def test_every_agent_gets_the_slack_coworker_base_prompt(director):
     from director import agents
 
     agents.ensure_seeded()
+    _add_retired_specialists_for_group_tests(director)
     prompt = agents.system_prompt(director.get_agent("agt_director"), {})
     assert "sharp coworker in Slack" in prompt
     assert "operator_screenshot" in prompt
@@ -524,6 +568,7 @@ def test_house_instructions_reach_every_agent(director):
 
     assert config.DEFAULT_SETTINGS["instructions"] == ""
     agents.ensure_seeded()
+    _add_retired_specialists_for_group_tests(director)
     settings = {"instructions": "Always reply in Swedish. Never buy anything."}
     for agent_id in ("agt_director", "agt_operator", "agt_coder"):
         prompt = agents.system_prompt(director.get_agent(agent_id), settings)
@@ -720,6 +765,7 @@ def test_group_agents_store_members_and_rules(director):
     from director import agents
 
     agents.ensure_seeded()
+    _add_retired_specialists_for_group_tests(director)
     group = director.create_agent(
         name="Ops", kind="group",
         members=["agt_coder", "agt_operator", "grp_nope"],
@@ -744,6 +790,7 @@ def test_group_prompt_includes_private_thread_and_mentions(director):
     from director import agents
 
     agents.ensure_seeded()
+    _add_retired_specialists_for_group_tests(director)
     private = director.latest_thread("agt_coder") or director.create_thread("agt_coder")
     director.add_message(private["id"], "user", "Please tidy the login form.")
     director.add_message(private["id"], "assistant", "I restyled the login form.")
@@ -776,6 +823,7 @@ def test_group_round_speaks_or_stays_quiet(director, monkeypatch):
     from director import agents, models, runtime
 
     agents.ensure_seeded()
+    _add_retired_specialists_for_group_tests(director)
     group = director.create_agent(
         name="Ops", kind="group",
         members=["agt_coder", "agt_operator"],
@@ -825,6 +873,7 @@ def test_group_start_work_runs_in_the_private_thread(director, monkeypatch):
     from director import agents, models, runtime
 
     agents.ensure_seeded()
+    _add_retired_specialists_for_group_tests(director)
     group = director.create_agent(
         name="Ops", kind="group", members=["agt_coder", "agt_operator"])
     group_thread = director.create_thread(group["id"])
@@ -895,6 +944,7 @@ def test_group_react_posts_a_reaction(director, monkeypatch):
     from director import agents, models, runtime
 
     agents.ensure_seeded()
+    _add_retired_specialists_for_group_tests(director)
     group = director.create_agent(
         name="Ops", kind="group", members=["agt_coder", "agt_operator"])
     thread = director.create_thread(group["id"])
@@ -950,6 +1000,7 @@ def test_group_tag_wakes_the_named_agent(director, monkeypatch):
     from director import agents, models, runtime
 
     agents.ensure_seeded()
+    _add_retired_specialists_for_group_tests(director)
     group = director.create_agent(
         name="Ops", kind="group", members=["agt_coder", "agt_operator"])
     thread = director.create_thread(group["id"])
@@ -1005,6 +1056,7 @@ def test_agent_message_is_visible_attributed_and_wakes_destination(director, mon
     from director.tools import ToolContext
 
     agents.ensure_seeded()
+    _add_retired_specialists_for_group_tests(director)
     source = director.get_agent("agt_director")
     target = director.get_agent("agt_coder")
     source_thread = director.latest_thread(source["id"]) or director.create_thread(source["id"])
@@ -1043,6 +1095,7 @@ def test_agent_message_relay_has_a_hop_limit(director):
     from director.tools import ToolContext
 
     agents.ensure_seeded()
+    _add_retired_specialists_for_group_tests(director)
     source = director.get_agent("agt_director")
     thread = director.latest_thread(source["id"]) or director.create_thread(source["id"])
     hub = runtime.Runtime()
@@ -1061,6 +1114,7 @@ def test_search_messages_finds_private_and_group_chat_text(director):
     from director import agents
 
     agents.ensure_seeded()
+    _add_retired_specialists_for_group_tests(director)
     private = director.latest_thread("agt_director") or director.create_thread("agt_director")
     group = director.create_agent(
         name="Ops room", kind="group", members=["agt_coder", "agt_operator"])

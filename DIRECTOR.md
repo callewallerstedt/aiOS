@@ -96,13 +96,12 @@ local voice agent exactly as before.
 
 ## The agents
 
-Three to start, and the phone's `+` button adds more.
+Director is only a first-run bootstrap. The phone's `+` button adds more, and
+once another agent exists every agent can be removed.
 
 | Agent | For |
 | --- | --- |
 | Director | Coordinates: decides where work goes, holds the memory |
-| Operator | Drives the Linux screen and the signed-in Chrome |
-| Coder | CODE sessions on the Windows desktop |
 
 **Every chat is its own Director.** A new agent gets the full tool set, not a
 cut-down one — the difference is its name, its photo, its instructions and its
@@ -117,8 +116,9 @@ model. Tap an agent → ⋮ → *Edit this agent* for:
 * **Permissions and alerts** — approve everything from this one agent, or mute
   its notifications.
 
-Built-in agents keep their tool lists current automatically as new tools ship.
-Custom agents keep whatever they were given.
+The bootstrap Director keeps its tool list current while it exists. Other
+agents keep whatever they were given. Every newly created agent starts with the
+full Director toolset, including CODE sessions and the Linux screen operator.
 
 ## Routines
 
