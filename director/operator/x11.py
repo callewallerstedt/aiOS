@@ -129,7 +129,7 @@ async def type_text(text: str, settings: dict[str, Any] | None = None) -> None:
         return
     if shutil.which("xclip"):
         proc = await asyncio.create_subprocess_exec(
-            "xclip", "-selection", "clipboard", "-in",
+            "xclip", "-selection", "clipboard", "-in", "-quiet",
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT, env=display_mod.display_env(settings))
         try:

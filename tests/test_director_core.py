@@ -416,6 +416,7 @@ def test_x11_text_uses_clipboard_so_swedish_layout_does_not_mangle_urls(monkeypa
     asyncio.run(x11.type_text("https://artists.spotify.com/"))
 
     assert seen["argv"][:3] == ("xclip", "-selection", "clipboard")
+    assert "-quiet" in seen["argv"]
     assert seen["data"] == b"https://artists.spotify.com/"
     assert seen["drained"] and seen["closed"] and seen["terminated"]
     assert seen["keys"] == ["ctrl", "v"]
