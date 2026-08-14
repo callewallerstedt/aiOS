@@ -275,7 +275,7 @@ def test_push_uses_agent_heading_and_is_silent_while_app_is_visible():
     assert 'payload.agent || payload.title || "Director"' in SW
     assert 'client.visibilityState === "visible"' in SW
     assert "showNotification(title" in SW
-    assert 'const VERSION = "director-v33"' in SW
+    assert 'const VERSION = "director-v34"' in SW
 
 
 def test_stop_button_clears_stale_working_state_after_server_acknowledges():
@@ -318,7 +318,12 @@ def test_home_voice_is_icon_only_accent_and_half_the_mobile_width():
 def test_takeover_toolbar_can_request_the_software_keyboard():
     shell = _block(JS, "function ensureTakeoverShell()", "function openTakeover")
     assert 'aria-label", "Open keyboard"' in shell
-    assert "director.open-keyboard" in shell
+    assert 'el("textarea", "takeover-keyboard-input")' in shell
+    assert "keyboardInput.focus()" in shell
+    assert "director.keyboard-input" in shell
+    assert "director.keyboard-key" in shell
+    assert ".takeover-keyboard-input" in CSS
+    assert 'const VERSION = "director-v34"' in SW
 
 
 def test_supplied_eye_sheet_is_selectable_and_rotates_on_active_blobs():

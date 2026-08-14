@@ -8,6 +8,9 @@ def test_operator_viewer_exposes_a_phone_keyboard_bridge():
     assert 'id="keyboardButton"' in viewer
     assert 'id="keyboardInput"' in viewer
     assert "director.open-keyboard" in viewer
+    assert "director.keyboard-input" in viewer
+    assert "director.keyboard-key" in viewer
+    assert "handleKeyboardInput" in viewer
     assert "rfb.sendKey" in viewer
     assert "deleteContentBackward" in viewer
 

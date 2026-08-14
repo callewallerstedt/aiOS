@@ -2276,6 +2276,7 @@ function takeoverOpen() {
 function closeTakeover() {
   const wrap = $("takeover");
   if (!wrap) return;
+  wrap.querySelector(".takeover-keyboard-input")?.blur();
   wrap.classList.add("hidden");
   const frame = wrap.querySelector("iframe");
   if (frame) {
@@ -2299,14 +2300,45 @@ function ensureTakeoverShell() {
   keyboard.innerHTML = svg(
     '<rect x="2.5" y="5" width="19" height="14" rx="2"/>'
     + '<path d="M6 9h.01M9 9h.01M12 9h.01M15 9h.01M18 9h.01M6 12h.01M9 12h.01M12 12h.01M15 12h.01M18 12h.01M7 15h10"/>');
-  keyboard.addEventListener("click", () => {
+  const keyboardInput = el("textarea", "takeover-keyboard-input");
+  keyboardInput.rows = 1;
+  keyboardInput.inputMode = "text";
+  keyboardInput.setAttribute("enterkeyhint", "enter");
+  keyboardInput.setAttribute("autocomplete", "off");
+  keyboardInput.setAttribute("autocorrect", "on");
+  keyboardInput.setAttribute("autocapitalize", "sentences");
+  keyboardInput.setAttribute("aria-label", "Type on operator screen");
+  const postKeyboard = (payload) => {
     const frame = wrap.querySelector("iframe");
-    frame?.contentWindow?.postMessage({ type: "director.open-keyboard" }, "*");
+    frame?.contentWindow?.postMessage(payload, "*");
+  };
+  keyboard.addEventListener("click", () => {
+    // iOS only opens its software keyboard when focus happens synchronously
+    // inside the user's tap. Focusing an iframe input later via postMessage
+    // loses that activation, so this parent-owned input captures the typing.
+    keyboardInput.focus();
+    keyboard.classList.add("active");
+  });
+  keyboardInput.addEventListener("blur", () => keyboard.classList.remove("active"));
+  keyboardInput.addEventListener("input", (event) => {
+    postKeyboard({
+      type: "director.keyboard-input",
+      inputType: event.inputType || "",
+      data: event.data == null ? keyboardInput.value : event.data,
+    });
+    keyboardInput.value = "";
+  });
+  keyboardInput.addEventListener("keydown", (event) => {
+    const special = { Backspace: 0xff08, Delete: 0xffff, Enter: 0xff0d,
+                      Tab: 0xff09, Escape: 0xff1b };
+    if (!special[event.key]) return;
+    event.preventDefault();
+    postKeyboard({ type: "director.keyboard-key", keysym: special[event.key] });
   });
   const close = el("button", "icon-btn");
   close.innerHTML = svg('<path d="M6 6l12 12M18 6L6 18"/>');
   close.addEventListener("click", closeTakeover);
-  bar.append(keyboard, close);
+  bar.append(keyboardInput, keyboard, close);
   const frame = document.createElement("iframe");
   frame.src = "about:blank";
   frame.allow = "clipboard-read; clipboard-write";

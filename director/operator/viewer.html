@@ -82,13 +82,17 @@ function openKeyboard() {
   keyboardButton.classList.add("active");
 }
 
+function handleKeyboardInput(inputType, data) {
+  if (inputType === "deleteContentBackward") sendKey(0xff08);
+  else if (inputType === "deleteContentForward") sendKey(0xffff);
+  else if (inputType === "insertLineBreak") sendKey(0xff0d);
+  else if (data) sendText(data);
+}
+
 keyboardButton.addEventListener("click", openKeyboard);
 keyboardInput.addEventListener("blur", () => keyboardButton.classList.remove("active"));
 keyboardInput.addEventListener("input", (event) => {
-  if (event.inputType === "deleteContentBackward") sendKey(0xff08);
-  else if (event.inputType === "deleteContentForward") sendKey(0xffff);
-  else if (event.inputType === "insertLineBreak") sendKey(0xff0d);
-  else if (event.data) sendText(event.data);
+  handleKeyboardInput(event.inputType, event.data);
   keyboardInput.value = "";
 });
 keyboardInput.addEventListener("keydown", (event) => {
@@ -100,6 +104,11 @@ keyboardInput.addEventListener("keydown", (event) => {
 });
 window.addEventListener("message", (event) => {
   if (event.data?.type === "director.open-keyboard") openKeyboard();
+  else if (event.data?.type === "director.keyboard-input") {
+    handleKeyboardInput(event.data.inputType, event.data.data);
+  } else if (event.data?.type === "director.keyboard-key") {
+    sendKey(Number(event.data.keysym) || 0);
+  }
 });
 
 function connect() {
