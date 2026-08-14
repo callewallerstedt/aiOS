@@ -50,7 +50,6 @@ const state = {
   wake: null,
   pinnedAgentId: "agt_director",
   homeRecording: false,
-  homePressed: false,
   phoneMouse: null,
 };
 
@@ -1937,7 +1936,7 @@ function paintHomeVoice(text = "") {
   const button = $("btn-home-voice");
   if (!button) return;
   const agent = pinnedAgent();
-  const fallback = agent ? `Hold to talk to ${agent.name}` : "Choose a pinned agent in Settings";
+  const fallback = agent ? `Tap to talk to ${agent.name}` : "Choose a pinned agent in Settings";
   button.disabled = !agent;
   button.title = text || fallback;
   button.setAttribute("aria-label", text || fallback);
@@ -2259,7 +2258,6 @@ async function beginRecording(button, onText, onError) {
   });
   recorder.addEventListener("stop", async () => {
     button.classList.remove("recording");
-    button.setAttribute("aria-pressed", "false");
     stream.getTracks().forEach((track) => track.stop());
     state.recorder = null;
     const blob = new Blob(state.chunks, { type: recorder.mimeType || "audio/webm" });
@@ -2279,7 +2277,6 @@ async function beginRecording(button, onText, onError) {
   });
   recorder.start();
   button.classList.add("recording");
-  button.setAttribute("aria-pressed", "true");
   return true;
 }
 
@@ -2301,11 +2298,16 @@ async function toggleMic() {
   }, (message) => addStatus(message, true));
 }
 
-async function startHomeVoice(event) {
+async function toggleHomeVoice(event) {
   event.preventDefault();
-  if (state.homeRecording || state.recorder?.state === "recording") return;
-  state.homePressed = true;
-  try { event.currentTarget.setPointerCapture(event.pointerId); } catch {}
+  if (state.homeRecording) {
+    state.homeRecording = false;
+    event.currentTarget.setAttribute("aria-pressed", "false");
+    paintHomeVoice("Transcribing…");
+    stopRecording();
+    return;
+  }
+  if (state.recorder?.state === "recording") return;
   const agent = pinnedAgent();
   if (!agent) {
     paintHomeVoice("Choose a pinned agent in Settings");
@@ -2324,20 +2326,10 @@ async function startHomeVoice(event) {
     paintHomeVoice(message);
     setTimeout(() => paintHomeVoice(), 2600);
   });
-  if (state.homeRecording && state.homePressed) {
-    paintHomeVoice(`Listening — release to send to ${agent.name}`);
-  } else if (state.homeRecording) {
-    stopHomeVoice();
+  if (state.homeRecording) {
+    button.setAttribute("aria-pressed", "true");
+    paintHomeVoice(`Listening — tap again to send to ${agent.name}`);
   }
-}
-
-function stopHomeVoice(event) {
-  event?.preventDefault();
-  state.homePressed = false;
-  if (!state.homeRecording) return;
-  state.homeRecording = false;
-  paintHomeVoice("Transcribing…");
-  stopRecording();
 }
 
 /* ---------------- notifications ---------------- */
@@ -4367,9 +4359,7 @@ function wire() {
   $("btn-wake-pc")?.addEventListener("click", togglePcPower);
   installDirectorDoubleTap();
   const homeVoice = $("btn-home-voice");
-  homeVoice?.addEventListener("pointerdown", startHomeVoice);
-  homeVoice?.addEventListener("pointerup", stopHomeVoice);
-  homeVoice?.addEventListener("pointercancel", stopHomeVoice);
+  homeVoice?.addEventListener("click", toggleHomeVoice);
   homeVoice?.addEventListener("contextmenu", (event) => event.preventDefault());
   $("btn-new-agent").addEventListener("click", newChatChooser);
   $("btn-search")?.addEventListener("click", () => {

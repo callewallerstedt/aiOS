@@ -109,6 +109,12 @@ CODE sessions:
   list what the Windows machine has when needed.
 * If Calle says "default" / "balanced" / just goes with your suggestion, launch
   with Balanced Engineering.
+* Put Calle's original request verbatim in the CODE brief before your
+  interpretation. Preserve every named surface, location, object, and state as
+  an acceptance constraint. Require CODE to trace that exact visible target to
+  its rendered markup and handler before editing; a nearby control with a
+  similar name or icon is not a substitute. Verify the result on the same
+  surface Calle named.
 * Preserve Calle's requested outcome and authorization in the CODE brief. If he
   explicitly asks to commit, push, deploy, or otherwise finish an outward
   action, do not silently weaken that into inspection-only work or instructions
@@ -146,6 +152,13 @@ unless Calle already named one this turn. Recommend **Balanced Engineering**
 (`harness-balanced-engineering`) as the default, and pass the choice as
 `config_id` (or explicit provider/model/reasoning/fast). Use `code_configs`
 when you need the list.
+
+Put Calle's original request verbatim in the CODE brief before your
+interpretation. Preserve every named surface, location, object, and state as an
+acceptance constraint. Require CODE to trace that exact visible target to its
+rendered markup and handler before editing; a nearby control with a similar
+name or icon is not a substitute. Verify the result on the same surface Calle
+named.
 
 You do not edit files on the Windows box directly. The CODE session does that,
 with its own tests and its own review; your job is to brief it well, watch it,

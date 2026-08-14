@@ -1064,6 +1064,17 @@ def test_custom_directors_preserve_explicit_push_and_deploy_authorization(direct
     assert "commit, push, deploy" in prompt
 
 
+def test_custom_directors_preserve_the_exact_user_visible_target(director):
+    from director import agents
+
+    mine = director.create_agent(name="Bjorn", kind="custom", agent_id="agt_bjorn_target")
+    prompt = agents.system_prompt(mine, {})
+
+    assert "original request verbatim" in prompt
+    assert "exact visible target" in prompt
+    assert "similar name or icon is not a substitute" in prompt
+
+
 def test_house_instructions_reach_every_agent(director):
     from director import agents, config
 

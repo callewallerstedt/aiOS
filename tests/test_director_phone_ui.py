@@ -313,7 +313,7 @@ def test_homepage_has_a_wake_pc_button_for_an_offline_windows_box():
 
 def test_homepage_voice_and_hidden_component_gallery_are_wired():
     assert 'id="btn-home-voice"' in HTML
-    assert "startHomeVoice" in JS and "stopHomeVoice" in JS
+    assert "toggleHomeVoice" in JS
     assert "pinned_agent_id" in JS
     assert 'id="director-logo"' in HTML
     assert "installDirectorDoubleTap" in JS
@@ -346,7 +346,7 @@ def test_push_uses_agent_heading_and_is_silent_while_app_is_visible():
     assert 'payload.agent || payload.title || "Director"' in SW
     assert 'client.visibilityState === "visible"' in SW
     assert "showNotification(title" in SW
-    assert 'const VERSION = "director-v37"' in SW
+    assert 'const VERSION = "director-v38"' in SW
 
 
 def test_stop_button_clears_stale_working_state_after_server_acknowledges():
@@ -378,12 +378,23 @@ def test_chat_bubbles_share_padding_and_have_sharp_tails():
     assert "border-radius: 18px 18px 3px 18px" in override
 
 
-def test_home_voice_is_icon_only_accent_and_half_the_mobile_width():
+def test_home_voice_is_compact_icon_only_and_tap_to_toggle():
     assert "home-voice-label" not in HTML
     voice = _block(CSS, ".home-voice {", ".home-voice:active")
-    assert "width: min(50vw" in voice
+    assert "width: clamp(104px, 34vw, 132px)" in voice
     assert "aspect-ratio: 1" in voice
     assert "background: var(--accent)" in voice
+    assert 'aria-label="Tap to talk"' in HTML
+    assert 'aria-pressed="false"' in HTML
+    toggle = _block(JS, "async function toggleHomeVoice", "/* ---------------- notifications")
+    assert "if (state.homeRecording)" in toggle
+    assert 'paintHomeVoice("Transcribing…")' in toggle
+    assert "stopRecording()" in toggle
+    assert "Listening — tap again to send" in toggle
+    assert "homePressed" not in JS
+    assert 'homeVoice?.addEventListener("click", toggleHomeVoice)' in JS
+    assert 'homeVoice?.addEventListener("pointerdown"' not in JS
+    assert 'homeVoice?.addEventListener("pointerup"' not in JS
 
 
 def test_takeover_toolbar_can_request_the_software_keyboard():
@@ -394,22 +405,13 @@ def test_takeover_toolbar_can_request_the_software_keyboard():
     assert "director.keyboard-input" in shell
     assert "director.keyboard-key" in shell
     assert ".takeover-keyboard-input" in CSS
-    assert 'const VERSION = "director-v37"' in SW
+    assert 'const VERSION = "director-v38"' in SW
 
 
-def test_chat_microphone_is_compact_tap_to_toggle_with_recording_state():
-    mic_button = _block(CSS, "#btn-mic {", "#btn-mic svg")
-    mic_icon = _block(CSS, "#btn-mic svg {", ".pill-btn.send")
-    toggle = _block(JS, "async function toggleMic()", "async function startHomeVoice")
-    recording = _block(JS, "async function beginRecording", "function stopRecording")
-
-    assert "width: 31px" in mic_button and "height: 31px" in mic_button
-    assert "width: 15px" in mic_icon and "height: 15px" in mic_icon
-    assert 'id="btn-mic"' in HTML and 'aria-pressed="false"' in HTML
-    assert '$("btn-mic").addEventListener("click", toggleMic)' in JS
-    assert "pointerdown" not in toggle and "pointerup" not in toggle
-    assert 'setAttribute("aria-pressed", "true")' in recording
-    assert 'setAttribute("aria-pressed", "false")' in recording
+def test_home_voice_change_does_not_restyle_the_chat_microphone():
+    assert "#btn-mic {" not in CSS
+    assert "#btn-mic svg {" not in CSS
+    assert '<button class="pill-btn" id="btn-mic" type="button" aria-label="Voice">' in HTML
 
 
 def test_supplied_eye_sheet_is_selectable_and_rotates_on_active_blobs():

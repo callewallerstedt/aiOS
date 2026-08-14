@@ -8,7 +8,7 @@
    cleanUrls 308s /index.html -> /, and cache.addAll treats that as failure,
    so we cache each file on its own and never fall back a script to HTML. */
 
-const VERSION = "director-v37";
+const VERSION = "director-v38";
 const SHELL = [
   "/",
   "/director.css",
