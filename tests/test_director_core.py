@@ -690,6 +690,18 @@ def test_house_instructions_reach_every_agent(director):
     assert len(agents.house_instructions({"instructions": "x" * 9000})) == 8000
 
 
+def test_authentication_prompts_try_existing_google_session_before_handoff():
+    from director import agents
+    from director.operator import prompts
+
+    for text in (agents.BASE_PROMPT, agents.OPERATOR_PROMPT, prompts.SYSTEM_PROMPT):
+        lowered = text.lower()
+        assert "google account" in lowered
+        assert "account-chooser" in lowered
+        assert "genuinely" in lowered
+    assert "a login wall, a 2fa prompt" not in agents.OPERATOR_PROMPT.lower()
+
+
 def test_funnel_prefix_is_stripped_so_vnc_routes_match():
     from director.server import strip_funnel_prefix
 

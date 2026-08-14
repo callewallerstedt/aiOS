@@ -3,9 +3,10 @@
 Three shapes, all of which park the run until the phone answers:
 
     ask_user   a question ("which of these two?") — free text back.
-    handoff    "this needs your hands": a login, a 2FA prompt, a captcha, a
-               card number. Director opens the takeover view on the operator's
-               screen and waits. It never sees, types or stores the secret.
+    handoff    "this needs your hands": secret entry, manual 2FA approval, a
+               captcha or payment details that actually block progress.
+               Director opens the takeover view and waits. It never sees,
+               types or stores the secret.
     confirm    an explicit yes/no before something outward-facing.
 """
 from __future__ import annotations
@@ -46,10 +47,11 @@ async def ask_user(ctx: ToolContext, question: str = "", options=None) -> ToolRe
 
 @tool(
     "handoff",
-    "Hand control to Calle on the operator screen for something you must not "
-    "do yourself: signing in, a 2FA code, a captcha, or entering payment "
-    "details. Director opens the takeover view and waits. Never type "
-    "credentials yourself, and never ask for them in chat.",
+    "Hand control to Calle only when the operator is genuinely blocked by "
+    "secret entry, manual 2FA approval, a captcha, payment details, or missing "
+    "account access. Try the existing signed-in session and ordinary Google "
+    "SSO/account selection first. Director opens the takeover view and waits. "
+    "Never type credentials yourself, and never ask for them in chat.",
     {
         "type": "object",
         "properties": {

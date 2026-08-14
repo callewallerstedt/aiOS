@@ -182,10 +182,11 @@ Xvfb :99  ->  openbox  ->  x11vnc (localhost:5999)  ->  Director bridges it to n
 Chrome runs there with a persistent profile in
 `~/.local/share/aios-director/chrome-profile`, so web logins survive reboots.
 
-**Takeover**: the screen button in the chat header opens noVNC in the app. When
-the operator hits a login, 2FA prompt, captcha or payment form it stops and
-hands over — you finish that step yourself on the same screen, from wherever
-you are, and it continues. Director never sees the credential.
+**Takeover**: the screen button in the chat header opens noVNC in the app. The
+operator first tries the persistent session, including an existing Google
+account and ordinary SSO. It hands over only when password entry, manual 2FA,
+a captcha, payment details or missing access genuinely blocks it. You finish
+that step on the same screen and it continues. Director never sees the secret.
 
 The window manager is not optional. Without one, Chrome renders but nothing
 maximises or takes focus, and `_NET_CLIENT_LIST` is never published, so the
@@ -195,7 +196,8 @@ operator cannot tell what is on screen.
 
 * Destructive tools (`shell`, `write_file`, and anything outward-facing) raise
   an approval card and block until you answer.
-* Credentials are always a handoff, never something Director types.
+* Existing sessions and normal account selection are automatic. Secret entry
+  is always a handoff, never something Director types.
 * The public endpoint requires a bearer token on every route except
   `/api/health` and `/api/pair`.
 
