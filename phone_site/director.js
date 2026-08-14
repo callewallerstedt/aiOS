@@ -1525,9 +1525,14 @@ function handleEvent(event) {
       shotCard(payload);
       break;
 
+    case "operator.stuck":
+      addStatus(`Operator stopped: ${payload.issue || "no meaningful progress"}`, true);
+      break;
+
     case "operator.started":
     case "operator.step":
     case "operator.actions":
+    case "operator.progress_review":
     case "operator.done":
     case "operator.failed":
     case "operator.stopped":

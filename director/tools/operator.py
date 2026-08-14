@@ -30,22 +30,31 @@ from . import ToolContext, ToolResult, tool
                 "description": "The goal, in plain language, including any value to "
                                "read back and what finished looks like.",
             },
-            "max_steps": {
+            "review_every": {
                 "type": "integer",
-                "description": "Step budget. Default 40. Keep small for simple errands.",
+                "minimum": 1,
+                "description": ("Progress-review interval. Default 30. This is not a hard "
+                                "step limit; work continues when meaningful progress is confirmed."),
             },
         },
         "required": ["task"],
     },
 )
-async def operator(ctx: ToolContext, task: str = "", max_steps: int = 0) -> ToolResult:
+async def operator(ctx: ToolContext, task: str = "", review_every: int = 0,
+                   max_steps: int = 0) -> ToolResult:
     goal = str(task or "").strip()
     if not goal:
         return ToolResult(error="no task given")
     if ctx.depth > 2:
         return ToolResult(error="operator dispatch nested too deep")
 
-    job = store.create_job(kind="operator", request={"task": goal, "max_steps": max_steps},
+    # Treat the old hidden max_steps argument as a review interval so an
+    # already-generated call cannot reintroduce a hard ceiling during deploy.
+    configured_interval = int(((ctx.settings.get("operator", {}) or {})
+                               .get("review_every") or 30))
+    interval = max(1, int(review_every or max_steps or configured_interval))
+    job = store.create_job(kind="operator", request={"task": goal,
+                                                      "review_every": interval},
                            thread_id=ctx.thread_id, agent_id=ctx.agent.get("id", ""),
                            status="running")
     cancel = asyncio.Event()
@@ -59,7 +68,7 @@ async def operator(ctx: ToolContext, task: str = "", max_steps: int = 0) -> Tool
     async def run() -> dict:
         return await operator_loop.run_task(
             goal, emit=emit, settings=ctx.settings, cancel=cancel,
-            ask_user=ask, max_steps=int(max_steps or 0))
+            ask_user=ask, review_every=interval)
 
     ctx.hub.start_job(job, run)
     return ToolResult(

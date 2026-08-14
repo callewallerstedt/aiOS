@@ -573,6 +573,157 @@ def test_operator_native_finish_tool_reports_completion():
     assert decision["actions"] == []
 
 
+def test_operator_progress_checkpoint_stops_with_the_observed_issue(monkeypatch):
+    import asyncio
+
+    from director.operator import display, loop, prompts, x11
+
+    events = []
+    model_calls = {"actions": 0, "reviews": 0}
+    shot_number = 0
+
+    async def ready(settings, with_chrome=False):
+        return {"ready": True, "display": ":0"}
+
+    async def screen_size(settings):
+        return 1280, 720
+
+    async def capture(settings):
+        return b"frame"
+
+    def encode_jpeg(png):
+        nonlocal shot_number
+        shot_number += 1
+        return f"data:image/jpeg;base64,shot{shot_number}", 1280, 720
+
+    async def window_list(settings=None):
+        return ["Spotify for Artists"]
+
+    async def execute(action, settings):
+        return f"click ({action.get('x')},{action.get('y')})"
+
+    async def complete(*, tools, **kwargs):
+        names = [tool["name"] for tool in tools]
+        if "stop_stuck" in names:
+            model_calls["reviews"] += 1
+            return {"tool_calls": [{"name": "stop_stuck", "arguments": json.dumps({
+                "issue": "The same upgrade dialog remained visible.",
+                "attempts": "Clicked Don't Upgrade repeatedly without a screen change.",
+            })}]}
+        model_calls["actions"] += 1
+        return {"reasoning": "Dismiss the dialog.", "tool_calls": [{
+            "name": "click", "arguments": '{"x":558,"y":432}',
+        }]}
+
+    async def emit(kind, payload):
+        events.append((kind, payload))
+
+    monkeypatch.setattr(display, "ensure_running", ready)
+    monkeypatch.setattr(x11, "screen_size", screen_size)
+    monkeypatch.setattr(x11, "capture", capture)
+    monkeypatch.setattr(x11, "encode_jpeg", encode_jpeg)
+    monkeypatch.setattr(x11, "window_list", window_list)
+    monkeypatch.setattr(loop, "execute", execute)
+    monkeypatch.setattr(loop.models, "complete", complete)
+
+    result = asyncio.run(loop.run_task(
+        "Open the release stats", emit=emit,
+        settings={"operator": {"backend": "codex", "model": "gpt-5.6-luna",
+                                 "reasoning": "medium"}},
+        review_every=2))
+
+    assert result["status"] == "stopped" and result["steps"] == 2
+    assert result["issue"] == "The same upgrade dialog remained visible."
+    assert model_calls == {"actions": 2, "reviews": 1}
+    started = next(payload for kind, payload in events if kind == "operator.started")
+    assert started["review_every"] == 2 and "max_steps" not in started
+    stuck = next(payload for kind, payload in events if kind == "operator.stuck")
+    assert stuck["issue"] == result["issue"]
+    assert not any(kind == "operator.stopped" and "budget" in str(payload)
+                   for kind, payload in events)
+
+
+def test_operator_progress_checkpoint_can_continue_past_the_interval(monkeypatch):
+    import asyncio
+
+    from director.operator import display, loop, x11
+
+    events = []
+    action_round = 0
+    normal_messages = []
+
+    async def ready(settings, with_chrome=False):
+        return {"ready": True, "display": ":0"}
+
+    async def screen_size(settings):
+        return 1280, 720
+
+    async def capture(settings):
+        return b"frame"
+
+    async def window_list(settings=None):
+        return []
+
+    async def execute(action, settings):
+        return "click (10,10)"
+
+    async def complete(*, items, tools, **kwargs):
+        nonlocal action_round
+        names = [tool["name"] for tool in tools]
+        if "continue_work" in names:
+            return {"tool_calls": [{"name": "continue_work", "arguments": json.dumps({
+                "summary": "The dialog closed and the roster became usable.",
+                "next_approach": "Open the artist and inspect Music analytics.",
+            })}]}
+        action_round += 1
+        normal_messages.append(items[0])
+        if action_round == 3:
+            return {"tool_calls": [{"name": "finish", "arguments": json.dumps({
+                "status": "done", "message": "Release streams are visible.",
+            })}]}
+        return {"tool_calls": [{"name": "click", "arguments": '{"x":10,"y":10}'}]}
+
+    async def emit(kind, payload):
+        events.append((kind, payload))
+
+    monkeypatch.setattr(display, "ensure_running", ready)
+    monkeypatch.setattr(x11, "screen_size", screen_size)
+    monkeypatch.setattr(x11, "capture", capture)
+    monkeypatch.setattr(x11, "encode_jpeg",
+                        lambda png: ("data:image/jpeg;base64,QQ==", 1280, 720))
+    monkeypatch.setattr(x11, "window_list", window_list)
+    monkeypatch.setattr(loop, "execute", execute)
+    monkeypatch.setattr(loop.models, "complete", complete)
+
+    result = asyncio.run(loop.run_task(
+        "Open the release stats", emit=emit,
+        settings={"operator": {"backend": "codex", "model": "gpt-5.6-luna",
+                                 "reasoning": "medium"}},
+        review_every=2))
+
+    assert result == {"status": "done", "summary": "Release streams are visible.",
+                      "steps": 3}
+    review = next(payload for kind, payload in events
+                  if kind == "operator.progress_review")
+    assert review["progress"] is True and review["step"] == 2
+    third_message = json.dumps(normal_messages[2])
+    assert "Progress confirmed" in third_message
+    assert "Open the artist and inspect Music analytics" in third_message
+
+
+def test_operator_defaults_to_progress_reviews_not_a_step_budget():
+    from director import config, tools
+
+    operator = next(tool for tool in tools.all_tools() if tool.name == "operator")
+    properties = operator.parameters["properties"]
+    assert "review_every" in properties and "max_steps" not in properties
+    assert config.DEFAULT_SETTINGS["operator"]["review_every"] == 30
+    assert "max_steps" not in config.DEFAULT_SETTINGS["operator"]
+    migrated = config._without_legacy_step_budget({
+        "operator": {"max_steps": 40, "model": "gpt-5.6-luna"}})
+    assert migrated["operator"] == {"model": "gpt-5.6-luna"}
+
+
 def test_keysym_aliases_cover_what_the_prompt_promises():
     from director.operator import x11
 

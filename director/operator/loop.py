@@ -1,8 +1,8 @@
 """The pixel operator loop.
 
 Screenshot -> model -> actions -> repeat, until the model says done, the step
-budget runs out, or the user stops it. Every step emits events so the phone can
-watch the work happen and step in.
+reviewer decides an interval made no progress, or the user stops it. Every step
+emits events so the phone can watch the work happen and step in.
 """
 from __future__ import annotations
 
@@ -114,6 +114,58 @@ def tool_decision(reply: dict) -> dict:
             "need_screen": True, "native_tool": name}
 
 
+def progress_review_decision(reply: dict) -> dict:
+    """Translate the checkpoint review's required native tool call."""
+    calls = list(reply.get("tool_calls") or [])
+    if not calls:
+        return {"progress": False,
+                "issue": "the progress reviewer returned no decision",
+                "attempts": str(reply.get("text") or "")[:500]}
+    call = calls[0]
+    name = str(call.get("name") or "")
+    try:
+        args = json.loads(str(call.get("arguments") or "{}"))
+    except json.JSONDecodeError:
+        args = {}
+    if not isinstance(args, dict):
+        args = {}
+    if name == "continue_work":
+        return {"progress": True,
+                "summary": str(args.get("summary") or "meaningful progress was made"),
+                "next_approach": str(args.get("next_approach") or "continue toward the task")}
+    if name == "stop_stuck":
+        return {"progress": False,
+                "issue": str(args.get("issue") or "no meaningful progress was made"),
+                "attempts": str(args.get("attempts") or "")}
+    return {"progress": False,
+            "issue": f"the progress reviewer returned unknown decision {name!r}",
+            "attempts": ""}
+
+
+async def review_progress(task: str, checkpoint_step: int, current_step: int,
+                          checkpoint_image: str, current_image: str,
+                          history: str, settings: dict) -> dict:
+    """Have the same configured operator model judge one work interval."""
+    operator_cfg = settings.get("operator", {}) or {}
+    message = prompts.progress_review_message(
+        task, checkpoint_step, current_step, history)
+    items = [models.user_message([
+        models.text_part(message),
+        models.text_part("CHECKPOINT SCREEN:"),
+        models.image_part(checkpoint_image),
+        models.text_part("CURRENT SCREEN:"),
+        models.image_part(current_image),
+    ])]
+    reply = await models.complete(
+        backend=str(operator_cfg.get("backend") or ""),
+        model=str(operator_cfg.get("model") or ""),
+        reasoning=str(operator_cfg.get("reasoning") or ""),
+        instructions=prompts.PROGRESS_REVIEW_PROMPT, tool_choice="required",
+        items=items, tools=prompts.PROGRESS_REVIEW_TOOLS, timeout=180.0,
+        settings=settings)
+    return progress_review_decision(reply)
+
+
 async def execute(action: dict, settings: dict) -> str:
     """Run one action; return a one-line description for the log."""
     kind = str(action.get("type") or "").strip().lower()
@@ -196,12 +248,12 @@ async def execute(action: dict, settings: dict) -> str:
 async def run_task(task: str, *, emit: Emit, settings: dict | None = None,
                    cancel: asyncio.Event | None = None,
                    ask_user: Callable[..., Awaitable[str]] | None = None,
-                   max_steps: int = 0) -> dict:
+                   review_every: int = 0) -> dict:
     """Drive the screen until the task is done. Returns a result summary."""
     cfg = settings if settings is not None else config.load_settings()
     operator_cfg = cfg.get("operator", {}) or {}
     cancel = cancel or asyncio.Event()
-    budget = int(max_steps or operator_cfg.get("max_steps") or 40)
+    review_interval = max(1, int(review_every or operator_cfg.get("review_every") or 30))
 
     state = await display_mod.ensure_running(cfg, with_chrome=True)
     if not state.get("ready"):
@@ -209,14 +261,17 @@ async def run_task(task: str, *, emit: Emit, settings: dict | None = None,
                                              f"({state.get('units')})", "steps": 0}
 
     history: list[str] = []
+    review_history: list[str] = []
     need_screen = True
     last_shot: tuple[str, int, int] | None = None
+    checkpoint_shot: tuple[str, int, int] | None = None
+    checkpoint_step = 0
     steps = 0
 
     await emit("operator.started", {"task": task, "display": state.get("display"),
-                                    "max_steps": budget})
+                                    "review_every": review_interval})
 
-    while steps < budget:
+    while True:
         if cancel.is_set():
             await emit("operator.stopped", {"reason": "stopped by user", "steps": steps})
             return {"status": "stopped", "summary": "stopped by user", "steps": steps}
@@ -229,6 +284,8 @@ async def run_task(task: str, *, emit: Emit, settings: dict | None = None,
             last_shot = (data_url, shot_w or width, shot_h or height)
             await emit("operator.screenshot", {"step": steps, "image": data_url,
                                                "width": last_shot[1], "height": last_shot[2]})
+            if checkpoint_shot is None:
+                checkpoint_shot = last_shot
         data_url, shot_w, shot_h = last_shot
         factor = (width / float(shot_w)) if shot_w else 1.0
 
@@ -274,8 +331,10 @@ async def run_task(task: str, *, emit: Emit, settings: dict | None = None,
         if performed:
             await emit("operator.actions", {"step": steps, "performed": performed})
 
-        history.append(f"[{steps}] {thought[:400]}\n    did: " +
+        step_record = (f"[{steps}] {thought[:400]}\n    did: " +
                        ("; ".join(performed)[:400] if performed else "(nothing)"))
+        history.append(step_record)
+        review_history.append(step_record)
 
         if status == "done":
             summary = str(parsed.get("message") or thought or "done")
@@ -300,7 +359,54 @@ async def run_task(task: str, *, emit: Emit, settings: dict | None = None,
         if status in ("ask", "handoff"):
             return {"status": "blocked", "summary": thought or "needs a human", "steps": steps}
 
-        need_screen = bool(parsed.get("need_screen", True)) or bool(actions)
+        if steps % review_interval == 0:
+            await asyncio.sleep(0.15)
+            png = await x11.capture(cfg)
+            review_image, review_w, review_h = x11.encode_jpeg(png)
+            current_shot = (review_image, review_w or width, review_h or height)
+            await emit("operator.screenshot", {
+                "step": steps, "image": review_image,
+                "width": current_shot[1], "height": current_shot[2],
+                "progress_review": True,
+            })
+            try:
+                review = await review_progress(
+                    task, checkpoint_step, steps,
+                    (checkpoint_shot or current_shot)[0], current_shot[0],
+                    "\n".join(review_history), cfg)
+            except models.ModelError as exc:
+                issue = f"progress review failed at step {steps}: {exc}"
+                await emit("operator.failed", {
+                    "steps": steps, "error": issue, "stage": "progress_review"})
+                return {"status": "fail", "summary": issue, "steps": steps}
 
-    await emit("operator.stopped", {"reason": "step budget reached", "steps": steps})
-    return {"status": "stopped", "summary": f"hit the {budget}-step budget", "steps": steps}
+            await emit("operator.progress_review", {
+                "step": steps, "checkpoint_step": checkpoint_step,
+                **review,
+            })
+            if not review.get("progress"):
+                issue = str(review.get("issue") or "no meaningful progress was made")
+                attempts = str(review.get("attempts") or "").strip()
+                summary = f"Stopped after a progress review at step {steps}: {issue}"
+                if attempts:
+                    summary += f" Tried: {attempts}"
+                await emit("operator.stuck", {
+                    "steps": steps, "checkpoint_step": checkpoint_step,
+                    "issue": issue, "attempts": attempts,
+                })
+                return {"status": "stopped", "summary": summary, "steps": steps,
+                        "issue": issue}
+
+            next_approach = str(review.get("next_approach") or "continue toward the task")
+            history.append(
+                f"[progress review at step {steps}] Progress confirmed. "
+                f"Next approach: {next_approach[:500]}")
+            history = history[-MAX_HISTORY_STEPS:]
+            review_history.clear()
+            checkpoint_shot = current_shot
+            checkpoint_step = steps
+            last_shot = current_shot
+            need_screen = False
+            continue
+
+        need_screen = bool(parsed.get("need_screen", True)) or bool(actions)

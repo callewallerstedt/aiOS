@@ -101,7 +101,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "xauthority": "/run/user/1000/gdm/Xauthority",
         "width": 1280,
         "height": 720,
-        "max_steps": 40,
+        "review_every": 30,
         "vnc_port": 5999,
         "novnc_port": 6080,
     },
@@ -169,6 +169,17 @@ def _merge(base: dict, override: dict) -> dict:
     return out
 
 
+def _without_legacy_step_budget(settings: dict | None) -> dict:
+    """Discard the old hard operator ceiling from persisted settings."""
+    normalized = dict(settings or {})
+    operator = normalized.get("operator")
+    if isinstance(operator, dict):
+        operator = dict(operator)
+        operator.pop("max_steps", None)
+        normalized["operator"] = operator
+    return normalized
+
+
 def load_settings(*, refresh: bool = False) -> dict[str, Any]:
     """Read settings.json merged over the defaults.
 
@@ -192,7 +203,7 @@ def load_settings(*, refresh: bool = False) -> dict[str, Any]:
                     raw = loaded
             except (OSError, json.JSONDecodeError):
                 raw = {}
-        merged = _merge(DEFAULT_SETTINGS, raw)
+        merged = _merge(DEFAULT_SETTINGS, _without_legacy_step_budget(raw))
         _CACHE = merged
         _CACHE_MTIME = mtime
         return json.loads(json.dumps(merged))
@@ -201,7 +212,7 @@ def load_settings(*, refresh: bool = False) -> dict[str, Any]:
 def save_settings(settings: dict[str, Any]) -> dict[str, Any]:
     """Write settings.json atomically and refresh the cache."""
     global _CACHE, _CACHE_MTIME
-    merged = _merge(DEFAULT_SETTINGS, settings or {})
+    merged = _merge(DEFAULT_SETTINGS, _without_legacy_step_budget(settings))
     path = settings_path()
     temp = path.with_suffix(".json.tmp")
     temp.write_text(json.dumps(merged, indent=2), encoding="utf-8")

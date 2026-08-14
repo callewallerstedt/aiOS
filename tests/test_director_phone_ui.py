@@ -126,6 +126,12 @@ def test_tool_result_images_are_visible_live_and_after_reopening_chat():
     assert 'payload["image"] = image' in runtime
 
 
+def test_operator_stuck_issue_is_visible_in_live_chat():
+    block = _block(JS, 'case "operator.stuck":', 'case "operator.started":')
+    assert "payload.issue" in block
+    assert "Operator stopped:" in block
+
+
 def test_agent_relay_messages_are_attributed_and_destination_cards_open():
     add_user = _block(JS, "function addUser", "function addAssistant")
     assert 'extra.kind === "agent_message"' in add_user

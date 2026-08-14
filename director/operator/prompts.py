@@ -81,6 +81,28 @@ ACTION_TOOLS = [
            "message": {"type": "string"}}, ["status", "message"]),
 ]
 
+PROGRESS_REVIEW_PROMPT = """You are reviewing your own aiOS OPERATOR run at a
+periodic checkpoint. Do not interact with the computer. Compare the checkpoint
+screen with the current screen and read the complete action trace for this
+interval.
+
+Call `continue_work` only when the task made meaningful, observable progress:
+navigation toward the goal, a blocker removed, a required value entered, or a
+result reached. Animation, waiting, refocusing, and repeated attempts on an
+unchanged screen are not progress. If the run is stuck, call `stop_stuck` and
+state the concrete visible issue plus what kept failing. Never continue merely
+because another click might work.
+"""
+
+PROGRESS_REVIEW_TOOLS = [
+    _tool("continue_work", "Meaningful task progress occurred during this interval.",
+          {"summary": {"type": "string"},
+           "next_approach": {"type": "string"}}, ["summary", "next_approach"]),
+    _tool("stop_stuck", "No meaningful progress occurred; stop with the concrete issue.",
+          {"issue": {"type": "string"},
+           "attempts": {"type": "string"}}, ["issue", "attempts"]),
+]
+
 
 def task_message(task: str, width: int, height: int, history: str,
                  windows: list[str] | None = None) -> str:
@@ -91,3 +113,18 @@ def task_message(task: str, width: int, height: int, history: str,
         lines += ["", "HISTORY:", history]
     lines += ["", "Reason, then call exactly one action tool for the next step."]
     return "\n".join(lines)
+
+
+def progress_review_message(task: str, checkpoint_step: int, current_step: int,
+                            history: str) -> str:
+    return "\n".join([
+        f"TASK: {task}",
+        "",
+        f"Review the work from step {checkpoint_step} through step {current_step}.",
+        "The first attached image is the checkpoint screen. The second attached image is the current screen.",
+        "",
+        "ACTIONS DURING THIS INTERVAL:",
+        history or "(no recorded actions)",
+        "",
+        "Decide whether meaningful, observable progress was made. Call exactly one review tool.",
+    ])
