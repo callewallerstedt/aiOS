@@ -476,6 +476,45 @@ def test_action_coordinates_scale_back_to_real_pixels():
     assert scaled[2]["points"] == [[2, 4], [6, 8]]
 
 
+def test_x11_click_targets_the_window_under_the_pointer(monkeypatch):
+    import asyncio
+
+    from director.operator import x11
+
+    calls = []
+
+    async def fake_xdotool(*args, settings=None):
+        calls.append(args)
+        if args[:2] == ("getmouselocation", "--shell"):
+            return 0, "X=805\nY=560\nSCREEN=0\nWINDOW=46137348"
+        return 0, ""
+
+    monkeypatch.setattr(x11, "xdotool", fake_xdotool)
+    asyncio.run(x11.click(805, 560, clicks=2))
+
+    assert calls[0] == ("mousemove", 805, 560)
+    assert calls[1] == ("getmouselocation", "--shell")
+    assert calls[2] == (
+        "click", "--window", "46137348", "--repeat", "2", "--delay", "80", "1")
+
+
+def test_x11_click_surfaces_delivery_failure(monkeypatch):
+    import asyncio
+
+    from director.operator import x11
+
+    async def fake_xdotool(*args, settings=None):
+        if args[0] == "click":
+            return 1, "button event rejected"
+        if args[:2] == ("getmouselocation", "--shell"):
+            return 0, "WINDOW=42"
+        return 0, ""
+
+    monkeypatch.setattr(x11, "xdotool", fake_xdotool)
+    with pytest.raises(RuntimeError, match="button event rejected"):
+        asyncio.run(x11.click(10, 20))
+
+
 def test_scaling_is_a_no_op_at_full_size():
     from director.operator import loop
 

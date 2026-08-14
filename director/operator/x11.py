@@ -170,13 +170,39 @@ async def move(x: int, y: int, settings: dict[str, Any] | None = None) -> None:
     await xdotool("mousemove", int(x), int(y), settings=settings)
 
 
+async def pointer_window(settings: dict[str, Any] | None = None) -> str:
+    """Return the X11 window currently under the pointer, when available."""
+    code, out = await xdotool("getmouselocation", "--shell", settings=settings)
+    if code != 0:
+        return ""
+    for line in out.splitlines():
+        key, separator, value = line.partition("=")
+        if separator and key.strip() == "WINDOW" and value.strip().isdigit():
+            return value.strip()
+    return ""
+
+
+async def _checked_xdotool(*args: str, settings: dict[str, Any] | None = None) -> None:
+    code, out = await xdotool(*args, settings=settings)
+    if code != 0:
+        raise RuntimeError(f"xdotool {' '.join(args)} failed ({code}): {out or 'no output'}")
+
+
 async def click(x: int | None, y: int | None, button: str = "left", clicks: int = 1,
                 settings: dict[str, Any] | None = None) -> None:
     if x is not None and y is not None:
         await move(x, y, settings)
-    code = BUTTONS.get(str(button or "left").lower(), 1)
-    await xdotool("click", "--repeat", max(1, int(clicks or 1)), "--delay", "80",
-                  code, settings=settings)
+    button_code = str(BUTTONS.get(str(button or "left").lower(), 1))
+    window = await pointer_window(settings)
+    args = ["click"]
+    # On the real GNOME desktop, XTEST can move the pointer correctly while a
+    # bare click never reaches Chrome. Addressing the window under the pointer
+    # delivers the same event reliably and still works for whichever app is at
+    # the requested screen coordinate.
+    if window:
+        args += ["--window", window]
+    args += ["--repeat", str(max(1, int(clicks or 1))), "--delay", "80", button_code]
+    await _checked_xdotool(*args, settings=settings)
 
 
 async def mouse_down(x: int | None, y: int | None, button: str = "left",
