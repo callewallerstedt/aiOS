@@ -397,6 +397,27 @@ def test_openrouter_message_translation():
     assert messages[3] == {"role": "tool", "tool_call_id": "call_3", "content": "ok"}
 
 
+def test_openrouter_balance_matches_aios_code_credit_math():
+    from director.models import openrouter
+
+    assert openrouter._balance_from_payload({
+        "data": {"total_credits": 40, "total_usage": 28.375},
+    }) == {
+        "ok": True,
+        "currency": "USD",
+        "balance": 11.625,
+        "total_credits": 40.0,
+        "total_usage": 28.375,
+    }
+
+
+def test_openrouter_catalogue_offers_luna():
+    from director.models import openrouter
+
+    assert any(row["id"] == "openai/gpt-5.6-luna"
+               for row in openrouter.FEATURED_MODELS)
+
+
 def test_reasoning_none_maps_to_minimal_for_codex():
     """The aiOS UI calls the lowest level "none"; the endpoint calls it
     "minimal". Sending the wrong word silently costs reasoning tokens."""

@@ -2366,10 +2366,13 @@ async function openSettings() {
   body.append(el("div", "status-line", "Loading…"));
   let data;
   try {
-    const [settings, modelInfo, health] = await Promise.all([
+    const [settings, modelInfo, health, balance] = await Promise.all([
       api("/api/settings"), api("/api/models"), api("/api/state"),
+      api("/api/openrouter/balance").catch((error) => ({
+        ok: false, error: String(error.message || error),
+      })),
     ]);
-    data = { settings: settings.settings, models: modelInfo, health };
+    data = { settings: settings.settings, models: modelInfo, health, balance };
   } catch (error) {
     body.textContent = "";
     body.append(el("div", "notice", String(error.message || error)));
@@ -2499,6 +2502,38 @@ async function openSettings() {
     line.append(el("span", "v", row.message));
     backends.append(line);
   }
+  const money = (value) => new Intl.NumberFormat("en-US", {
+    style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2,
+  }).format(Number(value));
+  const balanceLine = el("div", "line");
+  balanceLine.append(el("span", null, "OpenRouter balance"));
+  const balanceValue = el("span", "v");
+  const balanceDetail = el("div", "hint");
+  const paintBalance = (result) => {
+    if (!result || result.ok === false || !Number.isFinite(Number(result.balance))) {
+      balanceValue.textContent = "unavailable";
+      balanceDetail.textContent = (result && result.error) || "Could not read the balance.";
+      return;
+    }
+    balanceValue.textContent = `${money(result.balance)} remaining`;
+    balanceDetail.textContent = `${money(result.total_credits)} purchased / ${money(result.total_usage)} used`;
+  };
+  balanceLine.append(balanceValue);
+  backends.append(balanceLine, balanceDetail);
+  paintBalance(data.balance);
+  const refreshBalance = el("button", "btn", "Refresh balance");
+  refreshBalance.addEventListener("click", async () => {
+    refreshBalance.disabled = true;
+    balanceValue.textContent = "refreshing...";
+    try {
+      paintBalance(await api("/api/openrouter/balance?refresh=1"));
+    } catch (error) {
+      paintBalance({ ok: false, error: String(error.message || error) });
+    } finally {
+      refreshBalance.disabled = false;
+    }
+  });
+  backends.append(refreshBalance);
   const keyField = el("div", "field");
   keyField.append(el("label", null, "OpenRouter API key"));
   const keyInput = el("input");
@@ -2543,11 +2578,21 @@ async function openSettings() {
     option.textContent = `${model.label} (Codex)`;
     select.append(option);
   }
+  for (const model of data.models.openrouter_models || []) {
+    const option = document.createElement("option");
+    option.value = `openrouter:${model.id}`;
+    option.textContent = `${model.label} (OpenRouter)`;
+    select.append(option);
+  }
   const custom = document.createElement("option");
   custom.value = "openrouter:";
   custom.textContent = "OpenRouter model…";
   select.append(custom);
-  select.value = `${data.settings.defaults?.backend || "codex"}:${data.settings.defaults?.model || ""}`;
+  const currentBackend = data.settings.defaults?.backend || "codex";
+  const currentModel = data.settings.defaults?.model || "";
+  const currentChoice = `${currentBackend}:${currentModel}`;
+  select.value = [...select.options].some((option) => option.value === currentChoice)
+    ? currentChoice : (currentBackend === "openrouter" ? "openrouter:" : currentChoice);
   modelField.append(select);
   defaults.append(modelField);
 
@@ -2555,6 +2600,10 @@ async function openSettings() {
   orField.append(el("label", null, "OpenRouter model id (when chosen above)"));
   const orInput = el("input");
   orInput.placeholder = "anthropic/claude-sonnet-4.5";
+  if (currentBackend === "openrouter"
+      && !(data.models.openrouter_models || []).some((row) => row.id === currentModel)) {
+    orInput.value = currentModel;
+  }
   orField.append(orInput);
   defaults.append(orField);
 
@@ -2572,11 +2621,13 @@ async function openSettings() {
 
   const saveModel = el("button", "btn primary", "Save model");
   saveModel.addEventListener("click", async () => {
-    const [backend, model] = select.value.split(":");
+    const separator = select.value.indexOf(":");
+    const backend = select.value.slice(0, separator);
+    const model = select.value.slice(separator + 1);
     const patch = {
       defaults: {
         backend,
-        model: backend === "openrouter" ? orInput.value.trim() : model,
+        model: backend === "openrouter" ? (model || orInput.value.trim()) : model,
         reasoning: reasoning.value,
       },
     };
@@ -3065,11 +3116,19 @@ async function agentEditor(agent) {
     option.textContent = `${model.label} (Codex)`;
     select.append(option);
   }
+  for (const model of catalogue.openrouter_models || []) {
+    const option = document.createElement("option");
+    option.value = `openrouter:${model.id}`;
+    option.textContent = `${model.label} (OpenRouter)`;
+    select.append(option);
+  }
   const custom = document.createElement("option");
   custom.value = "openrouter:";
   custom.textContent = "OpenRouter model…";
   select.append(custom);
-  select.value = draft.backend ? `${draft.backend}:${draft.model}` : "";
+  const draftChoice = draft.backend ? `${draft.backend}:${draft.model}` : "";
+  select.value = [...select.options].some((option) => option.value === draftChoice)
+    ? draftChoice : (draft.backend === "openrouter" ? "openrouter:" : "");
   modelGroup.append(field("Which model", select));
 
   const orInput = textInput(draft.backend === "openrouter" ? draft.model : "",
@@ -3099,7 +3158,10 @@ async function agentEditor(agent) {
   const actions = el("div", "group");
   const save = el("button", "btn primary", creating ? "Create agent" : "Save");
   save.addEventListener("click", async () => {
-    const [backend, model] = (select.value || ":").split(":");
+    const choice = select.value || ":";
+    const separator = choice.indexOf(":");
+    const backend = choice.slice(0, separator);
+    const model = choice.slice(separator + 1);
     const payload = {
       name: nameInput.value.trim(),
       emoji: encodeBlob(draft.blob),
@@ -3107,7 +3169,7 @@ async function agentEditor(agent) {
       subtitle: subtitleInput.value.trim(),
       system_prompt: promptInput.value,
       backend: backend || "",
-      model: backend === "openrouter" ? orInput.value.trim() : (model || ""),
+      model: backend === "openrouter" ? (model || orInput.value.trim()) : (model || ""),
       reasoning: reasoning.value,
       auto_approve: autoRow.value(),
       notify: notifyRow.value(),

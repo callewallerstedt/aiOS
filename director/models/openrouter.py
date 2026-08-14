@@ -8,7 +8,9 @@ chat-completions messages.
 """
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from typing import Any, Awaitable, Callable
 
 import aiohttp
@@ -19,6 +21,18 @@ from . import ModelError
 API_BASE = "https://openrouter.ai/api/v1"
 HTTP_REFERER = "https://github.com/callewallerstedt/aios"
 APP_TITLE = "aiOS Director"
+FEATURED_MODELS = (
+    {
+        "id": "openai/gpt-5.6-luna",
+        "label": "GPT-5.6 Luna",
+        "reasoning": ["none", "low", "medium"],
+        "default_reasoning": "low",
+    },
+)
+_BALANCE_CACHE: dict[str, Any] | None = None
+_BALANCE_CACHE_KEY = ""
+_BALANCE_CACHE_AT = 0.0
+_BALANCE_CACHE_TTL = 45.0
 
 
 def status(*, settings: dict[str, Any] | None = None) -> tuple[bool, str]:
@@ -35,6 +49,54 @@ def _headers(api_key: str) -> dict[str, str]:
         "HTTP-Referer": HTTP_REFERER,
         "X-Title": APP_TITLE,
     }
+
+
+def _balance_from_payload(payload: Any) -> dict[str, Any]:
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, dict):
+        raise ValueError("OpenRouter returned no credit data.")
+    purchased = float(data["total_credits"])
+    used = float(data["total_usage"])
+    return {
+        "ok": True,
+        "currency": "USD",
+        "balance": purchased - used,
+        "total_credits": purchased,
+        "total_usage": used,
+    }
+
+
+async def credit_balance(*, refresh: bool = False,
+                         settings: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Return the same remaining-credit figures shown by aiOS CODE."""
+    global _BALANCE_CACHE, _BALANCE_CACHE_KEY, _BALANCE_CACHE_AT
+    key = config.openrouter_key(settings)
+    if not key:
+        return {"ok": False, "error": "Add your OpenRouter API key in Director settings."}
+    now = time.time()
+    if (not refresh and _BALANCE_CACHE and _BALANCE_CACHE_KEY == key
+            and now - _BALANCE_CACHE_AT < _BALANCE_CACHE_TTL):
+        return dict(_BALANCE_CACHE)
+
+    timeout = aiohttp.ClientTimeout(total=12)
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(f"{API_BASE}/credits", headers=_headers(key)) as resp:
+                payload = await resp.json(content_type=None)
+                if resp.status != 200:
+                    detail = payload.get("error") if isinstance(payload, dict) else payload
+                    if isinstance(detail, dict):
+                        detail = detail.get("message") or detail
+                    return {"ok": False, "error": f"OpenRouter HTTP {resp.status}: {detail}"}
+        result = _balance_from_payload(payload)
+    except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError,
+            KeyError, TypeError, ValueError) as exc:
+        return {"ok": False, "error": str(exc)}
+
+    _BALANCE_CACHE = result
+    _BALANCE_CACHE_KEY = key
+    _BALANCE_CACHE_AT = now
+    return dict(result)
 
 
 def _effort(reasoning: str) -> dict[str, str]:

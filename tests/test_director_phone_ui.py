@@ -155,6 +155,15 @@ def test_homepage_settings_has_universal_instructions():
     assert "Save instructions" in body
 
 
+def test_settings_shows_openrouter_balance_and_luna_choice():
+    body = _block(JS, "async function openSettings()", "// operator")
+    assert 'api("/api/openrouter/balance")' in body
+    assert 'api("/api/openrouter/balance?refresh=1")' in body
+    assert '"OpenRouter balance"' in body
+    assert '`${model.label} (OpenRouter)`' in body
+    assert "model || orInput.value.trim()" in body
+
+
 def test_group_chat_has_a_chooser_editor_and_working_chips():
     assert "function newChatChooser()" in JS
     assert "function groupEditor(group)" in JS

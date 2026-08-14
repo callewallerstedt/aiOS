@@ -612,6 +612,8 @@ async def patch_settings(request: web.Request) -> web.Response:
 
 @ROUTES.get("/api/models")
 async def list_models(request: web.Request) -> web.Response:
+    from .models import openrouter
+
     settings = config.load_settings()
     out = []
     for backend in models.BACKENDS:
@@ -628,7 +630,17 @@ async def list_models(request: web.Request) -> web.Response:
             {"id": "gpt-5.6-sol", "label": "GPT-5.6 Sol",
              "reasoning": ["low", "medium", "high", "xhigh"], "default_reasoning": "medium"},
         ],
+        "openrouter_models": list(openrouter.FEATURED_MODELS),
     })
+
+
+@ROUTES.get("/api/openrouter/balance")
+async def openrouter_balance(request: web.Request) -> web.Response:
+    from .models import openrouter
+
+    refresh = request.query.get("refresh", "").lower() in {"1", "true", "yes"}
+    return json_response(await openrouter.credit_balance(
+        refresh=refresh, settings=config.load_settings()))
 
 
 # ---------------- voice ----------------
