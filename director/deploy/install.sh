@@ -20,7 +20,7 @@ say() { printf '\n\033[1m== %s\033[0m\n' "$1"; }
 
 say "system packages"
 NEEDED=()
-for pkg in xvfb x11vnc scrot xdotool xclip wmctrl openbox novnc python3-venv fonts-liberation iputils-ping; do
+for pkg in xvfb x11vnc scrot xdotool xclip wmctrl openbox novnc python3-venv python3-pyatspi fonts-liberation iputils-ping; do
   dpkg -s "$pkg" >/dev/null 2>&1 || NEEDED+=("$pkg")
 done
 if [ ${#NEEDED[@]} -gt 0 ]; then

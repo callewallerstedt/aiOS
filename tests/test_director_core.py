@@ -476,7 +476,7 @@ def test_action_coordinates_scale_back_to_real_pixels():
     assert scaled[2]["points"] == [[2, 4], [6, 8]]
 
 
-def test_x11_click_targets_the_window_under_the_pointer(monkeypatch):
+def test_x11_double_click_targets_the_window_under_the_pointer(monkeypatch):
     import asyncio
 
     from director.operator import x11
@@ -496,6 +496,58 @@ def test_x11_click_targets_the_window_under_the_pointer(monkeypatch):
     assert calls[1] == ("getmouselocation", "--shell")
     assert calls[2] == (
         "click", "--window", "46137348", "--repeat", "2", "--delay", "80", "1")
+
+
+def test_x11_click_uses_accessible_action_for_native_control(monkeypatch):
+    import asyncio
+
+    from director.operator import x11
+
+    calls = []
+
+    async def fake_xdotool(*args, settings=None):
+        calls.append(args)
+        if args[:2] == ("getmouselocation", "--shell"):
+            return 0, "WINDOW=42"
+        if args[0] == "getwindowname":
+            return 0, "Confirm action"
+        return 0, ""
+
+    async def fake_accessible(x, y, title="", settings=None):
+        assert (x, y, title) == (700, 440, "Confirm action")
+        return {"handled": True, "target": "OK", "action": "click"}
+
+    monkeypatch.setattr(x11, "xdotool", fake_xdotool)
+    monkeypatch.setattr(x11, "accessible_click", fake_accessible)
+    asyncio.run(x11.click(700, 440))
+
+    assert not any(call[0] == "click" for call in calls)
+
+
+def test_x11_click_falls_back_when_native_control_is_not_accessible(monkeypatch):
+    import asyncio
+
+    from director.operator import x11
+
+    calls = []
+
+    async def fake_xdotool(*args, settings=None):
+        calls.append(args)
+        if args[:2] == ("getmouselocation", "--shell"):
+            return 0, "WINDOW=42"
+        if args[0] == "getwindowname":
+            return 0, "Canvas"
+        return 0, ""
+
+    async def fake_accessible(*args, **kwargs):
+        return {"handled": False}
+
+    monkeypatch.setattr(x11, "xdotool", fake_xdotool)
+    monkeypatch.setattr(x11, "accessible_click", fake_accessible)
+    asyncio.run(x11.click(10, 20))
+
+    assert calls[-1] == (
+        "click", "--window", "42", "--repeat", "1", "--delay", "80", "1")
 
 
 def test_x11_click_surfaces_delivery_failure(monkeypatch):

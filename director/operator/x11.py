@@ -9,8 +9,11 @@ from __future__ import annotations
 import asyncio
 import base64
 import io
+import json
 import os
+import pathlib
 import shutil
+import sys
 import time
 from typing import Any
 
@@ -45,10 +48,11 @@ def keysym(name: str) -> str:
 
 
 async def run(argv: list[str], settings: dict[str, Any] | None = None,
-              timeout: float = 20.0) -> tuple[int, str]:
+              timeout: float = 20.0,
+              env: dict[str, str] | None = None) -> tuple[int, str]:
     try:
         proc = await asyncio.create_subprocess_exec(
-            *argv, env=display_mod.display_env(settings),
+            *argv, env=env if env is not None else display_mod.display_env(settings),
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
     except (FileNotFoundError, NotImplementedError, OSError) as exc:
         return 127, f"{argv[0]} unavailable: {exc}"
@@ -182,6 +186,30 @@ async def pointer_window(settings: dict[str, Any] | None = None) -> str:
     return ""
 
 
+async def window_name(window: str, settings: dict[str, Any] | None = None) -> str:
+    if not window:
+        return ""
+    code, out = await xdotool("getwindowname", window, settings=settings)
+    return out.strip() if code == 0 else ""
+
+
+async def accessible_click(x: int, y: int, title: str = "",
+                           settings: dict[str, Any] | None = None) -> dict:
+    """Use GNOME's native control action for GTK and other accessible windows."""
+    helper = pathlib.Path(__file__).with_name("atspi_click.py")
+    python = "/usr/bin/python3" if pathlib.Path("/usr/bin/python3").is_file() else sys.executable
+    env = display_mod.display_env(settings)
+    env.setdefault("DBUS_SESSION_BUS_ADDRESS", f"unix:path=/run/user/{os.getuid()}/bus")
+    code, out = await run(
+        [python, str(helper), str(int(x)), str(int(y)), str(title or "")],
+        settings, timeout=4.0, env=env)
+    try:
+        result = json.loads(out.splitlines()[-1]) if out else {}
+    except (json.JSONDecodeError, IndexError):
+        result = {"handled": False, "error": out or f"helper exit {code}"}
+    return result if isinstance(result, dict) else {"handled": False, "error": "bad helper result"}
+
+
 async def _checked_xdotool(*args: str, settings: dict[str, Any] | None = None) -> None:
     code, out = await xdotool(*args, settings=settings)
     if code != 0:
@@ -194,6 +222,14 @@ async def click(x: int | None, y: int | None, button: str = "left", clicks: int 
         await move(x, y, settings)
     button_code = str(BUTTONS.get(str(button or "left").lower(), 1))
     window = await pointer_window(settings)
+    if (x is not None and y is not None and button_code == "1"
+            and int(clicks or 1) == 1):
+        title = await window_name(window, settings)
+        result = {"handled": False}
+        if title:
+            result = await accessible_click(int(x), int(y), title, settings)
+        if result.get("handled"):
+            return
     args = ["click"]
     # On the real GNOME desktop, XTEST can move the pointer correctly while a
     # bare click never reaches Chrome. Addressing the window under the pointer
