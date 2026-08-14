@@ -406,6 +406,65 @@ def test_windows_power_off_is_scheduled_after_the_reply(monkeypatch):
     assert seen[0][0][:4] == ("shutdown.exe", "/s", "/t", "5")
 
 
+def test_phone_mouse_moves_and_releases_both_buttons():
+    import director_client
+
+    calls = []
+
+    class FakeUser32:
+        def mouse_event(self, *args):
+            calls.append(args)
+
+    mouse = director_client.MouseController(FakeUser32())
+    assert mouse.available() is True
+    mouse.move(17, -9)
+    mouse.button("left", True)
+    mouse.button("left", True)  # one held button must not double-press
+    mouse.button("left", False)
+    mouse.button("right", True)
+    mouse.release_all()
+
+    assert calls[0][:3] == (mouse.MOVE, 17, -9)
+    assert [call[0] for call in calls].count(mouse.LEFT_DOWN) == 1
+    assert calls[-2][0] == mouse.LEFT_UP
+    assert calls[-1][0] == mouse.RIGHT_UP
+    assert mouse.pressed == set()
+
+
+def test_phone_mouse_client_handlers_share_the_controller():
+    import asyncio
+
+    import director_client
+
+    actions = []
+
+    class FakeMouse:
+        def available(self):
+            return True
+        def release_all(self):
+            actions.append(("release",))
+        def move(self, dx, dy):
+            actions.append(("move", dx, dy))
+        def button(self, button, pressed):
+            actions.append(("button", button, pressed))
+
+    client = director_client.DirectorClient({
+        "url": "https://director.example", "token": "x", "name": "calle-windows"})
+    client.mouse = FakeMouse()
+
+    async def run():
+        assert (await client.do_mouse_start({}))["ok"] is True
+        await client.do_mouse_move({"dx": 4, "dy": -3})
+        await client.do_mouse_button({"button": "right", "pressed": True})
+        await client.do_mouse_stop({})
+
+    asyncio.run(run())
+    assert actions == [
+        ("release",), ("move", 4, -3), ("button", "right", True), ("release",),
+    ]
+    assert director_client.CAPS["mouse"] is True
+
+
 def test_director_bridge_heartbeat_touches_its_watchdog_file(tmp_path, monkeypatch):
     import director_client
 

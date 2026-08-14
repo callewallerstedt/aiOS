@@ -50,6 +50,7 @@ const state = {
   pinnedAgentId: "agt_director",
   homeRecording: false,
   homePressed: false,
+  phoneMouse: null,
 };
 
 /* ---------------- storage ---------------- */
@@ -1624,6 +1625,10 @@ function handleEvent(event) {
       markMachine(payload, false);
       break;
 
+    case "mouse.status":
+      updatePhoneMouseStatus(payload);
+      break;
+
     default:
       break;
   }
@@ -1828,6 +1833,7 @@ function markMachine(payload, online) {
   }
   if (windows?.name) state.wake.name = windows.name;
   paintWakeButton();
+  refreshPhoneMouseMachines();
 }
 
 async function refreshPowerStatus() {
@@ -2869,6 +2875,277 @@ function developerGallery() {
   document.body.append(gallery);
 }
 
+function phoneMouseMachines() {
+  return (state.machines || []).filter((machine) => machine.online);
+}
+
+function setPhoneMouseStatus(text, tone = "") {
+  const control = state.phoneMouse;
+  if (!control?.status) return;
+  control.status.textContent = text;
+  control.status.dataset.tone = tone;
+}
+
+function refreshPhoneMouseMachines() {
+  const control = state.phoneMouse;
+  if (!control?.select) return;
+  const previous = control.select.value || control.machineId;
+  const machines = phoneMouseMachines();
+  control.select.replaceChildren();
+  for (const machine of machines) {
+    const option = document.createElement("option");
+    option.value = machine.id;
+    option.textContent = machine.name || "Computer";
+    control.select.append(option);
+  }
+  const preferred = machines.find((machine) => machine.id === previous)
+    || machines.find((machine) => /windows/i.test(`${machine.platform || ""} ${machine.name || ""}`))
+    || machines[0];
+  if (preferred) control.select.value = preferred.id;
+  control.start.disabled = !preferred || control.starting;
+  if (!preferred) setPhoneMouseStatus("No computers are online.", "error");
+  else if (!control.active && !control.starting) setPhoneMouseStatus("Ready to connect.");
+  if (control.machineId && !machines.some((machine) => machine.id === control.machineId)) {
+    stopPhoneMouse(false);
+    setPhoneMouseStatus("Computer went offline.", "error");
+  }
+}
+
+function sendPhoneMouse(action, payload = {}, machineId = "") {
+  const control = state.phoneMouse;
+  const target = machineId || control?.machineId || control?.select?.value;
+  if (!target) throw new Error("Choose an online computer.");
+  if (!state.socket || state.socket.readyState !== WebSocket.OPEN) {
+    throw new Error("Director is offline.");
+  }
+  state.socket.send(JSON.stringify({
+    type: "mouse", machine_id: target, action, payload,
+  }));
+}
+
+function orientedAcceleration(x, y) {
+  const angle = Number(screen.orientation?.angle ?? window.orientation ?? 0);
+  if (angle === 90 || angle === -270) return { x: -y, y: x };
+  if (angle === 270 || angle === -90) return { x: y, y: -x };
+  if (Math.abs(angle) === 180) return { x: -x, y: -y };
+  return { x, y };
+}
+
+function mouseVelocity(value, sensitivity) {
+  const deadzone = 0.24;
+  const magnitude = Math.abs(value);
+  if (magnitude <= deadzone) return 0;
+  return Math.sign(value) * Math.min(90,
+    Math.pow(magnitude - deadzone, 1.42) * 6.2 * sensitivity);
+}
+
+function calibratePhoneMouse() {
+  const control = state.phoneMouse;
+  if (!control?.active) return;
+  control.zero = null;
+  control.samples = [];
+  control.dot.style.transform = "translate3d(0, 0, 0)";
+  setPhoneMouseStatus("Hold the phone still to calibrateâ€¦", "working");
+}
+
+function handlePhoneMotion(event) {
+  const control = state.phoneMouse;
+  const acceleration = event.accelerationIncludingGravity;
+  if (!control?.active || !acceleration
+      || !Number.isFinite(acceleration.x) || !Number.isFinite(acceleration.y)) return;
+  const point = orientedAcceleration(acceleration.x, acceleration.y);
+  if (!control.zero) {
+    control.samples.push(point);
+    if (control.samples.length < 12) return;
+    control.zero = {
+      x: control.samples.reduce((sum, sample) => sum + sample.x, 0) / control.samples.length,
+      y: control.samples.reduce((sum, sample) => sum + sample.y, 0) / control.samples.length,
+    };
+    control.samples = [];
+    setPhoneMouseStatus("Connected Â· tilt to move", "ready");
+    return;
+  }
+  const x = point.x - control.zero.x;
+  const y = point.y - control.zero.y;
+  const visualX = Math.max(-42, Math.min(42, x * 12));
+  const visualY = Math.max(-42, Math.min(42, -y * 12));
+  control.dot.style.transform = `translate3d(${visualX}px, ${visualY}px, 0)`;
+  const now = performance.now();
+  if (now - control.lastMove < 32) return;
+  control.lastMove = now;
+  const sensitivity = Number(control.sensitivity.value || 1);
+  const dx = Math.round(mouseVelocity(x, sensitivity));
+  const dy = Math.round(mouseVelocity(-y, sensitivity));
+  if (!dx && !dy) return;
+  try {
+    sendPhoneMouse("move", { dx, dy });
+  } catch (error) {
+    stopPhoneMouse(false);
+    setPhoneMouseStatus(error.message || String(error), "error");
+  }
+}
+
+async function requestMotionPermission() {
+  if (typeof DeviceMotionEvent === "undefined") {
+    throw new Error("Motion sensors are not available on this device.");
+  }
+  if (typeof DeviceMotionEvent.requestPermission === "function") {
+    const result = await DeviceMotionEvent.requestPermission();
+    if (result !== "granted") throw new Error("Motion access was not allowed.");
+  }
+}
+
+async function startPhoneMouse() {
+  const control = state.phoneMouse;
+  if (!control || control.starting || control.active) return;
+  const machineId = control.select.value;
+  if (!machineId) return setPhoneMouseStatus("No computers are online.", "error");
+  control.starting = true;
+  control.start.disabled = true;
+  setPhoneMouseStatus("Requesting motion accessâ€¦", "working");
+  try {
+    await requestMotionPermission();
+    control.machineId = machineId;
+    sendPhoneMouse("start", {}, machineId);
+    setPhoneMouseStatus("Connecting to the computerâ€¦", "working");
+  } catch (error) {
+    control.starting = false;
+    control.start.disabled = false;
+    setPhoneMouseStatus(error.message || String(error), "error");
+  }
+}
+
+async function activatePhoneMouse() {
+  const control = state.phoneMouse;
+  if (!control || control.active) return;
+  control.starting = false;
+  control.active = true;
+  control.start.textContent = "Mouse active";
+  control.start.disabled = true;
+  control.select.disabled = true;
+  control.calibrate.disabled = false;
+  window.addEventListener("devicemotion", handlePhoneMotion, { passive: true });
+  calibratePhoneMouse();
+  try {
+    control.wakeLock = await navigator.wakeLock?.request("screen");
+  } catch { /* motion still works without a wake lock */ }
+}
+
+function stopPhoneMouse(close = false) {
+  const control = state.phoneMouse;
+  if (!control) return;
+  if (control.machineId && (control.active || control.starting)) {
+    try { sendPhoneMouse("stop", {}, control.machineId); } catch {}
+  }
+  window.removeEventListener("devicemotion", handlePhoneMotion);
+  control.wakeLock?.release().catch(() => {});
+  control.wakeLock = null;
+  control.active = false;
+  control.starting = false;
+  control.zero = null;
+  control.samples = [];
+  control.machineId = "";
+  if (close) {
+    control.page.remove();
+    state.phoneMouse = null;
+    return;
+  }
+  control.start.textContent = "Enable phone mouse";
+  control.select.disabled = false;
+  control.calibrate.disabled = true;
+  refreshPhoneMouseMachines();
+}
+
+function updatePhoneMouseStatus(payload) {
+  const control = state.phoneMouse;
+  if (!control) return;
+  if (payload?.machine_id && control.machineId
+      && payload.machine_id !== control.machineId) return;
+  if (payload?.status === "ready") {
+    activatePhoneMouse();
+  } else if (payload?.status === "stopped") {
+    if (control.active || control.starting) stopPhoneMouse(false);
+  } else if (payload?.status === "error") {
+    const message = payload.error || "Phone mouse could not connect.";
+    control.active = false;
+    control.starting = false;
+    stopPhoneMouse(false);
+    setPhoneMouseStatus(message, "error");
+  }
+}
+
+function bindPhoneMouseButton(button, name) {
+  const release = () => {
+    button.classList.remove("pressed");
+    if (state.phoneMouse?.active) {
+      try { sendPhoneMouse("button", { button: name, pressed: false }); } catch {}
+    }
+  };
+  button.addEventListener("pointerdown", (event) => {
+    if (!state.phoneMouse?.active) return;
+    event.preventDefault();
+    button.setPointerCapture?.(event.pointerId);
+    button.classList.add("pressed");
+    try { sendPhoneMouse("button", { button: name, pressed: true }); } catch {}
+  });
+  button.addEventListener("pointerup", release);
+  button.addEventListener("pointercancel", release);
+  button.addEventListener("lostpointercapture", release);
+  button.addEventListener("contextmenu", (event) => event.preventDefault());
+}
+
+function openPhoneMouse() {
+  if (state.phoneMouse) stopPhoneMouse(true);
+  document.querySelector(".phone-mouse-page")?.remove();
+  const page = el("div", "phone-mouse-page");
+  page.innerHTML = `
+    <header class="phone-mouse-head">
+      <button class="icon-btn phone-mouse-close" type="button" aria-label="Back">${svg('<path d="M15 18l-6-6 6-6"/>')}</button>
+      <div><h1>Phone mouse</h1><p>Accelerometer remote</p></div>
+      <span class="conn-dot" data-conn="${state.socket?.readyState === WebSocket.OPEN ? "on" : "off"}" aria-label="Director connection"></span>
+    </header>
+    <main class="phone-mouse-body">
+      <label class="phone-mouse-machine"><span>Computer</span><select></select></label>
+      <div class="phone-mouse-status" role="status" aria-live="polite">Ready to connect.</div>
+      <div class="phone-mouse-field" aria-hidden="true">
+        <div class="phone-mouse-rings"></div><div class="phone-mouse-dot"></div>
+        <span>Tilt to steer</span>
+      </div>
+      <label class="phone-mouse-sensitivity"><span>Sensitivity</span><input type="range" min="0.55" max="2.2" step="0.05" value="1"></label>
+      <div class="phone-mouse-actions">
+        <button class="btn phone-mouse-start primary" type="button">Enable phone mouse</button>
+        <button class="btn phone-mouse-calibrate" type="button" disabled>Recalibrate</button>
+      </div>
+    </main>
+    <footer class="phone-mouse-buttons">
+      <button type="button" data-button="left"><span>Left</span><small>hold to drag</small></button>
+      <button type="button" data-button="right"><span>Right</span><small>click</small></button>
+    </footer>`;
+  const control = {
+    page,
+    select: page.querySelector("select"),
+    status: page.querySelector(".phone-mouse-status"),
+    dot: page.querySelector(".phone-mouse-dot"),
+    sensitivity: page.querySelector("input[type=range]"),
+    start: page.querySelector(".phone-mouse-start"),
+    calibrate: page.querySelector(".phone-mouse-calibrate"),
+    active: false, starting: false, machineId: "", zero: null,
+    samples: [], lastMove: 0, wakeLock: null,
+  };
+  state.phoneMouse = control;
+  control.start.addEventListener("click", startPhoneMouse);
+  control.calibrate.addEventListener("click", calibratePhoneMouse);
+  control.select.addEventListener("change", () => {
+    if (control.active || control.starting) stopPhoneMouse(false);
+  });
+  page.querySelector(".phone-mouse-close").addEventListener("click", () => stopPhoneMouse(true));
+  page.querySelectorAll("[data-button]").forEach((button) => {
+    bindPhoneMouseButton(button, button.dataset.button);
+  });
+  document.body.append(page);
+  refreshPhoneMouseMachines();
+}
+
 function openDeveloperMenu() {
   const { body, dismiss } = openSheet("Developer");
   const group = el("div", "group");
@@ -2876,6 +3153,9 @@ function openDeveloperMenu() {
   const components = el("button", "btn primary", "Open component gallery");
   components.addEventListener("click", () => { dismiss(); developerGallery(); });
   group.append(components);
+  const phoneMouse = el("button", "btn", "Open phone mouse");
+  phoneMouse.addEventListener("click", () => { dismiss(); openPhoneMouse(); });
+  group.append(phoneMouse);
   const diagnostics = el("div", "line");
   diagnostics.append(el("span", null, "Schedule timezone"));
   diagnostics.append(el("span", "v", "Europe/Stockholm"));
@@ -4043,6 +4323,9 @@ function wire() {
 
   document.addEventListener("visibilitychange", () => {
     const visible = document.visibilityState === "visible";
+    if (!visible && (state.phoneMouse?.active || state.phoneMouse?.starting)) {
+      stopPhoneMouse(false);
+    }
     if (visible && state.token) {
       if (!state.socket || state.socket.readyState !== WebSocket.OPEN) connect();
       loadAgents().catch(() => {});
@@ -4056,6 +4339,7 @@ function wire() {
   });
 
   window.addEventListener("pagehide", () => {
+    if (state.phoneMouse?.active || state.phoneMouse?.starting) stopPhoneMouse(false);
     if (state.threadId) markWatching(state.threadId, false);
   });
 

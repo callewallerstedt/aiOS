@@ -301,6 +301,22 @@ def test_homepage_voice_and_hidden_component_gallery_are_wired():
     assert "developerGallery" in JS
 
 
+def test_hidden_developer_menu_opens_the_accelerometer_phone_mouse():
+    menu = _block(JS, "function openDeveloperMenu()", "function installDirectorDoubleTap()")
+    assert '"Open phone mouse"' in menu
+    assert "openPhoneMouse()" in menu
+    assert "requestMotionPermission" in JS
+    assert "DeviceMotionEvent.requestPermission" in JS
+    assert 'window.addEventListener("devicemotion", handlePhoneMotion' in JS
+    assert 'type: "mouse", machine_id: target, action, payload' in JS
+    assert 'sendPhoneMouse("button", { button: name, pressed: true })' in JS
+    assert 'sendPhoneMouse("button", { button: name, pressed: false })' in JS
+    assert 'sendPhoneMouse("stop"' in JS
+    assert "phoneMouseMachines" in JS
+    assert ".phone-mouse-page" in CSS
+    assert ".phone-mouse-buttons" in CSS
+
+
 def test_churning_pixels_survive_the_late_code_theme_override():
     assert "body .loading-pixels span { background: var(--accent); }" in CSS
     reduced = _block(CSS, "@media (prefers-reduced-motion: reduce)", "/* ---------------- CODE")
@@ -311,7 +327,7 @@ def test_push_uses_agent_heading_and_is_silent_while_app_is_visible():
     assert 'payload.agent || payload.title || "Director"' in SW
     assert 'client.visibilityState === "visible"' in SW
     assert "showNotification(title" in SW
-    assert 'const VERSION = "director-v35"' in SW
+    assert 'const VERSION = "director-v36"' in SW
 
 
 def test_stop_button_clears_stale_working_state_after_server_acknowledges():
@@ -359,7 +375,7 @@ def test_takeover_toolbar_can_request_the_software_keyboard():
     assert "director.keyboard-input" in shell
     assert "director.keyboard-key" in shell
     assert ".takeover-keyboard-input" in CSS
-    assert 'const VERSION = "director-v35"' in SW
+    assert 'const VERSION = "director-v36"' in SW
 
 
 def test_supplied_eye_sheet_is_selectable_and_rotates_on_active_blobs():

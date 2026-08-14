@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import mimetypes
 import os
 import pathlib
@@ -530,6 +531,42 @@ async def get_events(request: web.Request) -> web.Response:
                           "cursor": events[-1]["id"] if events else since})
 
 
+MOUSE_ACTIONS = {"start", "move", "button", "stop"}
+
+
+def validate_mouse_message(message: dict) -> tuple[str, str, dict]:
+    """Validate the small unpersisted phone-mouse protocol."""
+    machine_id = str(message.get("machine_id") or "").strip()
+    action = str(message.get("action") or "").strip().lower()
+    payload = message.get("payload")
+    if not machine_id or len(machine_id) > 100:
+        raise ValueError("choose a computer")
+    if action not in MOUSE_ACTIONS:
+        raise ValueError("unknown mouse action")
+    if not isinstance(payload, dict):
+        payload = {}
+    if action == "move":
+        values = []
+        for name in ("dx", "dy"):
+            value = payload.get(name, 0)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError("invalid mouse movement")
+            value = float(value)
+            if not math.isfinite(value) or abs(value) > 160:
+                raise ValueError("mouse movement is out of range")
+            values.append(int(round(value)))
+        payload = {"dx": values[0], "dy": values[1]}
+    elif action == "button":
+        button = str(payload.get("button") or "").lower()
+        pressed = payload.get("pressed")
+        if button not in {"left", "right"} or not isinstance(pressed, bool):
+            raise ValueError("invalid mouse button")
+        payload = {"button": button, "pressed": pressed}
+    else:
+        payload = {}
+    return machine_id, action, payload
+
+
 @ROUTES.get("/ws")
 async def websocket(request: web.Request) -> web.WebSocketResponse:
     token = auth.bearer(request.headers) or request.query.get("token", "")
@@ -553,6 +590,15 @@ async def websocket(request: web.Request) -> web.WebSocketResponse:
             await ws.send_json(event)
 
     pump_task = asyncio.create_task(pump())
+    mouse_targets: set[str] = set()
+    mouse_window = time.monotonic()
+    mouse_moves = 0
+
+    async def mouse_status(machine_id: str, status: str, error_text: str = "") -> None:
+        await ws.send_json({"kind": "mouse.status", "payload": {
+            "machine_id": machine_id, "status": status, "error": error_text,
+        }})
+
     try:
         async for message in ws:
             if message.type != aiohttp.WSMsgType.TEXT:
@@ -571,7 +617,43 @@ async def websocket(request: web.Request) -> web.WebSocketResponse:
                 runtime.decide_approval(str(payload.get("id") or ""),
                                         str(payload.get("status") or "declined"),
                                         str(payload.get("note") or ""))
+            elif kind == "mouse":
+                try:
+                    machine_id, action, mouse_payload = validate_mouse_message(payload)
+                except ValueError as exc:
+                    await mouse_status("", "error", str(exc))
+                    continue
+                if action == "start":
+                    result = await runtime.call_machine(
+                        machine_id, "mouse.start", {}, timeout=5.0)
+                    if result.get("ok"):
+                        mouse_targets.add(machine_id)
+                        await mouse_status(machine_id, "ready")
+                    else:
+                        await mouse_status(machine_id, "error", str(
+                            result.get("error") or "computer did not start the mouse"))
+                    continue
+                if machine_id not in mouse_targets:
+                    await mouse_status(machine_id, "error", "start the phone mouse first")
+                    continue
+                if action == "move":
+                    now = time.monotonic()
+                    if now - mouse_window >= 1.0:
+                        mouse_window, mouse_moves = now, 0
+                    mouse_moves += 1
+                    if mouse_moves > 90:
+                        continue
+                forwarded = await runtime.cast_machine(
+                    machine_id, f"mouse.{action}", mouse_payload)
+                if not forwarded:
+                    mouse_targets.discard(machine_id)
+                    await mouse_status(machine_id, "error", "computer went offline")
+                elif action == "stop":
+                    mouse_targets.discard(machine_id)
+                    await mouse_status(machine_id, "stopped")
     finally:
+        for machine_id in mouse_targets:
+            await runtime.cast_machine(machine_id, "mouse.stop", {})
         pump_task.cancel()
         runtime.unsubscribe(queue)
     return ws

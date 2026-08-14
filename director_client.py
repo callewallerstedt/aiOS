@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import ctypes
 import json
 import os
 import pathlib
@@ -55,7 +56,7 @@ RECONNECT_MIN = 2.0
 RECONNECT_MAX = 60.0
 SHELL_TIMEOUT = 180
 
-CAPS = {"code": True, "shell": True, "files": True, "power": True,
+CAPS = {"code": True, "shell": True, "files": True, "power": True, "mouse": True,
         "platform": "windows"}
 
 _SKIP_ADAPTER = re.compile(
@@ -192,6 +193,64 @@ DEFAULT_CODE_CONFIG_NAME = "Balanced Engineering"
 # Statuses code_jobs writes into job.json that mean the session is over.
 TERMINAL_OK = {"done", "completed", "finished", "ready"}
 TERMINAL_BAD = {"failed", "error", "stopped", "cancelled", "interrupted"}
+
+
+class MouseController:
+    """Small Windows relative-pointer driver used by the phone mouse."""
+
+    MOVE = 0x0001
+    LEFT_DOWN = 0x0002
+    LEFT_UP = 0x0004
+    RIGHT_DOWN = 0x0008
+    RIGHT_UP = 0x0010
+    BUTTON_FLAGS = {
+        "left": (LEFT_DOWN, LEFT_UP),
+        "right": (RIGHT_DOWN, RIGHT_UP),
+    }
+
+    def __init__(self, user32=None) -> None:
+        self.user32 = user32
+        if self.user32 is None and sys.platform == "win32":
+            self.user32 = ctypes.windll.user32
+        self.pressed: set[str] = set()
+
+    def available(self) -> bool:
+        return self.user32 is not None and hasattr(self.user32, "mouse_event")
+
+    def _event(self, flags: int, dx: int = 0, dy: int = 0) -> None:
+        if not self.available():
+            raise RuntimeError("mouse control is only available on Windows")
+        self.user32.mouse_event(flags, int(dx), int(dy), 0, 0)
+
+    def move(self, dx: int, dy: int) -> None:
+        dx = max(-160, min(160, int(dx)))
+        dy = max(-160, min(160, int(dy)))
+        if dx or dy:
+            self._event(self.MOVE, dx, dy)
+
+    def button(self, name: str, pressed: bool) -> None:
+        name = str(name or "").lower()
+        if name not in self.BUTTON_FLAGS:
+            raise ValueError("button must be left or right")
+        if pressed:
+            if name in self.pressed:
+                return
+            self._event(self.BUTTON_FLAGS[name][0])
+            self.pressed.add(name)
+        else:
+            if name not in self.pressed:
+                return
+            self._event(self.BUTTON_FLAGS[name][1])
+            self.pressed.discard(name)
+
+    def release_all(self) -> None:
+        if not self.available():
+            return
+        # Send both releases even after reconnecting: the old process may have
+        # received a down event whose in-memory pressed set was then lost.
+        self._event(self.LEFT_UP)
+        self._event(self.RIGHT_UP)
+        self.pressed.clear()
 
 
 class CodeBridge:
@@ -443,6 +502,7 @@ class DirectorClient:
         self.token = str(config["token"])
         self.name = str(config["name"])
         self.code = CodeBridge()
+        self.mouse = MouseController()
         self.session: aiohttp.ClientSession | None = None
         self.socket: aiohttp.ClientWebSocketResponse | None = None
 
@@ -496,6 +556,8 @@ class DirectorClient:
                             continue
                         if payload.get("type") == "call":
                             asyncio.create_task(self.handle_call(payload))
+                        elif payload.get("type") == "cast":
+                            asyncio.create_task(self.handle_cast(payload))
                 finally:
                     pulse.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
@@ -541,6 +603,17 @@ class DirectorClient:
             log(f"call {action} failed:\n{traceback.format_exc()}")
             await self.reply(call_id, {"ok": False, "error": f"{type(exc).__name__}: {exc}"})
 
+    async def handle_cast(self, message: dict) -> None:
+        """Run a best-effort stream command without sending a result packet."""
+        action = str(message.get("action") or "")
+        payload = dict(message.get("payload") or {})
+        try:
+            handler = getattr(self, f"do_{action.replace('.', '_')}", None)
+            if handler is not None:
+                await handler(payload)
+        except Exception:
+            log(f"cast {action} failed:\n{traceback.format_exc()}")
+
     async def do_ping(self, payload: dict) -> dict:
         return {"ok": True, "name": self.name, "platform": platform.platform()}
 
@@ -558,6 +631,25 @@ class DirectorClient:
             return {"ok": False, "error": raw.decode(
                 "utf-8", errors="replace").strip() or "shutdown.exe failed"}
         return {"ok": True, "status": "shutdown scheduled", "delay": 5}
+
+    async def do_mouse_start(self, payload: dict) -> dict:
+        if not self.mouse.available():
+            return {"ok": False, "error": "mouse control is not available on this computer"}
+        self.mouse.release_all()
+        return {"ok": True}
+
+    async def do_mouse_move(self, payload: dict) -> dict:
+        self.mouse.move(int(payload.get("dx") or 0), int(payload.get("dy") or 0))
+        return {"ok": True}
+
+    async def do_mouse_button(self, payload: dict) -> dict:
+        self.mouse.button(str(payload.get("button") or ""),
+                          bool(payload.get("pressed")))
+        return {"ok": True}
+
+    async def do_mouse_stop(self, payload: dict) -> dict:
+        self.mouse.release_all()
+        return {"ok": True}
 
     async def do_code_start(self, payload: dict) -> dict:
         ready, message = self.code.available()

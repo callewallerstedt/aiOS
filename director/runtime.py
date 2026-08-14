@@ -286,6 +286,24 @@ class Runtime:
         finally:
             self._pending_calls.pop(call_id, None)
 
+    async def cast_machine(self, machine_id: str, action: str, payload: dict) -> bool:
+        """Send a latency-sensitive command without waiting for a reply.
+
+        Pointer movement is a stream, not a series of RPCs.  Keeping those
+        packets out of ``_pending_calls`` avoids allocating a future and a
+        round trip for every accelerometer sample while retaining the same
+        authenticated machine link.
+        """
+        link = self._machines.get(machine_id)
+        if link is None:
+            return False
+        try:
+            await link.send({"type": "cast", "action": action,
+                             "payload": payload})
+        except Exception:
+            return False
+        return True
+
     def resolve_machine_call(self, call_id: str, result: dict) -> bool:
         future = self._pending_calls.get(call_id)
         if future is None or future.done():

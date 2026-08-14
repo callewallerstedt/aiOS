@@ -1560,6 +1560,56 @@ def test_stale_machine_socket_cannot_detach_a_reconnected_pc(director):
     assert hub.online_machines()[0]["online"] is False
 
 
+def test_phone_mouse_packets_are_bounded_and_canonical():
+    import pytest
+
+    from director.server import validate_mouse_message
+
+    assert validate_mouse_message({
+        "machine_id": "mch_1", "action": "move",
+        "payload": {"dx": 12.4, "dy": -8.6, "ignored": True},
+    }) == ("mch_1", "move", {"dx": 12, "dy": -9})
+    assert validate_mouse_message({
+        "machine_id": "mch_1", "action": "button",
+        "payload": {"button": "LEFT", "pressed": True},
+    }) == ("mch_1", "button", {"button": "left", "pressed": True})
+    with pytest.raises(ValueError):
+        validate_mouse_message({
+            "machine_id": "mch_1", "action": "move",
+            "payload": {"dx": 999, "dy": 0},
+        })
+    with pytest.raises(ValueError):
+        validate_mouse_message({
+            "machine_id": "mch_1", "action": "button",
+            "payload": {"button": "middle", "pressed": True},
+        })
+
+
+def test_phone_mouse_cast_uses_the_live_machine_without_an_rpc_future(director):
+    import asyncio
+
+    from director import runtime, store
+
+    machine = store.upsert_machine(
+        name="mouse-pc", platform="windows", token_hash="mouse-token", caps={})
+    sent = []
+
+    class Link:
+        async def send(self, payload):
+            sent.append(payload)
+
+    hub = runtime.Runtime()
+    hub.attach_machine(machine["id"], Link())
+    result = asyncio.run(hub.cast_machine(
+        machine["id"], "mouse.move", {"dx": 4, "dy": -2}))
+
+    assert result is True
+    assert sent == [{
+        "type": "cast", "action": "mouse.move", "payload": {"dx": 4, "dy": -2},
+    }]
+    assert hub._pending_calls == {}
+
+
 def test_wake_send_broadcasts_to_the_house_lan(director, monkeypatch):
     from director import config, wake
 
