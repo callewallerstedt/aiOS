@@ -11,10 +11,15 @@ from director.operator import loop, x11
 
 
 class FakeXdotool:
-    def __init__(self, *, pointer="200", active="100", activation_fails=False):
+    def __init__(self, *, pointer="200", active="100", activation_fails=False,
+                 activation_no_effect=False, focus_fails=True,
+                 active_api_fails=False):
         self.pointer = pointer
         self.active = active
         self.activation_fails = activation_fails
+        self.activation_no_effect = activation_no_effect
+        self.focus_fails = focus_fails
+        self.active_api_fails = active_api_fails
         self.calls = []
 
     async def __call__(self, *args, settings=None):
@@ -22,14 +27,22 @@ class FakeXdotool:
         if args[:2] == ("getmouselocation", "--shell"):
             return 0, f"X=10\nY=20\nWINDOW={self.pointer}"
         if args == ("getactivewindow",):
+            if self.active_api_fails:
+                return 1, "_NET_ACTIVE_WINDOW unavailable"
+            return 0, self.active
+        if args == ("getwindowfocus",):
             return 0, self.active
         if args[:2] == ("windowactivate", "--sync"):
             if self.activation_fails:
                 return 1, "activation denied"
-            self.active = args[2]
+            if not self.activation_no_effect:
+                self.active = args[2]
             return 0, ""
         if args[:2] == ("windowfocus", "--sync"):
-            return 1, "focus denied"
+            if self.focus_fails:
+                return 1, "focus denied"
+            self.active = args[2]
+            return 0, ""
         if args and args[0] == "getwindowname":
             return 0, "Browser"
         return 0, ""
@@ -69,6 +82,27 @@ def test_keyboard_action_keeps_an_already_focused_target(monkeypatch):
 
     assert not any(call and call[0] in {"windowactivate", "windowfocus"} for call in fake.calls)
     assert ("key", "--clearmodifiers", "ctrl+l") in fake.calls
+
+
+def test_server_input_focus_is_used_when_desktop_active_property_is_missing(monkeypatch):
+    fake = FakeXdotool(pointer="200", active="200", active_api_fails=True)
+    monkeypatch.setattr(x11, "xdotool", fake)
+
+    assert asyncio.run(x11.active_window({})) == "200"
+
+
+def test_focus_falls_back_when_window_activation_reports_success_without_effect(monkeypatch):
+    fake = FakeXdotool(
+        activation_no_effect=True, focus_fails=False, active_api_fails=True,
+    )
+    monkeypatch.setattr(x11, "xdotool", fake)
+
+    focused = asyncio.run(x11.focus_pointer_window({}))
+
+    assert focused == "200"
+    assert ("windowactivate", "--sync", "200") in fake.calls
+    assert ("windowfocus", "--sync", "200") in fake.calls
+    assert fake.active == "200"
 
 
 def test_screen_signature_ignores_tiny_change_but_detects_page_change():

@@ -212,6 +212,11 @@ async def pointer_window(settings: dict[str, Any] | None = None) -> str:
 async def active_window(settings: dict[str, Any] | None = None) -> str:
     """Return the window that will receive keyboard input."""
     code, out = await xdotool("getactivewindow", settings=settings)
+    if code == 0 and out.strip().isdigit():
+        return out.strip()
+    # GNOME can omit _NET_ACTIVE_WINDOW even though X input focus remains
+    # authoritative and settable. getwindowfocus reads that server-side state.
+    code, out = await xdotool("getwindowfocus", settings=settings)
     return out.strip() if code == 0 and out.strip().isdigit() else ""
 
 
@@ -220,17 +225,16 @@ async def focus_pointer_window(settings: dict[str, Any] | None = None) -> str:
     window = await pointer_window(settings)
     if not window or await active_window(settings) == window:
         return window
-    code, _ = await xdotool("windowactivate", "--sync", window, settings=settings)
-    if code != 0:
-        code, out = await xdotool("windowfocus", "--sync", window, settings=settings)
-        if code != 0:
-            raise RuntimeError(
-                f"could not focus pointer window {window}: {out or 'xdotool failed'}")
-    focused = await active_window(settings)
-    if focused != window:
-        raise RuntimeError(
-            f"pointer window {window} did not acquire keyboard focus (active {focused or 'unknown'})")
-    return window
+    errors = []
+    for method in ("windowactivate", "windowfocus"):
+        code, out = await xdotool(method, "--sync", window, settings=settings)
+        focused = await active_window(settings)
+        if code == 0 and focused == window:
+            return window
+        detail = out or f"active {focused or 'unknown'}"
+        errors.append(f"{method}: {detail}")
+    raise RuntimeError(
+        f"could not focus pointer window {window} ({'; '.join(errors)})")
 
 
 async def window_name(window: str, settings: dict[str, Any] | None = None) -> str:
