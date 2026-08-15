@@ -1,0 +1,667 @@
+/* beautiful-ui source port for the CODE conversation surface.
+   Geometry, timing, radii, shadows, and neutral tokens are copied from
+   https://beautiful-ui-five.vercel.app/. Only the live aiOS accent and
+   application data/state are substituted. */
+
+.code-detail {
+  --bui-canvas: #1c1d1f;
+  --bui-surface: #232427;
+  --bui-field: #2b2c2f;
+  --bui-inset: #1f2022;
+  --bui-hover: #2a2b2e;
+  --bui-hover-2: #313236;
+  --bui-line: #2e3033;
+  --bui-line-strong: #3a3c40;
+  --bui-ink: #f2f3f4;
+  --bui-ink-2: #a5a8ad;
+  --bui-ink-3: #6c6f75;
+  --bui-accent: var(--accent);
+  --bui-accent-ink: color-mix(in srgb, var(--accent) 72%, white);
+  --bui-green: #3dbb72;
+  --bui-green-tint: #3dbb7224;
+  --bui-red: #ee5c61;
+  --bui-red-tint: #ee5c6124;
+  --bui-orange: #f68f3c;
+  --bui-shadow-hairline: 0 0 0 1px var(--bui-line);
+  --bui-shadow-btn: 0 0 0 1px var(--bui-line-strong), 0 1px 2px #0000004d;
+  --bui-shadow-card: 0 0 0 1px var(--bui-line), 0 1px 2px #0003, 0 2px 6px #0003;
+
+  overflow: hidden;
+  border: 0;
+  border-radius: 14px;
+  background: var(--bui-canvas);
+  color: var(--bui-ink);
+  box-shadow: var(--bui-shadow-card);
+}
+
+/* The reference Chat has one quiet header and one conversation region. The
+   old telemetry/status stacks are still updated for APIs but are not part of
+   the conversation UI. */
+.code-detail > .code-session-state,
+.code-detail > .code-stats,
+.code-detail > .code-telemetry { display: none !important; }
+
+.code-detail-head {
+  flex: 0 0 auto;
+  min-height: 40px;
+  gap: 6px;
+  padding: 6px;
+  border-bottom: 1px solid var(--bui-line);
+  background: var(--bui-surface);
+}
+.code-detail-head > div:first-of-type {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: grid;
+  gap: 1px;
+  padding-left: 4px;
+}
+.code-detail-head .title,
+.code-detail-head .meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.code-detail-head .title { color: var(--bui-ink); font-size: 13px; font-weight: 600; }
+.code-detail-head .meta { color: var(--bui-ink-3); font-size: 11px; }
+.code-detail-head .context-ring { display: none !important; }
+.code-detail-head .actions { gap: 4px; }
+.code-detail-head .actions .btn,
+.code-detail-head .icon-btn {
+  min-height: 28px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--bui-ink-3);
+  box-shadow: none;
+  font-size: 11.5px;
+  transition: color 100ms ease, background 100ms ease;
+}
+.code-detail-head .actions .btn:hover,
+.code-detail-head .icon-btn:hover { color: var(--bui-ink-2); background: var(--bui-hover); }
+.code-detail-head .actions .btn.accent {
+  color: var(--bui-accent-ink);
+  background: color-mix(in srgb, var(--bui-accent) 14%, transparent);
+}
+
+.code-transcript-wrap { background: var(--bui-canvas); }
+.code-transcript {
+  gap: 10px;
+  padding: 16px clamp(14px, 2.5vw, 32px) 24px;
+  background: var(--bui-canvas);
+  color: var(--bui-ink);
+}
+/* A transcript is an unbounded vertical stream. Flex items default to
+   flex-shrink: 1, which made every earlier round compress to share the visible
+   viewport once enough rounds accumulated. Rows keep their measured height;
+   the transcript itself owns the overflow and scrollbar. */
+.code-transcript > * { flex-shrink: 0; }
+.code-transcript > .assistant,
+.code-transcript > .bubble-user,
+.code-transcript > .thinking,
+.code-transcript > .status-row,
+.code-transcript > .handoff,
+.code-transcript > .working-sentinel { width: 100%; max-width: 920px; margin-inline: auto; }
+.code-transcript > .pipeline-stage,
+.code-transcript > .tool-card.task-row { width: 100%; max-width: 920px; margin-inline: auto; }
+.code-transcript > .tool-run,
+.code-transcript > .turn-diffs,
+.code-transcript > .turn-usage { width: 100%; max-width: 920px; margin-inline: auto; }
+
+/* Chat user bubble — copied from ChatComposer. */
+.bubble-user {
+  align-self: center;
+  width: fit-content !important;
+  max-width: min(78%, 760px) !important;
+  margin-left: auto !important;
+  margin-right: max(0px, calc((100% - 920px) / 2)) !important;
+  padding: 6px 12px;
+  border: 0;
+  border-radius: 12px;
+  background: var(--bui-field);
+  color: var(--bui-ink);
+  font-size: 13px;
+  line-height: 1.4;
+  box-shadow: none;
+  animation: bui-fade-up 300ms cubic-bezier(.23, 1, .32, 1) both;
+}
+
+/* Streaming Text answer surface. */
+.assistant {
+  max-width: 920px;
+  color: var(--bui-ink);
+  font-size: 13px;
+  line-height: 1.625;
+  animation: bui-fade-up 400ms cubic-bezier(.23, 1, .32, 1) both;
+}
+.assistant p { margin: 0 0 8px; }
+.assistant p:last-child { margin-bottom: 0; }
+.assistant h1, .assistant h2, .assistant h3 { margin: 10px 0 5px; color: var(--bui-ink); font-size: 13px; font-weight: 600; }
+.assistant ul, .assistant ol { margin: 0 0 8px; padding-left: 18px; }
+.assistant code {
+  padding: 1px 4px;
+  border-radius: 5px;
+  background: var(--bui-inset);
+  color: var(--bui-ink-2);
+  font: 11.5px/1.55 var(--font-mono);
+  box-shadow: var(--bui-shadow-hairline);
+}
+.assistant pre {
+  margin: 8px 0;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: 10px;
+  background: var(--bui-inset);
+  box-shadow: var(--bui-shadow-hairline);
+}
+.assistant pre code { padding: 0; background: none; box-shadow: none; }
+.assistant.streaming > :last-child::after {
+  width: 2px;
+  height: 12px;
+  margin-left: 2px;
+  border-radius: 999px;
+  background: var(--bui-ink);
+  animation: bui-fade-in 150ms ease-out both;
+}
+
+/* Thinking source: exact header and grid disclosure grammar. */
+.thinking {
+  min-height: 0;
+  color: var(--bui-ink-3);
+}
+.thinking-head {
+  width: fit-content;
+  min-height: 28px;
+  height: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 -6px;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: inherit;
+  transition: background 100ms ease;
+}
+.thinking-head:hover { background: var(--bui-hover-2); }
+.thinking-star { width: 16px; height: 16px; color: var(--bui-ink-3); }
+.thinking.live .thinking-star { color: var(--bui-accent-ink); }
+.thinking-label { color: var(--bui-ink-2); font-size: 13px; font-weight: 500; white-space: nowrap; }
+.thinking.live .thinking-label {
+  background-image: linear-gradient(90deg, var(--bui-ink-3) 35%, var(--bui-accent-ink) 50%, var(--bui-ink-3) 65%);
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: bui-shimmer-text 1.4s linear infinite;
+  animation-delay: 0s;
+}
+.thinking-time { display: none; }
+.thinking-chevron { width: 14px; height: 14px; color: var(--bui-ink-3); transition: transform 300ms ease; }
+.thinking.expanded .thinking-chevron { transform: rotate(180deg); }
+.thinking-expand { transition: grid-template-rows 400ms cubic-bezier(.23, 1, .32, 1), opacity 400ms ease; }
+.thinking-inner {
+  position: relative;
+  display: block;
+  margin: 4px 0 0 5px;
+  padding: 4px 0 4px 16px;
+}
+.thinking-track { position: absolute; left: 3px; top: -8px; bottom: 2px; width: 1px; background: var(--bui-line); }
+.thinking-trace-row { min-height: 28px; gap: 8px; padding: 2px 6px; border-radius: 6px; }
+.thinking-mark { width: 12px; height: 12px; margin-top: 3px; border: 1.5px solid var(--bui-line-strong); border-top-color: var(--bui-ink-2); }
+.thinking:not(.live) .thinking-mark::after { color: var(--bui-ink-3); }
+.thinking-content { padding: 0; color: var(--bui-ink-2); font-size: 12.5px; line-height: 1.625; }
+.thinking-content code { background: var(--bui-inset); color: var(--bui-ink-2); box-shadow: var(--bui-shadow-hairline); }
+
+/* Tool Chips source. */
+.tool-run { padding: 0 0 4px; }
+.tool-run-head {
+  min-height: 28px;
+  gap: 6px;
+  margin: 0 -6px;
+  padding: 4px 6px;
+  border-radius: 7px;
+  color: var(--bui-ink-2);
+  font-size: 12.5px;
+}
+.tool-run-head:hover { color: var(--bui-ink-2); background: var(--bui-hover-2); }
+.tool-run.expanded .tool-run-head { color: var(--bui-accent-ink); }
+.tool-run.expanded .tool-run-chevron { color: var(--bui-accent-ink); }
+.tool-run-chevron { width: 12px; height: 12px; color: var(--bui-ink-3); }
+.tool-run-expand { transition: grid-template-rows 300ms cubic-bezier(.23, 1, .32, 1), opacity 300ms ease; }
+.tool-run-clip { margin: 0 -6px; padding: 0 6px 4px; }
+.tool-run.expanded .tool-run-clip { max-height: min(42vh, 420px); }
+.tool-run-rows { gap: 4px; margin-top: 6px; }
+.tool-card:not(.task-row) .tool-chip-row {
+  width: calc(100% + 6px);
+  min-height: 28px;
+  height: 28px;
+  margin: 0 -3px;
+  gap: 8px;
+  padding: 0 3px;
+  border-radius: 7px;
+}
+.tool-card:not(.task-row) .tool-chip-row:hover { background: var(--bui-hover-2); }
+.tool-card:not(.task-row) .glyph { width: 16px; height: 16px; color: var(--bui-ink-3); }
+.tool-card:not(.task-row) .name { color: var(--bui-ink); font-size: 12.5px; font-weight: 500; }
+.tool-card:not(.task-row) .detail,
+.tool-card:not(.task-row) .filename {
+  height: 22px;
+  padding: 0 6px;
+  border-radius: 7px;
+  background: var(--bui-hover-2);
+  color: #bfc1c5;
+  font: 11.5px/1 var(--font-mono);
+  box-shadow: var(--bui-shadow-hairline);
+}
+.tool-card:not(.task-row) .timing,
+.tool-card:not(.task-row) .agent-status { display: none; }
+.tool-card:not(.task-row) .card-chevron { color: var(--bui-ink-3); }
+.tool-card:not(.task-row) .expand-inner { margin: 2px 0 4px 8px; padding: 2px 0 2px 14px; border-left: 1px solid var(--bui-line); }
+.tool-card:not(.task-row) .output { color: var(--bui-ink-2); font: 11.5px/1.6 var(--font-mono); }
+.tool-run-diffs { gap: 6px; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--bui-line); }
+.tool-run-diff {
+  height: 28px;
+  gap: 6px;
+  padding: 0 8px;
+  border-radius: 7px;
+  background: var(--bui-surface);
+  color: var(--bui-ink);
+  box-shadow: var(--bui-shadow-btn);
+  font: 11.5px/1 var(--font-mono);
+}
+.tool-run-diff:hover { background: var(--bui-hover); }
+.tool-run-diff .add { color: var(--bui-green); }
+.tool-run-diff .del { color: var(--bui-red); }
+
+/* A completed turn repeats the accumulated file chips at transcript level, so
+   edits never disappear inside a collapsed tool group. */
+.turn-diffs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 0 2px;
+  border-top: 1px solid var(--bui-line);
+  animation: bui-fade-up 300ms cubic-bezier(.23, 1, .32, 1) both;
+}
+.turn-diffs-label {
+  margin-right: 2px;
+  color: var(--bui-ink-3);
+  font-size: 11.5px;
+  font-weight: 500;
+}
+.turn-diff {
+  max-width: 100%;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 7px;
+  background: var(--bui-surface);
+  color: var(--bui-ink);
+  box-shadow: var(--bui-shadow-btn);
+  font: 11.5px/1 var(--font-mono);
+  cursor: pointer;
+}
+.turn-diff:hover { background: var(--bui-hover); }
+.turn-diff-file { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.turn-diff .add { flex: 0 0 auto; color: var(--bui-green); }
+.turn-diff .del { flex: 0 0 auto; color: var(--bui-red); }
+.turn-usage {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding-top: 8px;
+  color: var(--bui-ink-3);
+  animation: bui-fade-up 300ms cubic-bezier(.23, 1, .32, 1) both;
+}
+.turn-usage-row { min-width: 0; display: flex; align-items: baseline; gap: 8px; }
+.turn-usage-role { flex: 0 0 auto; color: var(--bui-ink-2); font-size: 11.5px; font-weight: 600; }
+.turn-usage-detail {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 11px/1.45 var(--font-mono);
+}
+
+/* Task Rows source. */
+.task-row {
+  overflow: hidden;
+  border: 0;
+  border-radius: 22px;
+  background: var(--bui-surface);
+  box-shadow: var(--bui-shadow-card);
+  transition: border-radius 300ms ease;
+  animation: bui-fade-up 450ms cubic-bezier(.23, 1, .32, 1) both;
+}
+.pipeline-stage[hidden] { display: none !important; }
+.task-row.expanded { border-radius: 14px; }
+.tool-card.task-row:not(.expanded) {
+  height: 44px;
+  min-height: 44px;
+  box-shadow: var(--bui-shadow-hairline);
+}
+.pipeline-stage .stage-head.task-row-button,
+.tool-card.task-row .line {
+  width: 100%;
+  min-height: 44px;
+  height: 44px;
+  gap: 10px;
+  padding: 0 10px;
+  border-radius: 0;
+  background: transparent;
+  transition: background 100ms ease;
+}
+.pipeline-stage .stage-head.task-row-button:hover,
+.tool-card.task-row .line:hover { background: var(--bui-inset); }
+.task-row .task-label,
+.tool-card.task-row .name { color: var(--bui-ink); font-size: 13px; font-weight: 500; }
+.task-row .task-amount,
+.tool-card.task-row .detail { color: var(--bui-ink-2); font-size: 12.5px; }
+.task-row .task-pill,
+.tool-card.task-row .agent-status {
+  height: 22px;
+  min-height: 22px;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: var(--bui-green-tint);
+  color: var(--bui-green);
+  font-size: 11.5px;
+  font-weight: 500;
+}
+.task-row.started .task-pill,
+.task-row.update .task-pill,
+.tool-card.task-row.running .agent-status { display: none; }
+.task-row.failed .task-pill,
+.tool-card.task-row.failed .agent-status { background: var(--bui-red-tint); color: var(--bui-red); }
+.task-row .task-chevron,
+.tool-card.task-row .card-chevron { width: 28px; height: 28px; margin-left: -8px; color: var(--bui-ink-3); }
+.task-ring svg { animation: bui-spin 1.1s linear infinite; }
+.task-ring svg circle:first-child { stroke: var(--bui-line); }
+.task-ring svg circle:last-of-type { stroke: var(--bui-accent); }
+.task-badge-icon.done { background: var(--bui-green); }
+.task-badge-icon.failed { background: var(--bui-red); }
+.task-row .stage-expand-inner { margin: 0 10px 10px; }
+.task-row:not(.expanded) .stage-expand-inner,
+.tool-card.task-row:not(.expanded) .expand-inner { margin-bottom: 0; }
+.task-row:not(.expanded) .stage-expand,
+.tool-card.task-row:not(.expanded) .expand {
+  display: none;
+  visibility: hidden;
+}
+.task-row.expanded .stage-expand,
+.tool-card.task-row.expanded .expand {
+  display: grid;
+  visibility: visible;
+}
+.task-row .stage-track,
+.task-row .expand-inner::before { background: var(--bui-line); }
+.task-row .stage-context { color: var(--bui-ink-2); font-size: 12px; }
+.task-row .stage-provider { color: var(--bui-ink-3); font: 11.5px/1.55 var(--font-mono); }
+.tool-card.task-row.expanded .expand-inner {
+  max-height: min(56vh, 620px);
+  overflow-x: hidden;
+  overflow-y: auto !important;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  touch-action: pan-y;
+  -webkit-overflow-scrolling: touch;
+  padding: 2px 8px 10px 0;
+}
+.tool-card.task-row.expanded .expand {
+  min-height: 0;
+  grid-template-rows: minmax(0, 1fr);
+}
+.tool-card.task-row.expanded .output {
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Scout/Consultant tool receipts use the same compact tool-chip grammar, but
+   stay inside the agent card and can be opened independently. */
+.task-row .agent-tools { grid-column: 2; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.agent-tool-call {
+  min-width: 0;
+  border-radius: 8px;
+  background: var(--bui-inset);
+  box-shadow: var(--bui-shadow-hairline);
+}
+.agent-tool-call > summary {
+  min-width: 0;
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px;
+  border-radius: 8px;
+  color: var(--bui-ink-2);
+  cursor: pointer;
+  list-style: none;
+}
+.agent-tool-call > summary::-webkit-details-marker { display: none; }
+.agent-tool-call > summary:hover { background: var(--bui-hover-2); }
+.agent-tool-chevron { width: 12px; height: 12px; flex: 0 0 12px; color: var(--bui-ink-3); transition: transform 180ms ease; }
+.agent-tool-call[open] .agent-tool-chevron { transform: rotate(90deg); color: var(--bui-accent-ink); }
+.agent-tool-label { flex: 0 0 auto; color: var(--bui-ink); font-size: 12.5px; font-weight: 500; }
+.agent-tool-args {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--bui-ink-3);
+  font: 11.5px/1 var(--font-mono);
+}
+.agent-tool-call.failed .agent-tool-label { color: var(--bui-red); }
+.agent-tool-result {
+  max-height: 280px;
+  margin: 0 8px 8px 28px;
+  padding: 8px 10px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  border-left: 1px solid var(--bui-line);
+  color: var(--bui-ink-2);
+  font: 11.5px/1.6 var(--font-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Loading State source: the only visible live row while tools are collapsed. */
+.working-sentinel {
+  width: fit-content !important;
+  min-height: 28px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0;
+  color: var(--bui-ink-3);
+  contain: layout paint;
+}
+.working-pixels { width: auto; height: auto; contain: layout paint; transform: translateZ(0); }
+.loading-pixels {
+  width: 15px;
+  height: 15px;
+  display: grid;
+  grid-template-columns: repeat(3, 4px);
+  gap: 1.5px;
+}
+.loading-pixels span {
+  display: block;
+  width: 4px;
+  height: 4px;
+  border-radius: 1px;
+  background: var(--bui-accent-ink);
+  opacity: .15;
+  animation: bui-pixel-wave 1.4s ease-in-out infinite;
+  will-change: opacity, transform;
+}
+.working-label {
+  color: transparent;
+  background-image: linear-gradient(90deg, var(--bui-ink-3) 35%, var(--bui-accent-ink) 50%, var(--bui-ink-3) 65%);
+  background-size: 200% 100%;
+  font-size: 13px;
+  font-weight: 500;
+  animation: bui-shimmer-text 1.4s linear infinite;
+  will-change: background-position;
+}
+.working-detail { display: none; }
+.working-time { color: var(--bui-ink-3); font: 12px/1 var(--font-mono); }
+
+/* Prompt Bar source. */
+.code-composer {
+  position: relative;
+  z-index: 8;
+  display: block;
+  padding: 6px 6px 24px;
+  border-top: 0;
+  background: var(--bui-canvas);
+}
+.prompt-shell {
+  width: 100%;
+  max-width: 920px;
+  margin-inline: auto;
+  gap: 6px;
+  padding: 6px;
+  border: 1px solid var(--bui-line);
+  border-radius: 14px;
+  background: var(--bui-surface);
+  box-shadow: var(--bui-shadow-card);
+  transition: border-color 150ms ease, border-radius 150ms ease;
+}
+.prompt-shell:focus-within { border-color: var(--bui-line-strong); box-shadow: var(--bui-shadow-card); }
+.prompt-controls { grid-template-columns: 28px minmax(0, 1fr) auto 28px 28px; gap: 6px 4px; }
+.prompt-icon-button,
+.prompt-config-button { height: 28px; border-radius: 8px; color: var(--bui-ink-3); }
+.prompt-icon-button:hover,
+.prompt-config-button:hover,
+.prompt-icon-button[aria-expanded="true"],
+.prompt-config-button[aria-expanded="true"] { color: var(--bui-ink); background: var(--bui-hover); }
+.prompt-controls textarea {
+  min-height: 28px;
+  padding: 5px 4px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--bui-ink);
+  box-shadow: none;
+  font: 13px/18px var(--font-ui);
+}
+.prompt-controls textarea::placeholder { color: var(--bui-ink-3); }
+.prompt-config-button { color: var(--bui-ink-2); font-size: 12px; font-weight: 500; }
+.prompt-send { color: white; background: var(--bui-accent); box-shadow: none; }
+.prompt-send:hover { color: white; background: color-mix(in srgb, var(--bui-accent) 86%, white); }
+.prompt-send:disabled { color: var(--bui-ink-2); background: var(--bui-line-strong); }
+.prompt-menu {
+  bottom: calc(100% - 2px);
+  padding: 4px;
+  border: 1px solid var(--bui-line);
+  border-radius: 10px;
+  background: var(--bui-surface);
+  box-shadow: 0 0 0 1px var(--bui-line), 0 10px 30px #0006;
+  backdrop-filter: none;
+  animation: bui-fade-up 220ms cubic-bezier(.23, 1, .32, 1) both;
+}
+.prompt-plus-menu { left: max(6px, calc((100% - 920px) / 2)); width: min(420px, calc(100% - 12px)); }
+.prompt-config-menu { right: max(6px, calc((100% - 920px) / 2)); width: min(460px, calc(100% - 12px)); }
+.prompt-menu-label { color: var(--bui-ink-3); }
+.prompt-menu-separator { background: var(--bui-line); }
+.prompt-menu-row,
+.prompt-config-row { min-height: 36px; border-radius: 6px; color: var(--bui-ink); }
+.prompt-menu-row:hover,
+.prompt-config-row:hover { background: var(--bui-hover); }
+.prompt-menu-row > svg { color: var(--bui-ink-3); stroke: currentColor; }
+.prompt-menu-row strong,
+.prompt-config-row strong { color: var(--bui-ink); font-size: 12.5px; font-weight: 500; }
+.prompt-menu-row small,
+.prompt-config-row small { color: var(--bui-ink-3); font-size: 11px; }
+.prompt-config-row.selected {
+  background: color-mix(in srgb, var(--bui-accent) 12%, var(--bui-inset));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--bui-accent) 26%, transparent);
+}
+.prompt-config-check { stroke: var(--bui-accent-ink); }
+.composer-delivery { max-width: 920px; margin: 6px auto 0; }
+
+.status-row,
+.handoff { color: var(--bui-ink-3); font-size: 12px; }
+.scroll-bottom { border-color: var(--bui-line); background: var(--bui-surface); color: var(--bui-ink-2); box-shadow: var(--bui-shadow-btn); }
+
+/* Selected navigation state uses the user's aiOS accent; the component
+   surfaces themselves retain the reference palette. */
+.code-sessions .session-row.selected {
+  border-color: color-mix(in srgb, var(--accent) 28%, transparent);
+  background: color-mix(in srgb, var(--accent) 10%, #232427);
+  box-shadow: inset 2px 0 color-mix(in srgb, var(--accent) 82%, white);
+}
+.code-sessions .session-row.selected .dot {
+  border-color: color-mix(in srgb, var(--accent) 76%, white);
+  background: color-mix(in srgb, var(--accent) 28%, transparent);
+}
+
+@keyframes bui-spin { to { transform: rotate(360deg); } }
+@keyframes bui-pixel-on { 0%, 100% { opacity: .15; transform: scale(.85); } 45% { opacity: .8; transform: scale(1); } }
+@keyframes bui-pixel-wave { 0% { opacity: .15; transform: scale(.85); } 30% { opacity: .9; transform: scale(1); } 60%, 100% { opacity: .15; transform: scale(.85); } }
+@keyframes bui-shimmer-text { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+@keyframes bui-fade-up { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes bui-fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes bui-pop-in { from { opacity: 0; transform: scale(.86); } to { opacity: 1; transform: scale(1); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .loading-pixels span,
+  .working-label,
+  .task-ring svg { animation: none !important; }
+  .thinking.live .thinking-label {
+    animation: none !important;
+    -webkit-text-fill-color: currentColor;
+    color: var(--bui-ink-2);
+    background-clip: border-box;
+    -webkit-background-clip: border-box;
+  }
+}
+
+/* --------------------------------------------------------- churning wave
+   This sheet loads after code.css, so the wave rules there lose to the theme's
+   own `.loading-pixels span` / `.working-label` / `.working-time` on equal
+   specificity. Re-apply them here in the theme's own colours: one period drives
+   the dots, the label and the clock, and each begins a fixed fraction of that
+   period later, so a single highlight travels left to right across the whole
+   row instead of three shimmers beating against each other. The per-variant
+   selectors in code.css are more specific and still choose the cell pattern. */
+.working-sentinel { --wave: 2.4s; }
+.working-sentinel .loading-pixels { --wave: 2.4s; }
+.loading-pixels span { animation: pixel-sweep var(--wave, 1.5s) ease-in-out infinite; }
+.working-label {
+  animation: bui-shimmer-text var(--wave, 1.4s) linear infinite;
+  animation-delay: calc(var(--wave, 1.4s) * -0.80);
+}
+.working-time {
+  color: transparent;
+  background-image: linear-gradient(90deg, var(--bui-ink-3) 35%, var(--bui-accent-ink) 50%, var(--bui-ink-3) 65%);
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: bui-shimmer-text var(--wave, 1.4s) linear infinite;
+  animation-delay: calc(var(--wave, 1.4s) * -0.62);
+}
+@media (prefers-reduced-motion: reduce) {
+  .working-time { -webkit-text-fill-color: currentColor; color: var(--bui-ink-3); animation: none; }
+}
+
+/* The theme's own `.tool-card.task-row.expanded .expand` ties with the plan
+   override in code.css and wins on load order, re-opening the empty
+   disclosure body under a plan's checklist. Carry one more class so the plan
+   rule wins on specificity rather than on which sheet happens to load last. */
+.tool-card.task-row.is-plan.expanded .expand { display: none; }
+.tool-card.task-row.is-plan .expand-inner::before { content: none; }
+
+/* `pulse` is the original steady breathe, so it keeps the plain keyframe
+   rather than the sweep the wave variants share. */
+.loading-pixels.anim-pulse span { animation-name: pixel-on; }
