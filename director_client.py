@@ -17,6 +17,10 @@ What it offers Director:
     shell / read_file / write_file         approval-gated access to this box,
                                            for jobs that are specifically about
                                            files or environment here.
+    list_dir / find_paths / resolve_project
+                                           looking around this filesystem, so
+                                           Director can find `C:\\aiOS` instead
+                                           of guessing a project name.
 
 Run it with the desktop:
 
