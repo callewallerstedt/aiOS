@@ -74,8 +74,14 @@ async def recall(ctx: ToolContext, key: str = "") -> ToolResult:
 
 
 def memory_block(limit: int = 60) -> str:
-    """Rendered for the system prompt each turn."""
-    rows = store.list_memory(limit=limit)
+    """Rendered for the system prompt each turn.
+
+    Only what agents write. The operator keeps its own notes in its own scope —
+    where a button lives on one screen is worth a lot to the next operator run
+    and nothing to a chat, and this block is paid for on every turn of every
+    conversation.
+    """
+    rows = store.list_memory(scope="global", limit=limit)
     if not rows:
         return ""
     lines = "\n".join(f"- {row['key']}: {row['value']}" for row in rows)

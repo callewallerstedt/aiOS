@@ -61,6 +61,13 @@ Rules that matter:
   genuinely prevents progress. Say exactly what Calle must do on the same screen.
 * Stop and answer "ask" when the task is ambiguous in a way that changes what
   you would do.
+* You have been here before. The first step shows what you learned on this
+  screen and how your recent runs went — read it before you plan, and do not
+  walk back into a dead end you already recorded.
+* When you learn something that would have saved this run — where a control
+  actually lives, which account is the right one, a route that does not work —
+  call `remember` with it. That is the only thing that survives to your next
+  run, so write it as an instruction to yourself, not as a diary entry.
 * Calle can add instructions while you work. They arrive as "Calle added:" in
   the history and as CALLE JUST SAID. Treat the newest one as the current
   brief: it corrects or replaces what you were doing. Act on it immediately
@@ -119,6 +126,14 @@ ACTION_TOOLS = [
           {"command": {"type": "string"}}, ["command"]),
     _tool("shell", "Run a bounded shell command on this Linux machine.",
           {"command": {"type": "string"}}, ["command"]),
+    _tool("remember", "Keep something for your future runs on this screen: where a "
+                      "control lives, which account is the right one, what did not "
+                      "work. You are shown these at the start of every run.",
+          {"key": {"type": "string",
+                   "description": "Short stable slug, e.g. 'spotify-artist-switcher'."},
+           "value": {"type": "string",
+                     "description": "The lesson, in one or two sentences."}},
+          ["key", "value"]),
     _tool("finish", "Finish, ask Calle, hand off for credentials, or report failure.",
           {"status": {"type": "string", "enum": ["done", "ask", "handoff", "fail"]},
            "message": {"type": "string"}}, ["status", "message"]),
@@ -149,10 +164,15 @@ PROGRESS_REVIEW_TOOLS = [
 
 def task_message(task: str, width: int, height: int, history: str,
                  windows: list[str] | None = None, feedback: str = "",
-                 notes: list[str] | None = None, step: int = 0) -> str:
+                 notes: list[str] | None = None, step: int = 0,
+                 background: str = "") -> str:
     lines = [f"TASK: {task}", "", f"SCREEN: {width}x{height} pixels."]
     if step:
         lines.append(f"STEP: {step}")
+    if background:
+        # Only on the first step: after that it is in the history, and repeating
+        # it every step would push the screenshot out of the model's attention.
+        lines += ["", background]
     if windows:
         lines += ["", "OPEN WINDOWS: " + " | ".join(windows[:8])]
     if history:

@@ -12,13 +12,17 @@ import re
 import shlex
 from typing import Any, Awaitable, Callable
 
-from .. import config, models
+from .. import config, models, store
 from . import display as display_mod
 from . import prompts, x11
 
 Emit = Callable[[str, dict], Awaitable[None]]
 
 MAX_HISTORY_STEPS = 12
+# The operator's own memory, kept apart from the coordinator's so notes about
+# which button moved and where a login lives do not fill every chat's prompt.
+MEMORY_SCOPE = "operator"
+RECALL_RUNS = 6
 JSON_BLOCK = re.compile(r"(?s)\{.*\}")
 
 
@@ -83,8 +87,32 @@ TOOL_ACTIONS = {
     "click": "click", "type_text": "type", "key": "key", "hotkey": "hotkey",
     "scroll": "scroll", "open_url": "open_url", "wait": "wait",
     "launch_app": "launch", "shell": "shell", "drag": "drag",
-    "select_all_text": "select_all",
+    "select_all_text": "select_all", "remember": "remember",
 }
+
+
+def background(limit: int = RECALL_RUNS) -> str:
+    """What this operator already knows: its notes, and how recent runs went.
+
+    Every run used to start from nothing, so the same dead end got walked into
+    again the next day. Notes are things it chose to keep; the run list is
+    automatic, because the useful lesson is usually "that did not work".
+    """
+    lines: list[str] = []
+    notes = store.list_memory(scope=MEMORY_SCOPE, limit=40)
+    if notes:
+        lines.append("WHAT YOU LEARNED ON THIS SCREEN BEFORE:")
+        lines += [f"- {row['key']}: {row['value']}" for row in notes]
+    runs = [job for job in store.list_jobs(limit=60) if job.get("kind") == "operator"]
+    if runs:
+        lines.append("")
+        lines.append("YOUR RECENT RUNS (newest first):")
+        for job in runs[:limit]:
+            task = str((job.get("request") or {}).get("task") or "")[:120]
+            result = dict(job.get("result") or {})
+            summary = str(result.get("summary") or job.get("status") or "")[:180]
+            lines.append(f"- [{job.get('status')}] {task} -> {summary}")
+    return "\n".join(lines)
 
 
 def tool_decision(reply: dict) -> dict:
@@ -216,6 +244,13 @@ async def execute(action: dict, settings: dict) -> str:
     if kind == "select_all":
         await x11.hotkey(["ctrl", "a"], settings)
         return "selected all text in the focused field"
+    if kind == "remember":
+        key = str(action.get("key") or "").strip()[:80]
+        value = str(action.get("value") or "").strip()[:2000]
+        if not key or not value:
+            return "remember: needs both a key and what to remember"
+        store.remember(key, value, scope=MEMORY_SCOPE)
+        return f"remembered {key}: {value[:120]}"
     if kind == "key_down":
         await x11.key_down(str(action.get("key") or ""), settings)
         return f"hold {action.get('key')}"
@@ -277,8 +312,10 @@ async def run_task(task: str, *, emit: Emit, settings: dict | None = None,
     last_performed = ""
     notes: list[str] = []
 
+    recalled = background()
     await emit("operator.started", {"task": task, "display": state.get("display"),
-                                    "review_every": review_interval})
+                                    "review_every": review_interval,
+                                    "recalled": bool(recalled)})
 
     while True:
         if cancel.is_set():
@@ -316,7 +353,8 @@ async def run_task(task: str, *, emit: Emit, settings: dict | None = None,
         windows = await x11.window_list(settings=cfg)
         message = prompts.task_message(task, shot_w, shot_h,
                                        "\n".join(history[-MAX_HISTORY_STEPS:]),
-                                       windows, feedback, notes=notes, step=steps)
+                                       windows, feedback, notes=notes, step=steps,
+                                       background=recalled if steps == 1 else "")
         items = [models.user_message([models.text_part(message), models.image_part(data_url)])]
 
         try:
