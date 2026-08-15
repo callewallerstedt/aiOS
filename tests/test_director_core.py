@@ -185,13 +185,18 @@ def test_seeding_refreshes_builtin_tool_lists(director):
     assert sorted(tools) == sorted(agents.DIRECTOR_TOOLS)
 
 
-def test_seeding_leaves_custom_agents_alone(director):
+def test_seeding_keeps_every_agent_on_the_house_toolset(director):
+    """Custom agents used to keep whatever tools they were made with, which
+    quietly froze them in the month they were created: Björn, made in July,
+    guessed a project path and lost two CODE jobs to it because he could not
+    have called `machine_find`. Nothing narrows an agent's tools today, so
+    they all follow the house."""
     from director import agents
 
     agents.ensure_seeded()
     mine = director.create_agent(name="Mine", kind="custom", tools=["recall"])
     agents.ensure_seeded()
-    assert director.get_agent(mine["id"])["tools"] == ["recall"]
+    assert sorted(director.get_agent(mine["id"])["tools"]) == sorted(agents.DIRECTOR_TOOLS)
     assert set(agents.COMMUNICATION_TOOLS) <= set(agents.tools_for(director.get_agent(mine["id"])))
 
 

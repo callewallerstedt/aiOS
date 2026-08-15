@@ -5,7 +5,7 @@
   "scripts": {
     "build": "node ./scripts/build.js",
     "dev": "wrangler dev",
-    "test": "node --test worker/*.test.mjs"
+    "test": "node --test worker/*.test.mjs director-header.test.mjs"
   },
   "devDependencies": {
     "wrangler": "^4.25.0"

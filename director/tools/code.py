@@ -155,6 +155,27 @@ async def code_session(ctx: ToolContext, task: str = "", project: str = "",
         return ToolResult(error="no machine is online to run CODE on — the Windows "
                                 "desktop is not connected")
 
+    # Resolve the project to a real directory first. A name that turns out not
+    # to exist used to fail in the background, minutes after this tool had
+    # already reported "dispatched" — so the model told Calle work was running
+    # that had never started.
+    if project:
+        resolved = await ctx.hub.call_machine(
+            target["id"], "resolve_project", {"project": project}, timeout=90.0)
+        if not resolved.get("ok"):
+            hint = str(resolved.get("error") or f"no directory matching {project!r}")
+            return ToolResult(error=f"{hint} on {target['name']} — nothing was "
+                                    f"dispatched. Find the real path with "
+                                    f"`machine_find` or `machine_dirs` and try again.")
+        found = str(resolved.get("path") or "")
+        others = [c["path"] for c in (resolved.get("candidates") or [])
+                  if c.get("path") and c["path"] != found][:5]
+        if found and found.lower() != str(project).lower() and others:
+            # Several plausible folders: say which one is being used rather
+            # than picking silently.
+            await ctx.emit("code.project", {"path": found, "candidates": others})
+        project = found or project
+
     payload = {
         "task": brief,
         "project": project,
@@ -176,30 +197,38 @@ async def code_session(ctx: ToolContext, task: str = "", project: str = "",
         machine_id=target["id"], status="running")
     payload["job_id"] = job["id"]
 
+    # Start it here, inside the turn, so a refusal is this tool's error.
+    result = await ctx.hub.call_machine(target["id"], "code.start", payload, timeout=90.0)
+    if not result.get("ok"):
+        reason = str(result.get("error") or "dispatch failed")
+        store.update_job(job["id"], status="fail",
+                         result={"summary": reason, "session_id": ""})
+        return ToolResult(
+            error=f"CODE did not start on {target['name']}: {reason}. Nothing is "
+                  f"running — do not tell Calle this job was dispatched.",
+            card={"title": "code", "preview": brief[:90], "meta": "did not start",
+                  "tone": "danger", "job_id": job["id"]})
+
+    session_id = str(result.get("session_id") or "")
+    store.update_job(job["id"], result={
+        "session_id": session_id,
+        "summary": "running",
+        "provider": result.get("provider") or payload.get("provider") or "",
+        "model": result.get("model") or payload.get("model") or "",
+        "config_id": result.get("config_id") or payload.get("config_id") or "",
+        "config_name": result.get("config_name") or payload.get("config_name") or "",
+    })
+    await ctx.emit("code.started", {
+        "job_id": job["id"], "session_id": session_id,
+        "machine": target["name"], "task": brief,
+        "project": payload.get("project") or "",
+        "provider": result.get("provider") or "",
+        "model": result.get("model") or "",
+        "config_id": result.get("config_id") or "",
+        "config_name": result.get("config_name") or "",
+    })
+
     async def run() -> dict:
-        result = await ctx.hub.call_machine(
-            target["id"], "code.start", payload, timeout=90.0)
-        if not result.get("ok"):
-            return {"status": "fail",
-                    "summary": str(result.get("error") or "dispatch failed"),
-                    "session_id": ""}
-        session_id = str(result.get("session_id") or "")
-        store.update_job(job["id"], result={
-            "session_id": session_id,
-            "summary": "running",
-            "provider": result.get("provider") or payload.get("provider") or "",
-            "model": result.get("model") or payload.get("model") or "",
-            "config_id": result.get("config_id") or payload.get("config_id") or "",
-            "config_name": result.get("config_name") or payload.get("config_name") or "",
-        })
-        await ctx.emit("code.started", {
-            "job_id": job["id"], "session_id": session_id,
-            "machine": target["name"], "task": brief,
-            "provider": result.get("provider") or "",
-            "model": result.get("model") or "",
-            "config_id": result.get("config_id") or "",
-            "config_name": result.get("config_name") or "",
-        })
         # The machine streams progress/events and posts the final result; wait.
         finished = await _await_completion(ctx, job["id"])
         finished.setdefault("session_id", session_id)
@@ -214,11 +243,14 @@ async def code_session(ctx: ToolContext, task: str = "", project: str = "",
              or str(config_id or "").strip()
              or str(provider or "").strip()
              or DEFAULT_CONFIG_NAME)
+    where = str(payload.get("project") or "").strip()
     return ToolResult(
-        output=f"CODE session dispatched to {target['name']} as job {job['id']} "
-               f"({label}). It reports back here when it finishes.",
-        card={"title": "code", "preview": brief[:90], "meta": f"{target['name']} · {label}",
-              "tone": "accent", "job_id": job["id"]},
+        output=f"CODE session running on {target['name']} as job {job['id']} "
+               f"({label}{', ' + where if where else ''}). It reports back here "
+               f"when it finishes, and asks here if it needs a decision.",
+        card={"title": "code", "preview": brief[:90],
+              "meta": f"{target['name']} · {label}",
+              "tone": "accent", "job_id": job["id"], "session_id": session_id},
     )
 
 
@@ -242,6 +274,54 @@ async def _await_completion(ctx: ToolContext, job_id: str, *, timeout: float = 7
                 "model": str(result.get("model") or ""),
             }
     return {"status": "stopped", "summary": "CODE session timed out after two hours"}
+
+
+@tool(
+    "code_reply",
+    "Answer a CODE session that is waiting on a question, or send it extra "
+    "instructions while it runs. A waiting session does nothing until it gets "
+    "an answer, so never leave one hanging: answer it yourself when the answer "
+    "follows from what Calle already asked for, otherwise ask him with "
+    "`ask_user` / `ask_yes_no` and pass his answer straight through.",
+    {
+        "type": "object",
+        "properties": {
+            "job_id": {"type": "string", "description": "The CODE job to reply to."},
+            "text": {"type": "string", "description": "The answer, in plain words."},
+        },
+        "required": ["text"],
+    },
+)
+async def code_reply(ctx: ToolContext, job_id: str = "", text: str = "") -> ToolResult:
+    answer = str(text or "").strip()
+    if not answer:
+        return ToolResult(error="no answer given")
+    row = store.get_job(job_id) if job_id else None
+    if row is None:
+        # Falling back to the newest live job in this chat keeps the model from
+        # having to carry a job id it may never have been shown.
+        live = [j for j in store.list_jobs(thread_id=ctx.thread_id, limit=10)
+                if j["kind"] == "code" and j["status"] == "running"]
+        row = live[0] if live else None
+    if row is None:
+        return ToolResult(error="no running CODE job in this conversation to reply to")
+    session_id = str((row.get("result") or {}).get("session_id") or "")
+    if not session_id:
+        return ToolResult(error=f"job {row['id']} has no CODE session to reply to")
+    if not row.get("machine_id"):
+        return ToolResult(error=f"job {row['id']} has no machine recorded")
+    result = await ctx.hub.call_machine(
+        row["machine_id"], "code.answer",
+        {"session_id": session_id, "text": answer}, timeout=45.0)
+    if not result.get("ok"):
+        return ToolResult(error=str(result.get("error") or "the session did not take the answer"))
+    asked = str(result.get("question") or "").strip()
+    return ToolResult(
+        output=f"answered {row['id']}" + (f" ({asked[:120]})" if asked else "")
+               + " — it is working again",
+        card={"title": "code reply", "preview": answer[:90],
+              "meta": row["id"], "tone": "ok", "job_id": row["id"]},
+    )
 
 
 @tool(

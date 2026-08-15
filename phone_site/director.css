@@ -1260,6 +1260,34 @@ body .loading-pixels span { background: var(--accent); }
 .action-card.approved .kicker { color: var(--green); }
 .action-card.declined .kicker { color: var(--red); }
 
+/* A yes/no the agent asked for: two big targets, green check and red X, so an
+   answer is one thumb-tap rather than typed text. */
+.action-card .btn.decision {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 48px;
+  font-size: 15px;
+  font-weight: 650;
+}
+.action-card .btn.decision svg { width: 20px; height: 20px; }
+.action-card .btn.decision.yes {
+  color: var(--green);
+  background: color-mix(in srgb, var(--green) 12%, transparent);
+  box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--green) 45%, transparent);
+}
+.action-card .btn.decision.no {
+  color: var(--red);
+  background: color-mix(in srgb, var(--red) 12%, transparent);
+  box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--red) 45%, transparent);
+}
+.action-card.code-question .hint {
+  color: var(--ink-3);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
 /* screenshots and takeover */
 .shot {
   width: min(82%, 420px);
@@ -1536,6 +1564,61 @@ body .loading-pixels span { background: var(--accent); }
   font-size: 11.5px;
   line-height: 1.5;
 }
+
+/* ---- the system prompt, readable on a phone ---- */
+
+.prompt-picker { display: flex; flex-wrap: wrap; gap: 6px; }
+.prompt-picker .chip {
+  padding: 5px 10px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--field);
+  color: var(--ink-2);
+  font-size: 12px;
+  cursor: pointer;
+}
+.prompt-picker .chip.on { background: var(--accent); color: #fff; }
+
+.prompt-view { display: grid; gap: 8px; }
+.prompt-block {
+  padding: 9px 11px;
+  border-radius: 10px;
+  background: var(--field);
+  cursor: pointer;
+}
+.prompt-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.prompt-label { color: var(--ink-2); font-size: 12px; font-weight: 600; }
+.prompt-tag {
+  color: var(--ink-3);
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+}
+.btn.tiny { padding: 3px 9px; font-size: 11.5px; }
+/* Collapsed by default: the whole prompt is thousands of characters, and a
+   settings screen that opens as a wall of text is not readable. */
+.prompt-text {
+  margin: 6px 0 0;
+  max-height: 3.4em;
+  overflow: hidden;
+  color: var(--ink-3);
+  font: 11.5px/1.55 var(--font-mono);
+  white-space: pre-wrap;
+  word-break: break-word;
+  -webkit-mask-image: linear-gradient(#000 45%, transparent);
+          mask-image: linear-gradient(#000 45%, transparent);
+}
+.prompt-block.open .prompt-text {
+  max-height: none;
+  -webkit-mask-image: none;
+          mask-image: none;
+}
+.prompt-editor { min-height: 320px; font: 12px/1.55 var(--font-mono); }
 
 .group textarea {
   width: 100%;

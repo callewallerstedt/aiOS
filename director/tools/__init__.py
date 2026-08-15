@@ -93,8 +93,8 @@ def load_all() -> None:
     if _LOADED:
         return
     _LOADED = True
-    from . import (code, communication, group, interaction, memory, operator,  # noqa: F401
-                   schedule, system, web)
+    from . import (code, communication, group, interaction, machine,  # noqa: F401
+                   memory, operator, schedule, system, web)
 
 
 def get(name: str) -> Tool | None:

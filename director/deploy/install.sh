@@ -58,9 +58,14 @@ systemctl --user reset-failed aios-director-real-desktop.service aios-director-x
 systemctl --user enable aios-director-real-desktop.service
 systemctl --user enable aios-director-x11vnc.service
 systemctl --user enable aios-director-chrome.service
-systemctl --user restart aios-director-real-desktop.service
-systemctl --user restart aios-director-x11vnc.service
-systemctl --user restart aios-director-chrome.service
+# Best-effort: the screen units race each other on a cold display, and with
+# `set -e` one flaky start used to abort the deploy *before* the line below —
+# leaving the box running yesterday's coordinator while the deploy reported
+# failure. Director repairs the display at runtime; the restart here is the
+# whole point of a deploy and must not be skippable.
+systemctl --user restart aios-director-real-desktop.service || true
+systemctl --user restart aios-director-x11vnc.service || true
+systemctl --user restart aios-director-chrome.service || true
 systemctl --user enable aios-director.service
 systemctl --user restart aios-director.service
 

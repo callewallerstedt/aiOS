@@ -238,6 +238,37 @@ async def patch_agent(request: web.Request) -> web.Response:
     return json_response({"ok": True, "agent": agent})
 
 
+@ROUTES.get("/api/prompt")
+async def get_prompt(request: web.Request) -> web.Response:
+    """The whole system prompt an agent is given, in the pieces it is built of.
+
+    Asked for because "what did you actually tell it?" was unanswerable from
+    the phone: the prompt lived in code and in three settings keys. The `agent`
+    query picks whose prompt to assemble; without one, the first live agent.
+    """
+    settings = config.load_settings()
+    wanted = str(request.query.get("agent") or "").strip()
+    rows = [a for a in agents_mod.ensure_seeded()
+            if not int(a.get("archived") or 0) and not store.is_group(a)]
+    agent = store.get_agent(wanted) if wanted else (rows[0] if rows else None)
+    if agent is None:
+        return error("no such agent", status=404)
+    sections = agents_mod.prompt_sections(agent, settings)
+    return json_response({
+        "ok": True,
+        "agent": {"id": agent["id"], "name": agent.get("name") or "",
+                  "emoji": agent.get("emoji") or "", "kind": agent.get("kind") or ""},
+        "agents": [{"id": a["id"], "name": a.get("name") or "",
+                    "emoji": a.get("emoji") or ""} for a in rows],
+        "sections": sections,
+        "prompt": agents_mod.system_prompt(agent, settings),
+        "blocks": agents_mod.prompt_defaults(),
+        "overrides": dict(settings.get("prompts") or {}),
+        "instructions": str(settings.get("instructions") or ""),
+        "tools": agents_mod.tools_for(agent),
+    })
+
+
 @ROUTES.delete("/api/agents/{agent_id}")
 async def delete_agent(request: web.Request) -> web.Response:
     store.delete_agent(request.match_info["agent_id"])
@@ -260,7 +291,9 @@ def _thread_payload(thread_id: str, runtime: runtime_mod.Runtime | None = None) 
     thread["hidden_count"] = sum(
         1 for message in messages if int(message.get("sequence") or 0) <= through)
     working = runtime.working_from_group(thread_id) if runtime else []
-    return {"thread": thread, "messages": messages, "working": working}
+    questions = runtime.pending_questions(thread_id) if runtime else []
+    return {"thread": thread, "messages": messages, "working": working,
+            "questions": questions}
 
 
 @ROUTES.get("/api/agents/{agent_id}/thread")
@@ -703,6 +736,14 @@ async def patch_settings(request: web.Request) -> web.Response:
         voice.pop("openai_api_key")
     if "instructions" in body:
         body["instructions"] = str(body.get("instructions") or "")[:8000]
+    if isinstance(body.get("prompts"), dict):
+        # An empty block means "back to what ships in the code", not an agent
+        # with no instructions at all.
+        body["prompts"] = {
+            key: str(value or "").strip()[:20000]
+            for key, value in body["prompts"].items()
+            if key in agents_mod.PROMPT_BLOCKS
+        }
     config.update_settings(body)
     return json_response({"ok": True})
 
@@ -935,10 +976,13 @@ async def machine_socket(request: web.Request) -> web.WebSocketResponse:
             elif kind == "event":
                 job_id = str(payload.get("job_id") or "")
                 job = store.get_job(job_id) or {}
-                await runtime.emit(str(payload.get("kind") or "code.progress"),
-                                   dict(payload.get("payload") or {}),
+                event_kind = str(payload.get("kind") or "code.progress")
+                body = dict(payload.get("payload") or {})
+                await runtime.emit(event_kind, body,
                                    thread_id=job.get("thread_id", ""),
                                    agent_id=job.get("agent_id", ""))
+                if event_kind == "code.question" and job:
+                    await runtime.code_question(job, body)
             elif kind == "job":
                 job_id = str(payload.get("job_id") or "")
                 existing = store.get_job(job_id) or {}
@@ -1046,6 +1090,7 @@ async def _startup(app: web.Application) -> None:
         code = auth.new_pairing_code()
         print(f"[director] no devices paired yet — pairing code: {code['code']} "
               f"(valid {int(auth.CODE_TTL / 60)} minutes)", flush=True)
+    _release_orphaned_jobs()
     _realign_wall_clock_routines()
     _catch_up_routines()
     app["runtime"].start_scheduler()
@@ -1057,6 +1102,21 @@ async def _startup(app: web.Application) -> None:
         await display_mod.ensure_running(settings, with_chrome=False)
     except Exception as exc:
         print(f"[director] operator display not started: {exc}", flush=True)
+
+
+def _release_orphaned_jobs() -> None:
+    """Close out jobs whose waiter died with the last process.
+
+    The task that polls a CODE job lives in memory, so a restart leaves the row
+    saying "running" forever. That is not cosmetic: it is what `code_reply`
+    picks when it looks for the live session, and what the phone draws as a
+    job still in flight.
+    """
+    for row in store.list_jobs(status="running", limit=200):
+        result = dict(row.get("result") or {})
+        result.setdefault("summary", "Director restarted while this was running; "
+                                     "state unknown. Check with code_status.")
+        store.update_job(row["id"], status="stopped", result=result)
 
 
 def _catch_up_routines() -> None:

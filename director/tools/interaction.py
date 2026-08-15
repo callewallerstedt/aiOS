@@ -46,6 +46,32 @@ async def ask_user(ctx: ToolContext, question: str = "", options=None) -> ToolRe
 
 
 @tool(
+    "ask_yes_no",
+    "Ask Calle a simple yes/no question and wait for a one-tap answer. Use for "
+    "a binary decision or a quick confirmation where two big buttons in chat "
+    "(a green \u2713 yes and a red \u2715 no) are clearer than free text.",
+    {
+        "type": "object",
+        "properties": {
+            "question": {"type": "string"},
+        },
+        "required": ["question"],
+    },
+)
+async def ask_yes_no(ctx: ToolContext, question: str = "") -> ToolResult:
+    text = str(question or "").strip()
+    if not text:
+        return ToolResult(error="no question given")
+    answer = await ctx.ask_user(text, options=["Yes", "No"], kind="yes_no")
+    yes = str(answer or "").strip().lower().startswith("yes")
+    return ToolResult(
+        output="yes" if yes else "no",
+        card={"title": "yes/no", "preview": text[:90],
+              "meta": "yes" if yes else "no", "tone": "ok" if yes else "danger"},
+    )
+
+
+@tool(
     "handoff",
     "Hand control to Calle only when the operator is genuinely blocked by "
     "secret entry, manual 2FA approval, a captcha, payment details, or missing "

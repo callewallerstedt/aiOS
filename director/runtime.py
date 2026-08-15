@@ -68,6 +68,14 @@ class Runtime:
         # Relay hops carried by destination thread. Prevents two agents from
         # automatically messaging each other forever.
         self._relay_depth: dict[str, int] = {}
+        # thread_id -> id of a system note that landed while the agent was
+        # mid-run. Without this the note is written to the transcript and
+        # nobody ever reads it — a CODE job failed on a bad path, said so, and
+        # Director went on telling Calle it was running.
+        self._owed_turns: dict[str, str] = {}
+        # question_id -> the card a client should redraw if it opens or
+        # reconnects while the question is still unanswered.
+        self._open_questions: dict[str, dict] = {}
 
     # ---------------- events ----------------
 
@@ -138,6 +146,11 @@ class Runtime:
         self._questions[qid] = future
         payload = {"id": qid, "question": question, "options": list(options or []),
                    "kind": kind, **(extra or {})}
+        # Remembered until answered: the card lives in an event, so without
+        # this a question asked while the phone was closed is invisible when it
+        # opens, and the turn waits an hour for an answer nobody was shown.
+        self._open_questions[qid] = {**payload, "thread_id": thread_id,
+                                     "agent_id": agent_id}
         await self.emit("question", payload, thread_id=thread_id, agent_id=agent_id)
         store.touch_thread(thread_id, status="waiting")
         agent = store.get_agent(agent_id) or {}
@@ -150,10 +163,16 @@ class Runtime:
             answer = ""
         finally:
             self._questions.pop(qid, None)
+            self._open_questions.pop(qid, None)
         store.touch_thread(thread_id, status="running")
         await self.emit("question.answered", {"id": qid, "answer": answer},
                         thread_id=thread_id, agent_id=agent_id)
         return str(answer or "")
+
+    def pending_questions(self, thread_id: str) -> list[dict]:
+        """Unanswered questions in this thread, for a client that just opened."""
+        return [dict(row) for row in self._open_questions.values()
+                if row.get("thread_id") == thread_id]
 
     def answer_question(self, question_id: str, answer: str) -> bool:
         future = self._questions.get(question_id)
@@ -344,9 +363,65 @@ class Runtime:
         summary = str(result.get("summary") or "").strip()
         note = (f"[{job['kind']} job {job['id']} finished: {result.get('status')}]\n"
                 f"{summary[:4000]}")
-        store.add_message(thread_id, "system", note,
-                          {"job_id": job["id"], "kind": job["kind"]})
-        await self.run_turn(thread_id, trigger="job")
+        message = store.add_message(thread_id, "system", note,
+                                    {"job_id": job["id"], "kind": job["kind"]})
+        await self.wake(thread_id, trigger="job", note_id=str(message.get("id") or ""))
+
+    async def code_question(self, job: dict, payload: dict) -> None:
+        """A CODE session is blocked on a question. Get it in front of someone.
+
+        The session stops dead until it is answered, so this both lands in the
+        chat — where Calle can read it — and wakes the agent, which either
+        answers with `code_reply` or relays the question to him.
+        """
+        thread_id = str(job.get("thread_id") or "")
+        question = str(payload.get("question") or "").strip()
+        if not thread_id or not question:
+            return
+        note = (f"[code job {job['id']} is waiting on a question — it does "
+                f"nothing until you answer it with `code_reply`]\n{question[:2000]}")
+        message = store.add_message(thread_id, "system", note,
+                                    {"job_id": job["id"], "kind": "code.question"})
+        store.touch_thread(thread_id, preview=f"CODE asks: {question[:200]}")
+        agent = store.get_agent(str(job.get("agent_id") or "")) or {}
+        await self.notify(thread_id, agent, "CODE needs an answer", question,
+                          tag=f"codeq-{job['id']}")
+        await self.wake(thread_id, trigger="code.question",
+                        note_id=str(message.get("id") or ""))
+
+    async def wake(self, thread_id: str, *, trigger: str = "job",
+                   note_id: str = "") -> None:
+        """Run a turn now, or as soon as the one in flight finishes.
+
+        `run_turn` drops the request when the thread is busy, which is right
+        for a duplicate user tap and wrong for anything that has already been
+        written into the transcript.
+        """
+        if self.busy(thread_id):
+            self._owed_turns[thread_id] = note_id
+            return
+        await self.run_turn(thread_id, trigger=trigger)
+
+    def _still_owed(self, thread_id: str, messages: list[dict]) -> bool:
+        """Did the finished turn actually answer the note that landed mid-run?
+
+        A note the running turn picked up on its own needs no second turn; one
+        it never saw does. The test is whether the agent said anything after
+        the note was written.
+        """
+        if thread_id not in self._owed_turns:
+            return False
+        note_id = self._owed_turns.pop(thread_id)
+        if not note_id:
+            return True
+        seen = False
+        for row in messages:
+            if str(row.get("id")) == note_id:
+                seen = True
+                continue
+            if seen and row.get("role") == "assistant":
+                return False
+        return True
 
     async def stop_job(self, job_id: str) -> dict:
         row = store.get_job(job_id)
@@ -1105,8 +1180,11 @@ class Runtime:
         # in the thread is still an unanswered user message.
         self._queued.pop(thread_id, None)
         messages = store.list_messages(thread_id)
-        if messages and messages[-1]["role"] == "user" and not self.busy(thread_id):
-            await self.run_turn(thread_id, trigger="queued")
+        owed = self._still_owed(thread_id, messages)
+        last_role = messages[-1]["role"] if messages else ""
+        if (last_role == "user" or owed) and not self.busy(thread_id):
+            await self.run_turn(thread_id,
+                                trigger="queued" if last_role == "user" else "owed")
         else:
             await self._report_group_work(thread_id, agent)
 

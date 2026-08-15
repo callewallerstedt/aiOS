@@ -1335,6 +1335,26 @@ function questionCard(payload) {
   wrap.append(el("div", "summary", payload.question || ""));
 
   const row = el("div", "row");
+  if (payload.kind === "yes_no") {
+    const choice = (yes) => {
+      const button = el("button", "btn decision " + (yes ? "yes" : "no"),
+        yes ? "Yes" : "No");
+      button.innerHTML = `${svg(yes
+        ? '<path d="M4.5 12.5l4.5 4.5 10.5-10.5"/>'
+        : '<path d="M6 6l12 12M18 6L6 18"/>')}<span>${yes ? "Yes" : "No"}</span>`;
+      button.setAttribute("aria-label", yes
+        ? "Yes — green check confirmation"
+        : "No — red X decline");
+      button.addEventListener("click", () => answer(payload.id, yes ? "Yes" : "No", wrap));
+      row.append(button);
+    };
+    choice(true);
+    choice(false);
+    wrap.append(row);
+    appendTranscript(wrap);
+    scrollDown(true);
+    return wrap;
+  }
   if (isHandoff || payload.takeover) {
     const open = el("button", "btn", "Open the screen");
     open.addEventListener("click", () => openTakeover(payload.path || "/vnc/vnc.html?autoconnect=1&resize=scale&path=vnc/ws"));
@@ -1360,6 +1380,44 @@ function questionCard(payload) {
     row.append(send);
   }
   wrap.append(row);
+  appendTranscript(wrap);
+  scrollDown(true);
+  return wrap;
+}
+
+function codeQuestionCard(payload) {
+  const jobId = payload.job_id || "";
+  if (document.querySelector(`[data-code-question="${jobId}"]`)) return null;
+  const wrap = el("div", "action-card code-question");
+  wrap.dataset.codeQuestion = jobId;
+  wrap.append(kicker("The CODE session is asking",
+    '<path d="M4 5.5h16v11H12l-4 3v-3H4z"/>'));
+  wrap.append(el("div", "summary", payload.question || ""));
+  wrap.append(el("div", "hint",
+    "It is stopped until it gets an answer. Reply here and the agent passes it on."));
+  const field = el("div", "field");
+  const input = el("input");
+  input.placeholder = "Your answer";
+  input.className = "answer";
+  field.append(input);
+  const row = el("div", "row");
+  const send = el("button", "btn primary", "Send to CODE");
+  const submit = async () => {
+    const text = input.value.trim();
+    if (!text) return;
+    wrap.classList.add("settled");
+    wrap.append(el("div", "verdict", `You answered: ${text}`));
+    // Goes through the agent rather than straight to the session, so the
+    // answer is in the conversation and the agent knows what was decided.
+    await sendToThread(`Answer for CODE job ${jobId}: ${text}`);
+  };
+  send.addEventListener("click", submit);
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") { event.preventDefault(); submit(); }
+  });
+  wrap.dataset.jobId = jobId;
+  row.append(send);
+  wrap.append(field, row);
   appendTranscript(wrap);
   scrollDown(true);
   return wrap;
@@ -1506,7 +1564,16 @@ function renderMessages(messages, thread = state.currentThread) {
       speaker_name: message.meta?.speaker_name,
       target_id: message.meta?.target_id,
     }, message.created_at);
-    else if (message.role === "system") addStatus(message.content.split("\n")[0]);
+    else if (message.role === "system") {
+      // A session still waiting keeps its card on reload, so the answer box
+      // does not vanish when the phone reconnects.
+      if (message.meta?.kind === "code.question") {
+        codeQuestionCard({
+          job_id: message.meta?.job_id || "",
+          question: message.content.split("\n").slice(1).join("\n").trim(),
+        });
+      } else addStatus(message.content.split("\n")[0]);
+    }
     else if (message.role === "tool_call") {
       if (message.meta?.name === "start_work" || message.meta?.name === "react") continue;
       let args = {};
@@ -1532,6 +1599,12 @@ function renderMessages(messages, thread = state.currentThread) {
         shotCard({ image: message.meta.image, caption: card.title || "Image" }, true);
       }
     }
+  }
+  // A question the agent is still waiting on is redrawn here, because the card
+  // itself only ever existed as a live event — reopen the app mid-question and
+  // there was nothing to tap.
+  for (const question of thread?.questions || []) {
+    if (!document.querySelector(`[data-question="${question.id}"]`)) questionCard(question);
   }
   paintGroupWorking();
   scrollDown(true);
@@ -1686,6 +1759,18 @@ function handleEvent(event) {
     case "code.progress":
       taskRow(payload.job_id, payload.title || "CODE session",
               payload.status || "running", payload.session_id || "");
+      break;
+
+    case "code.question":
+      // The session is stopped until this is answered. Say so on the job row
+      // and put the question in the chat, next to whatever the agent replies.
+      taskRow(payload.job_id, payload.title || "CODE session", "waiting on you",
+              payload.session_id || "");
+      codeQuestionCard(payload);
+      break;
+
+    case "code.project":
+      addStatus(`Using ${payload.path}`);
       break;
 
     case "code.events":
@@ -2090,6 +2175,7 @@ async function openAgent(agentId, { pushHistory = true } = {}) {
     state.threadId = cached.thread.id;
     state.cursor = Math.max(state.cursor, cached.cursor || 0);
     cached.thread.working = cached.working || cached.thread.working || [];
+    cached.thread.questions = cached.questions || [];
     renderMessages(cached.messages || [], cached.thread);
     setBusy(cached.thread.status === "running" || cached.thread.status === "waiting"
       || (cached.thread.working || []).length > 0);
@@ -2103,10 +2189,12 @@ async function openAgent(agentId, { pushHistory = true } = {}) {
     const data = await api(`/api/agents/${agentId}/thread`);
     if (gen !== state.openGen) return;
     data.thread.working = data.working || [];
+    data.thread.questions = data.questions || [];
     state.threads.set(agentId, {
       thread: data.thread,
       messages: data.messages || [],
       working: data.working || [],
+      questions: data.questions || [],
       cursor: data.cursor || 0,
       at: Date.now(),
     });
@@ -2133,10 +2221,12 @@ async function refreshOpenThread() {
     const data = await api(`/api/threads/${threadId}`);
     if (state.threadId !== threadId) return;
     data.thread.working = data.working || [];
+    data.thread.questions = data.questions || [];
     state.threads.set(agentId, {
       thread: data.thread,
       messages: data.messages || [],
       working: data.working || [],
+      questions: data.questions || [],
       cursor: data.cursor || state.cursor,
       at: Date.now(),
     });
@@ -2188,6 +2278,11 @@ async function send() {
   input.style.height = "auto";
   state.pending = [];
   renderAttachTray();
+  await sendToThread(text, attachments);
+}
+
+async function sendToThread(text, attachments = []) {
+  if (!state.threadId) return;
   const empty = transcriptEl().querySelector(".empty");
   if (empty) empty.remove();
   addUser(text, attachments);
@@ -2511,6 +2606,111 @@ function openTakeover(path) {
 
 /* ---------------- settings ---------------- */
 
+async function promptGroup() {
+  const group = el("div", "group prompt-group");
+  group.append(el("h3", null, "System prompt"));
+  group.append(el("div", "hint",
+    "Everything an agent is told before it reads your message. The blocks with "
+    + "an Edit button are yours to change; the rest is who the agent is and "
+    + "what it can see right now."));
+  const status = el("div", "status-line", "Loading…");
+  group.append(status);
+
+  let data;
+  try {
+    data = await api("/api/prompt");
+  } catch (error) {
+    status.textContent = String(error.message || error);
+    return group;
+  }
+  status.remove();
+
+  const picker = el("div", "prompt-picker");
+  const view = el("div", "prompt-view");
+  const paint = (payload) => {
+    view.textContent = "";
+    const total = (payload.prompt || "").length;
+    view.append(el("div", "hint",
+      `${payload.sections.length} blocks · ${total.toLocaleString()} characters · `
+      + `${(payload.tools || []).length} tools`));
+    for (const section of payload.sections) {
+      const block = el("div", "prompt-block");
+      const head = el("div", "prompt-head");
+      head.append(el("span", "prompt-label", section.label));
+      if (section.editable === "settings") {
+        const edit = el("button", "btn ghost tiny", "Edit");
+        edit.addEventListener("click", () => editPromptBlock(section.key, payload));
+        head.append(edit);
+      } else if (section.editable === "live") {
+        head.append(el("span", "prompt-tag", "live"));
+      } else {
+        head.append(el("span", "prompt-tag", "per agent"));
+      }
+      block.append(head);
+      const text = el("pre", "prompt-text", section.text);
+      block.append(text);
+      block.addEventListener("click", (event) => {
+        if (event.target.closest("button")) return;
+        block.classList.toggle("open");
+      });
+      view.append(block);
+    }
+  };
+
+  for (const agent of data.agents || []) {
+    const chip = el("button", "chip" + (agent.id === data.agent.id ? " on" : ""),
+                    `${agent.emoji || ""} ${agent.name}`.trim());
+    chip.addEventListener("click", async () => {
+      for (const other of picker.querySelectorAll(".chip")) other.classList.remove("on");
+      chip.classList.add("on");
+      try {
+        paint(await api(`/api/prompt?agent=${encodeURIComponent(agent.id)}`));
+      } catch (error) {
+        view.textContent = String(error.message || error);
+      }
+    });
+    picker.append(chip);
+  }
+  group.append(picker);
+  paint(data);
+  group.append(view);
+  return group;
+}
+
+async function editPromptBlock(key, payload) {
+  const block = (payload.blocks || {})[key] || {};
+  const { body } = openSheet(block.label || "Prompt block");
+  body.append(el("div", "hint",
+    "This is the text itself. Every agent gets it on every turn. Clear the box "
+    + "and save to go back to the built-in version."));
+  const field = el("div", "field");
+  const input = el("textarea");
+  input.rows = 18;
+  input.className = "prompt-editor";
+  input.value = (payload.overrides || {})[key] || block.default || "";
+  field.append(input);
+  body.append(field);
+
+  const row = el("div", "row");
+  const save = el("button", "btn primary", "Save");
+  save.addEventListener("click", async () => {
+    save.textContent = "Saving…";
+    try {
+      await api("/api/settings", {
+        method: "PATCH",
+        body: JSON.stringify({ prompts: { [key]: input.value } }),
+      });
+      save.textContent = "Saved";
+    } catch (error) {
+      save.textContent = String(error.message || error).slice(0, 40);
+    }
+  });
+  const reset = el("button", "btn ghost", "Use the built-in text");
+  reset.addEventListener("click", () => { input.value = block.default || ""; });
+  row.append(save, reset);
+  body.append(row);
+}
+
 async function openSettings() {
   const { body, dismiss } = openSheet("Settings");
 
@@ -2596,6 +2796,8 @@ async function openSettings() {
   pushRow.append(enable, test);
   alerts.append(pushRow);
   body.append(alerts);
+
+  body.append(await promptGroup());
 
   const house = el("div", "group");
   house.append(el("h3", null, "Instructions"));
@@ -4191,7 +4393,14 @@ async function openCodeSession(jobId, sessionId = "", title = "", { pushHistory 
   if (title) meta.title = title;
   state.jobMeta.set(jobId, meta);
 
-  $("code-session-title").textContent = meta.title || title || "CODE session";
+  // One line, clipped with an ellipsis by `.topbar .title h1 .name-text`. The
+  // brief itself belongs in the transcript, not across the whole header.
+  const titleName = $("code-session-title-name");
+  if (titleName) {
+    const label = meta.title || title || "CODE session";
+    titleName.textContent = label;
+    titleName.title = label;
+  }
   $("code-session-sub").textContent = meta.session_id
     ? `session ${meta.session_id}`
     : jobId;

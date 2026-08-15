@@ -10,6 +10,10 @@ What it offers Director:
                                            the same harness the aiOS CODE tab
                                            drives, so a session started from
                                            the phone shows up there too.
+    code.answer                            answer a session that is sitting on
+                                           a question, so a CODE run is never
+                                           stuck waiting for a human who was
+                                           never told.
     shell / read_file / write_file         approval-gated access to this box,
                                            for jobs that are specifically about
                                            files or environment here.
@@ -64,6 +68,133 @@ _SKIP_ADAPTER = re.compile(
     r"Virtual|Local Area Connection\*|lcvpn|Wi-Fi Direct",
     re.I,
 )
+
+# Directories a project search must never walk into. Without this, one `find`
+# under C:\ spends its whole budget inside node_modules and AppData and comes
+# back empty, which reads to Director as "the folder does not exist".
+SKIP_DIRS = {
+    "node_modules", "__pycache__", ".git", ".venv", "venv", "env", ".tox",
+    "dist", "build", ".next", ".cache", "site-packages", "AppData",
+    "Windows", "$Recycle.Bin", "System Volume Information", "ProgramData",
+    "Program Files", "Program Files (x86)", ".gradle", ".m2", "OneDriveTemp",
+}
+FIND_DEFAULT_LIMIT = 40
+FIND_DEFAULT_DEPTH = 4
+# Marks that make a directory a plausible "project" rather than a random folder.
+PROJECT_MARKERS = (".git", "package.json", "pyproject.toml", "requirements.txt",
+                   "Cargo.toml", "go.mod", ".sln", "CMakeLists.txt")
+
+
+def search_roots() -> list[pathlib.Path]:
+    """Where a path search starts when Director does not name a root.
+
+    The repo itself first, then home, then the drives — cheapest and most
+    likely first, so a bounded walk finds `C:\\aiOS` before it wanders.
+    """
+    roots: list[pathlib.Path] = [ROOT, pathlib.Path.home()]
+    if sys.platform == "win32":
+        for letter in "CDEFG":
+            drive = pathlib.Path(f"{letter}:\\")
+            if drive.exists():
+                roots.append(drive)
+    else:
+        roots.append(pathlib.Path("/"))
+    seen: set[str] = set()
+    out: list[pathlib.Path] = []
+    for root in roots:
+        key = str(root).lower()
+        if key not in seen and root.is_dir():
+            seen.add(key)
+            out.append(root)
+    return out
+
+
+def _is_project(path: pathlib.Path) -> bool:
+    for marker in PROJECT_MARKERS:
+        try:
+            if (path / marker).exists():
+                return True
+        except OSError:
+            return False
+    return False
+
+
+def find_paths(name: str, roots: list[str] | None = None, *,
+               depth: int = FIND_DEFAULT_DEPTH,
+               limit: int = FIND_DEFAULT_LIMIT) -> list[dict]:
+    """Breadth-first hunt for directories whose name matches `name`.
+
+    Breadth-first on purpose: `C:\\aiOS` is one level down, and a depth-first
+    walk would spend the whole budget in the first deep subtree it enters.
+    """
+    needle = str(name or "").strip().lower()
+    if not needle:
+        return []
+    starts = [pathlib.Path(r).expanduser() for r in (roots or [])] or search_roots()
+    queue: list[tuple[pathlib.Path, int]] = [(p, 0) for p in starts if p.is_dir()]
+    hits: list[dict] = []
+    seen: set[str] = set()
+    scanned = 0
+    while queue and len(hits) < limit and scanned < 20000:
+        current, level = queue.pop(0)
+        key = str(current).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            entries = list(current.iterdir())
+        except OSError:
+            continue
+        scanned += 1
+        for entry in entries:
+            try:
+                if not entry.is_dir():
+                    continue
+            except OSError:
+                continue
+            if entry.name in SKIP_DIRS or entry.name.startswith("$"):
+                continue
+            if needle in entry.name.lower():
+                path_key = str(entry).lower()
+                if path_key not in {h["path"].lower() for h in hits}:
+                    hits.append({"path": str(entry), "name": entry.name,
+                                 "project": _is_project(entry)})
+                    if len(hits) >= limit:
+                        break
+            if level < max(1, int(depth)):
+                queue.append((entry, level + 1))
+    # A directory that looks like a real project outranks a same-named folder
+    # buried in a downloads pile.
+    hits.sort(key=lambda h: (not h["project"], len(h["path"])))
+    return hits
+
+
+def resolve_project(name: str) -> dict:
+    """Turn whatever Director was told into a real directory on this machine.
+
+    Accepts an absolute path, a bare folder name ("aiOS"), or a loose label
+    ("aiOS Director"). Returns the resolved path plus the candidates it
+    considered, so a wrong guess comes back as a choice rather than a failure.
+    """
+    raw = str(name or "").strip().strip('"').strip("'")
+    if not raw:
+        return {"ok": True, "path": str(ROOT), "candidates": [], "why": "default repo"}
+    direct = pathlib.Path(raw).expanduser()
+    if direct.is_dir():
+        return {"ok": True, "path": str(direct), "candidates": [], "why": "exact path"}
+    candidates = find_paths(raw)
+    if not candidates:
+        # "aiOS Director" is a label, not a folder: retry on the first word.
+        head = re.split(r"[\s/\\_-]+", raw)[0]
+        if head and head.lower() != raw.lower():
+            candidates = find_paths(head)
+    if not candidates:
+        return {"ok": False, "error": f"no directory matching {raw!r} on this machine",
+                "candidates": []}
+    exact = [c for c in candidates if c["name"].lower() == raw.lower()]
+    best = (exact or candidates)[0]
+    return {"ok": True, "path": best["path"], "candidates": candidates[:12],
+            "why": "exact name" if exact else "closest match"}
 
 
 def _format_mac(raw: str) -> str:
@@ -483,6 +614,10 @@ class CodeBridge:
             "status": status,
             "summary": summary,
             "title": str(meta.get("title") or ""),
+            # A session sitting on a question is not progress and not failure.
+            # Director has to be told, or the run waits for a human who was
+            # never asked.
+            "pending_question": str(meta.get("pending_question") or ""),
             "provider": str(meta.get("provider") or ""),
             "model": str(meta.get("model") or ""),
             "config_id": str(meta.get("config_id") or ""),
@@ -504,6 +639,21 @@ class CodeBridge:
     def stop(self, session_id: str) -> dict:
         jobs = self.harness()
         return jobs.stop_job(session_id)
+
+    def answer(self, session_id: str, text: str) -> dict:
+        """Answer whatever the session is waiting on and let it run again."""
+        jobs = self.harness()
+        try:
+            meta = jobs.get_job(session_id)
+        except Exception as exc:
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        if not meta:
+            return {"ok": False, "error": "no such CODE session"}
+        question = str(meta.get("pending_question") or "")
+        result = jobs.send_message(session_id, str(text or ""))
+        if isinstance(result, dict) and result.get("ok") is False:
+            return {"ok": False, "error": str(result.get("error") or "send refused")}
+        return {"ok": True, "question": question, "answered": str(text or "")[:400]}
 
 
 # ---------------- the link ----------------
@@ -699,10 +849,61 @@ class DirectorClient:
         return await asyncio.get_running_loop().run_in_executor(
             None, self.code.stop, str(payload.get("session_id") or ""))
 
+    async def do_code_answer(self, payload: dict) -> dict:
+        return await asyncio.get_running_loop().run_in_executor(
+            None, self.code.answer, str(payload.get("session_id") or ""),
+            str(payload.get("text") or ""))
+
+    async def do_list_dir(self, payload: dict) -> dict:
+        """List a directory here, or the drive roots when none is named."""
+        raw = str(payload.get("path") or "").strip()
+        limit = max(1, min(int(payload.get("limit") or 200), 500))
+        if not raw:
+            return {"ok": True, "path": "", "entries": [
+                {"name": str(root), "path": str(root), "dir": True}
+                for root in search_roots()]}
+        target = pathlib.Path(raw).expanduser()
+        if not target.is_dir():
+            resolved = resolve_project(raw)
+            if resolved.get("ok"):
+                target = pathlib.Path(resolved["path"])
+            else:
+                return {"ok": False, "error": f"no such directory: {raw}"}
+        entries = []
+        try:
+            listing = sorted(target.iterdir(),
+                             key=lambda p: (not p.is_dir(), p.name.lower()))
+        except OSError as exc:
+            return {"ok": False, "error": f"cannot list {target}: {exc}"}
+        for entry in listing[:limit]:
+            try:
+                is_dir = entry.is_dir()
+                size = 0 if is_dir else entry.stat().st_size
+            except OSError:
+                is_dir, size = False, 0
+            entries.append({"name": entry.name, "path": str(entry),
+                            "dir": is_dir, "size": size,
+                            "project": _is_project(entry) if is_dir else False})
+        return {"ok": True, "path": str(target), "entries": entries}
+
+    async def do_find_paths(self, payload: dict) -> dict:
+        roots = [str(r) for r in (payload.get("roots") or []) if str(r or "").strip()]
+        hits = await asyncio.get_running_loop().run_in_executor(
+            None, lambda: find_paths(
+                str(payload.get("name") or ""), roots,
+                depth=int(payload.get("depth") or FIND_DEFAULT_DEPTH),
+                limit=int(payload.get("limit") or FIND_DEFAULT_LIMIT)))
+        return {"ok": True, "matches": hits}
+
+    async def do_resolve_project(self, payload: dict) -> dict:
+        return await asyncio.get_running_loop().run_in_executor(
+            None, resolve_project, str(payload.get("project") or ""))
+
     async def follow_session(self, session_id: str, job_id: str,
                              meta: dict | None = None) -> None:
         """Poll the CODE session and stream its events/state back to Director."""
         last = ""
+        last_question = ""
         since = 0
         meta = dict(meta or {})
         deadline = time.time() + 7200
@@ -744,6 +945,18 @@ class DirectorClient:
                 return
             status = str(info.get("status") or "running").lower()
             summary = str(info.get("summary") or "")
+            question = str(info.get("pending_question") or "").strip()
+            # A question is the one state that stalls forever on its own. Send
+            # it once, as its own event, so Director can answer or relay it
+            # instead of watching a "running" session that will never move.
+            if question and question != last_question:
+                last_question = question
+                await self.emit(job_id, "code.question",
+                                {"job_id": job_id, "session_id": session_id,
+                                 "question": question, "status": status,
+                                 "title": str(info.get("title") or "")[:120]})
+            elif not question:
+                last_question = ""
             if summary and summary != last:
                 last = summary
                 await self.emit(job_id, "code.progress",

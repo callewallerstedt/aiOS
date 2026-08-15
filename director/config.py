@@ -138,6 +138,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # Standing instructions every agent sees. Edited from the phone Settings
     # screen; empty means none.
     "instructions": "",
+    # Overrides for the prompt blocks in agents.py, editable from the phone.
+    # An empty block falls back to what ships in the code, so clearing one is
+    # how you reset it.
+    "prompts": {"base": "", "coordinator": "", "group": ""},
     # Wake-on-LAN for calle-windows. The client refreshes ip/mac when it
     # connects; these are the house Ethernet NIC so a cold box can still
     # be woken before that hello arrives.

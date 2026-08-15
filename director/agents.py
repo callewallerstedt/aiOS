@@ -17,18 +17,23 @@ from . import routines as routines_mod
 from .tools import memory as memory_tools
 
 # Tool groups, so an agent definition reads as intent rather than a list.
-CORE_TOOLS = ["ask_user", "confirm", "remember", "forget", "recall",
+CORE_TOOLS = ["ask_user", "ask_yes_no", "confirm", "remember", "forget", "recall",
               "schedule", "list_schedules", "cancel_schedule",
               "list_agents", "message_agent", "search_chats"]
 COMMUNICATION_TOOLS = ["list_agents", "message_agent", "search_chats"]
 WEB_TOOLS = ["web_fetch", "web_search"]
 BOX_TOOLS = ["shell", "read_file", "write_file", "list_dir", "processes"]
 OPERATOR_TOOLS = ["operator", "operator_screenshot", "operator_takeover", "handoff"]
-CODE_TOOLS = ["code_session", "code_status", "code_stop", "code_configs", "machines"]
+CODE_TOOLS = ["code_session", "code_status", "code_stop", "code_configs",
+              "code_reply", "machines"]
+# The paired machine's filesystem, read-only. Without these Director has to
+# guess where a repo lives, and a guess costs a whole failed CODE job.
+MACHINE_TOOLS = ["machine_dirs", "machine_find"]
 GROUP_TOOLS = ["start_work", "react", "recall", "remember",
                "list_agents", "message_agent", "search_chats"]
 
-DIRECTOR_TOOLS = CORE_TOOLS + WEB_TOOLS + BOX_TOOLS + OPERATOR_TOOLS + CODE_TOOLS
+DIRECTOR_TOOLS = (CORE_TOOLS + WEB_TOOLS + BOX_TOOLS + OPERATOR_TOOLS
+                  + CODE_TOOLS + MACHINE_TOOLS)
 
 BASE_PROMPT = """You are part of aiOS Director, Calle's always-on assistant running
 on his Linux box at home. You talk to him through a phone app and through aiOS
@@ -56,7 +61,12 @@ How to be useful here:
   the background and you will be woken with the result — you do not have to sit
   and wait, and Calle can keep talking to you meanwhile.
 * Say what actually happened, including when it failed. Never claim a step
-  succeeded that you did not see succeed.
+  succeeded that you did not see succeed. If a tool came back with an error,
+  that is the result — report it in the same turn instead of describing what
+  you had intended to happen.
+* Never guess a file path, a folder or a repository location. Look it up:
+  `machine_find` and `machine_dirs` on the Windows desktop, `list_dir` and
+  `shell` here. Ask Calle only after looking has failed.
 * You can coordinate directly with another agent or group using `message_agent`.
   The message appears in that destination chat with your name on it and wakes
   the destination. Use `list_agents` for exact names and `search_chats` when
@@ -101,6 +111,14 @@ before the operator, the shell before a browser, your own knowledge before eithe
 
 CODE sessions:
 
+* Find the project before you dispatch. `machine_find` turns "aiOS" into
+  `C:\\aiOS`; `machine_dirs` shows what is on the machine. A project name you
+  invented is the single most common way a CODE job dies before it starts.
+* A CODE session that asks a question stops until it gets an answer. When one
+  comes in, deal with it in that turn: answer with `code_reply` when the answer
+  follows from what Calle already asked for, otherwise put the question to him
+  with `ask_yes_no` or `ask_user` and pass his answer through with `code_reply`.
+  Never leave a session waiting and never let it look like it is still working.
 * Before calling `code_session`, always ask which model configuration / provider
   to use — unless Calle already named one in this turn. Recommend
   **Balanced Engineering** (`harness-balanced-engineering`) as the default.
@@ -243,13 +261,19 @@ RETIRED_SPECIALIST_IDS = {
 
 
 def ensure_seeded() -> list[dict]:
-    """Bootstrap Director when needed and retire mandatory specialists.
+    """Bootstrap Director when needed, retire specialists, keep tools current.
 
-    An agent's tools are stored per row, so a built-in seeded before a tool
+    An agent's tools are stored per row, so an agent created before a tool
     existed would never learn about it. That is not a quiet degradation: asked
     to schedule something, Director went and edited the database by hand
-    instead, because the tool it needed was not on its list. The bootstrap
-    Director is reconciled while it exists; a custom agent keeps its choices.
+    instead, because the tool it needed was not on its list. It happened again
+    with paths — Björn, made in July, could not have called `machine_find` if
+    he had wanted to, so he guessed a project name and two CODE jobs died.
+
+    Every ordinary agent therefore follows the house toolset. Nothing narrows
+    an agent's tools today — the phone never sends a list, so every agent was
+    created with the full default of its day. A UI that lets Calle take tools
+    away will have to record that intent here, or this will hand them back.
 
     Director is created only when no usable ordinary agent exists, so it is a
     first-run bootstrap rather than a mandatory identity. Legacy Coder and
@@ -260,6 +284,13 @@ def ensure_seeded() -> list[dict]:
         current = existing.get(agent_id)
         if current is not None and not int(current.get("archived") or 0):
             store.update_agent(agent_id, {"archived": True})
+
+    for agent_id, agent in existing.items():
+        if (agent_id in RETIRED_SPECIALIST_IDS or int(agent.get("archived") or 0)
+                or store.is_group(agent) or agent_id in {s["id"] for s in DEFAULT_AGENTS}):
+            continue
+        if sorted(agent.get("tools") or []) != sorted(DIRECTOR_TOOLS):
+            store.update_agent(agent_id, {"tools": DIRECTOR_TOOLS})
 
     has_ordinary_agent = any(
         not int(agent.get("archived") or 0)
@@ -356,6 +387,30 @@ def house_instructions(settings: dict[str, Any] | None = None) -> str:
     return str(cfg.get("instructions") or "").strip()[:8000]
 
 
+# The blocks every agent is built from. They ship as code so a fresh box
+# behaves, and are overridable from settings so Calle can read and rewrite what
+# his agents are actually told without a deploy.
+PROMPT_BLOCKS = {
+    "base": ("How every agent behaves", BASE_PROMPT),
+    "coordinator": ("The coordinator role", DIRECTOR_PROMPT),
+    "group": ("Inside a group chat", GROUP_CHAT_PROMPT),
+}
+
+
+def prompt_block(name: str, settings: dict[str, Any] | None = None) -> str:
+    """A prompt block, as edited in settings or as shipped."""
+    cfg = settings if settings is not None else config.load_settings()
+    override = str(((cfg.get("prompts") or {}).get(name) or "")).strip()
+    default = PROMPT_BLOCKS.get(name, ("", ""))[1]
+    return (override or default).strip()[:20000]
+
+
+def prompt_defaults() -> dict[str, dict[str, str]]:
+    """What each editable block is called and what it says out of the box."""
+    return {name: {"label": label, "default": text.strip()}
+            for name, (label, text) in PROMPT_BLOCKS.items()}
+
+
 def _with_house_instructions(parts: list[str], settings: dict[str, Any] | None = None) -> None:
     text = house_instructions(settings)
     if text:
@@ -365,28 +420,57 @@ def _with_house_instructions(parts: list[str], settings: dict[str, Any] | None =
         )
 
 
-def system_prompt(agent: dict, settings: dict[str, Any] | None = None) -> str:
-    custom = str(agent.get("system_prompt") or "").strip()
-    parts = [BASE_PROMPT.strip(), identity_block(agent)]
+def prompt_sections(agent: dict,
+                    settings: dict[str, Any] | None = None) -> list[dict[str, str]]:
+    """The assembled prompt, in labelled pieces.
 
+    One source of truth for what an agent is told: `system_prompt` joins these,
+    and the settings screen shows the same list, so what Calle reads on the
+    phone is literally what the model gets.
+    """
+    cfg = settings if settings is not None else config.load_settings()
+    custom = str(agent.get("system_prompt") or "").strip()
+    sections: list[dict[str, str]] = [
+        {"key": "base", "label": "How every agent behaves",
+         "text": prompt_block("base", cfg), "editable": "settings"},
+        {"key": "identity", "label": "Who this agent is",
+         "text": identity_block(agent), "editable": "agent"},
+    ]
     # An agent Calle made himself is a Director too; his own instructions come
     # after the coordinator role rather than replacing it.
     if str(agent.get("kind") or "") == "custom":
-        parts.append(DIRECTOR_PROMPT.strip())
+        sections.append({"key": "coordinator", "label": "The coordinator role",
+                         "text": prompt_block("coordinator", cfg), "editable": "settings"})
         if custom:
-            parts.append(f"Calle's instructions for you, which you should follow and "
-                         f"may quote if he asks what they are:\n{custom}")
+            sections.append({
+                "key": "custom", "label": "Your instructions for this agent",
+                "text": ("Calle's instructions for you, which you should follow and "
+                         f"may quote if he asks what they are:\n{custom}"),
+                "editable": "agent"})
     elif custom:
-        parts.append(custom)
-
-    _with_house_instructions(parts, settings)
-    environment = environment_block(settings)
+        sections.append({"key": "custom", "label": "Your instructions for this agent",
+                         "text": custom, "editable": "agent"})
+    house = house_instructions(cfg)
+    if house:
+        sections.append({
+            "key": "instructions", "label": "Standing instructions (all agents)",
+            "text": ("Calle's standing instructions for every agent. Follow these "
+                     "unless they conflict with the hard rules above:\n" + house),
+            "editable": "settings"})
+    environment = environment_block(cfg)
     if environment:
-        parts.append(f"Context:\n{environment}")
+        sections.append({"key": "environment", "label": "Machines, time and screen",
+                         "text": f"Context:\n{environment}", "editable": "live"})
     remembered = memory_tools.memory_block()
     if remembered:
-        parts.append(remembered)
-    return "\n\n".join(part for part in parts if part)
+        sections.append({"key": "memory", "label": "What it remembers",
+                         "text": remembered, "editable": "live"})
+    return [s for s in sections if s["text"].strip()]
+
+
+def system_prompt(agent: dict, settings: dict[str, Any] | None = None) -> str:
+    return "\n\n".join(section["text"].strip()
+                       for section in prompt_sections(agent, settings))
 
 
 def resolve_member_ids(raw: list | None) -> list[str]:
@@ -424,10 +508,11 @@ def group_system_prompt(member: dict, group: dict, members: list[dict],
     ) or "nobody else"
     tags = ", ".join(f"@{row['name']}" for row in members) or "(just you)"
     rules = str(group.get("rules") or "").strip()
+    cfg = settings if settings is not None else config.load_settings()
     parts = [
-        BASE_PROMPT.strip(),
+        prompt_block("base", cfg),
         identity_block(member),
-        GROUP_CHAT_PROMPT.strip(),
+        prompt_block("group", cfg),
         f"This group is **{group.get('name') or 'Group'}**. The other people here: {others}.",
         f"Tag people with these exact handles: {tags}.",
     ]
@@ -439,8 +524,8 @@ def group_system_prompt(member: dict, group: dict, members: list[dict],
     private = private_thread_context(str(member.get("id") or ""))
     if private:
         parts.append(private)
-    _with_house_instructions(parts, settings)
-    environment = environment_block(settings)
+    _with_house_instructions(parts, cfg)
+    environment = environment_block(cfg)
     if environment:
         parts.append(f"Context:\n{environment}")
     remembered = memory_tools.memory_block()
