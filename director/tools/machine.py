@@ -1,4 +1,4 @@
-"""Looking around a paired machine's filesystem.
+"""Reaching onto a paired machine: its filesystem, and its shell.
 
 Director dispatches coding work to the Windows desktop by naming a project
 directory, and before this existed it had no way to learn what those
@@ -7,8 +7,11 @@ jobs died on "no such project directory" before Calle had to type `C:\\aiOS`
 himself. Guessing a path is not a judgement call the model should be making
 when the machine can simply be asked.
 
-Read-only on purpose. Writing and running things over there is what a CODE
-session is for.
+Looking is free and unguarded. `machine_shell` runs a real command over there
+and goes through an approval card, like the shell on this box — it is for
+answering questions about that machine (is the repo dirty, is the service up,
+what does this file say), not for editing code. Editing is what a CODE session
+is for, and it does that with tests and review.
 """
 from __future__ import annotations
 
@@ -112,4 +115,77 @@ async def machine_find(ctx: ToolContext, name: str = "", machine: str = "",
         output=listing,
         card={"title": "find", "preview": needle,
               "meta": f"{len(hits)} on {target['name']}", "tone": "ok", "body": listing},
+    )
+
+
+@tool(
+    "machine_read",
+    "Read a text file on a paired machine. Use it to check a config, a log or "
+    "a source file over there before deciding anything about it.",
+    {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "description": "Absolute path on that machine."},
+            "machine": {"type": "string", "description": "Machine name. Defaults to the online one."},
+        },
+        "required": ["path"],
+    },
+)
+async def machine_read(ctx: ToolContext, path: str = "", machine: str = "") -> ToolResult:
+    wanted = str(path or "").strip()
+    if not wanted:
+        return ToolResult(error="no path given")
+    target = _pick(ctx.hub, machine)
+    if target is None:
+        return ToolResult(error="no machine is online to read from")
+    result = await ctx.hub.call_machine(
+        target["id"], "read_file", {"path": wanted}, timeout=60.0)
+    if not result.get("ok"):
+        return ToolResult(error=str(result.get("error") or f"could not read {wanted}"))
+    content = str(result.get("content") or "")
+    return ToolResult(
+        output=content[:60000],
+        card={"title": "read", "preview": wanted, "meta": f"{len(content)} chars on "
+              f"{target['name']}", "tone": "ok"},
+    )
+
+
+@tool(
+    "machine_shell",
+    "Run a command on a paired machine — the Windows desktop — and get its "
+    "output. For questions about that machine: git status in a repo, whether a "
+    "service is up, what a command reports. Do not use it to edit code; that is "
+    "what a CODE session is for.",
+    {
+        "type": "object",
+        "properties": {
+            "command": {"type": "string", "description": "The command line to run."},
+            "cwd": {"type": "string", "description": "Working directory on that machine."},
+            "machine": {"type": "string", "description": "Machine name. Defaults to the online one."},
+        },
+        "required": ["command"],
+    },
+    destructive=True,
+    approval_summary=lambda args: f"Run on the Windows desktop: {str(args.get('command'))[:120]}",
+)
+async def machine_shell(ctx: ToolContext, command: str = "", cwd: str = "",
+                        machine: str = "") -> ToolResult:
+    line = str(command or "").strip()
+    if not line:
+        return ToolResult(error="no command given")
+    target = _pick(ctx.hub, machine)
+    if target is None:
+        return ToolResult(error="no machine is online to run that on")
+    result = await ctx.hub.call_machine(
+        target["id"], "shell", {"command": line, "cwd": str(cwd or "")}, timeout=200.0)
+    if not result.get("ok"):
+        return ToolResult(error=str(result.get("error") or "the command did not run"))
+    output = str(result.get("output") or "").strip()
+    code = int(result.get("exit_code") or 0)
+    first = output.splitlines()[0][:80] if output else ""
+    return ToolResult(
+        output=f"exit {code}\n{output[:6000]}" if output else f"exit {code}",
+        card={"title": "shell", "preview": line[:90],
+              "meta": f"{target['name']} · exit {code}" + (f" · {first}" if first else ""),
+              "tone": "ok" if code == 0 else "danger", "body": output},
     )

@@ -846,6 +846,12 @@ def test_operator_dispatch_ignores_legacy_short_checkpoint_arguments(director):
             started["job"] = job
             started["run"] = run
 
+        def live_jobs(self, kind=""):
+            return []          # nothing else is driving the screen
+
+        def take_job_notes(self, job_id):
+            return []
+
     ctx = ToolContext(
         agent=agent, thread_id=thread["id"],
         settings={"operator": {"review_every": 30}},

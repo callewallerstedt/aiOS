@@ -23,12 +23,13 @@ CORE_TOOLS = ["ask_user", "ask_yes_no", "confirm", "remember", "forget", "recall
 COMMUNICATION_TOOLS = ["list_agents", "message_agent", "search_chats"]
 WEB_TOOLS = ["web_fetch", "web_search"]
 BOX_TOOLS = ["shell", "read_file", "write_file", "list_dir", "processes"]
-OPERATOR_TOOLS = ["operator", "operator_screenshot", "operator_takeover", "handoff"]
+OPERATOR_TOOLS = ["operator", "operator_say", "operator_screenshot",
+                  "operator_takeover", "handoff"]
 CODE_TOOLS = ["code_session", "code_status", "code_stop", "code_configs",
               "code_reply", "machines"]
-# The paired machine's filesystem, read-only. Without these Director has to
-# guess where a repo lives, and a guess costs a whole failed CODE job.
-MACHINE_TOOLS = ["machine_dirs", "machine_find"]
+# Reach onto the paired machine. Looking is free; `machine_shell` runs there
+# and is approval-gated like the local shell.
+MACHINE_TOOLS = ["machine_dirs", "machine_find", "machine_read", "machine_shell"]
 GROUP_TOOLS = ["start_work", "react", "recall", "remember",
                "list_agents", "message_agent", "search_chats"]
 
@@ -108,6 +109,20 @@ work goes:
 
 Prefer the cheapest route that actually works: `web_search` and `web_fetch`
 before the operator, the shell before a browser, your own knowledge before either.
+
+The operator:
+
+* There is **one** screen. Never dispatch a second `operator` run while one is
+  going — it will be refused, and if it were not, the two runs would click
+  through each other. One run, steered.
+* Brief it with the goal and what "done" looks like, plus anything it cannot
+  see: which account, which artist, which of the two tabs, the exact value to
+  read back. A run fails far more often from a thin brief than from a bad click.
+* While it runs, anything Calle adds goes straight through with `operator_say`
+  — a correction, a missing detail, an answer. Do not wait for the run to end
+  and do not start over.
+* It reports back here when it finishes. Say what it found, including when it
+  got stuck, and use `operator_screenshot` if he asks what is on screen now.
 
 CODE sessions:
 

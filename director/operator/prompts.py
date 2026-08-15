@@ -21,6 +21,21 @@ screenshot. Call `finish` only when the task is done, blocked, or needs Calle.
 Coordinates are screen pixels, top-left is (0,0). The user message states the
 exact width and height; every x,y you emit must be inside that rectangle.
 
+Before every action, in your reasoning, settle three things:
+
+1. **Where am I?** Name the window and the state actually visible — not the one
+   you expect from the last step. A dialog, a cookie banner, a loading skeleton
+   or a wrong tab changes what the next click means.
+2. **What am I aiming at?** Name the control you are about to hit and where it
+   is on screen, and check your x,y actually lands on it. A click 40 pixels off
+   is a click on something else, and you will not notice until two steps later.
+3. **How will I know it worked?** Say what the next screenshot should show. On
+   the next step, check that against what you actually got, and say so.
+
+Clicking to see what happens is how runs get lost. If you cannot name the
+target, look first: scroll, wait for the page to settle, or read the window
+list. One deliberate look is cheaper than three blind clicks.
+
 Rules that matter:
 
 * Chrome on this display uses a persistent profile that is already signed in to
@@ -46,6 +61,14 @@ Rules that matter:
   genuinely prevents progress. Say exactly what Calle must do on the same screen.
 * Stop and answer "ask" when the task is ambiguous in a way that changes what
   you would do.
+* Calle can add instructions while you work. They arrive as "Calle added:" in
+  the history and as CALLE JUST SAID. Treat the newest one as the current
+  brief: it corrects or replaces what you were doing. Act on it immediately
+  rather than finishing your previous plan first.
+* Nothing is done because you clicked the button that does it. Before `finish`
+  with "done", the screenshot in front of you must show the result — the page
+  loaded, the value saved, the message sent. If it does not, keep working or
+  say plainly what you could not confirm.
 * When the task is finished, call `finish` with status "done" and put the ANSWER in `message` — any
   value you were sent to find (a price, a name, a code, a status) must appear
   there literally, because that text is what gets reported back.
@@ -76,6 +99,18 @@ ACTION_TOOLS = [
     _tool("scroll", "Scroll at a visible point; positive dy scrolls down and negative dy scrolls up.",
           {"x": COORD, "y": COORD,
            "dy": {"type": "integer", "minimum": -25, "maximum": 25}}, ["x", "y", "dy"]),
+    # The loop could always perform a drag; until now the model had no way to
+    # ask for one, which put sliders, range pickers, reordering and canvas work
+    # out of reach.
+    _tool("drag", "Press at one point, move, and release at another. For sliders, "
+                  "range handles, reordering lists and drawing.",
+          {"from": {"type": "array", "items": COORD, "minItems": 2, "maxItems": 2},
+           "to": {"type": "array", "items": COORD, "minItems": 2, "maxItems": 2},
+           "button": {"type": "string", "enum": ["left", "right", "middle"]}},
+          ["from", "to"]),
+    _tool("select_all_text", "Select everything in the focused field, so the next "
+                             "type_text replaces it instead of appending.",
+          {}, []),
     _tool("open_url", "Open a URL in the persistent Chrome profile. This is the preferred, reliable way to navigate to any named site.",
           {"url": {"type": "string"}}, ["url"]),
     _tool("wait", "Wait briefly for the desktop or page to settle.",
@@ -113,15 +148,24 @@ PROGRESS_REVIEW_TOOLS = [
 
 
 def task_message(task: str, width: int, height: int, history: str,
-                 windows: list[str] | None = None, feedback: str = "") -> str:
+                 windows: list[str] | None = None, feedback: str = "",
+                 notes: list[str] | None = None, step: int = 0) -> str:
     lines = [f"TASK: {task}", "", f"SCREEN: {width}x{height} pixels."]
+    if step:
+        lines.append(f"STEP: {step}")
     if windows:
         lines += ["", "OPEN WINDOWS: " + " | ".join(windows[:8])]
     if history:
         lines += ["", "HISTORY:", history]
     if feedback:
         lines += ["", "ACTION FEEDBACK:", feedback]
-    lines += ["", "Reason, then call exactly one action tool for the next step."]
+    if notes:
+        # Last, so it is the freshest thing in the prompt, and marked as an
+        # instruction rather than context.
+        lines += ["", "CALLE JUST SAID — this updates your task, follow it now:"]
+        lines += [f"- {note}" for note in notes[-5:]]
+    lines += ["", "State where you are, what you are aiming at, and what the next "
+                  "screenshot should show. Then call exactly one action tool."]
     return "\n".join(lines)
 
 

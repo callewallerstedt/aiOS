@@ -42,6 +42,21 @@ async def operator(ctx: ToolContext, task: str = "", review_every: int = 0,
     if ctx.depth > 2:
         return ToolResult(error="operator dispatch nested too deep")
 
+    # There is one screen and one mouse. Two runs at once fight over both: they
+    # click through each other's dialogs and neither finishes. It has happened
+    # — two runs started three minutes apart and both stalled.
+    live = ctx.hub.live_jobs("operator")
+    if live:
+        busy = live[0]
+        running = str((busy.get("request") or {}).get("task") or "")[:200]
+        return ToolResult(
+            error=f"the operator is already running job {busy['id']}: {running!r}. "
+                  "There is only one screen, so this was not started. Steer that "
+                  "run with `operator_say`, wait for it to report back, or stop "
+                  "it with `stop_job` if it is doing the wrong thing.",
+            card={"title": "operator", "preview": goal[:90], "meta": "already busy",
+                  "tone": "danger", "job_id": busy["id"]})
+
     # The checkpoint cadence is a user setting, not a planning choice. Ignore
     # legacy generated review_every/max_steps arguments so a coordinator cannot
     # quietly shorten the requested 30-step interval.
@@ -60,17 +75,60 @@ async def operator(ctx: ToolContext, task: str = "", review_every: int = 0,
     async def ask(question: str, **kwargs) -> str:
         return await ctx.ask_user(question, **kwargs)
 
+    hub = ctx.hub
+    job_id = job["id"]
+
     async def run() -> dict:
         return await operator_loop.run_task(
             goal, emit=emit, settings=ctx.settings, cancel=cancel,
-            ask_user=ask, review_every=interval)
+            ask_user=ask, review_every=interval,
+            follow_ups=lambda: hub.take_job_notes(job_id))
 
     ctx.hub.start_job(job, run)
     return ToolResult(
-        output=f"operator job {job['id']} started — it will report back here when it "
-               "finishes. Tell Calle what you kicked off, then stop.",
+        output=f"operator job {job_id} started — it will report back here when it "
+               "finishes. Tell Calle what you kicked off, then stop. If he adds "
+               "something while it runs, send it on with `operator_say` instead "
+               "of starting a second run.",
         card={"title": "operator", "preview": goal[:90], "meta": "running",
-              "tone": "accent", "job_id": job["id"], "job_kind": "operator"},
+              "tone": "accent", "job_id": job_id, "job_kind": "operator"},
+    )
+
+
+@tool(
+    "operator_say",
+    "Send an instruction to the operator run that is already going: a "
+    "correction, a detail it is missing, or an answer it needs. It reads this "
+    "before its next action and treats it as the current task. Use this "
+    "whenever Calle adds something mid-run — starting a second run is not "
+    "possible, because there is only one screen.",
+    {
+        "type": "object",
+        "properties": {
+            "text": {"type": "string",
+                     "description": "What the operator should know or do now."},
+            "job_id": {"type": "string",
+                       "description": "Operator job to steer. Defaults to the one running."},
+        },
+        "required": ["text"],
+    },
+)
+async def operator_say(ctx: ToolContext, text: str = "", job_id: str = "") -> ToolResult:
+    note = str(text or "").strip()
+    if not note:
+        return ToolResult(error="nothing to say")
+    live = ctx.hub.live_jobs("operator")
+    target = job_id.strip() or (live[0]["id"] if live else "")
+    if not target:
+        return ToolResult(error="no operator run is going right now — dispatch one "
+                                "with `operator` instead")
+    if not ctx.hub.note_job(target, note):
+        return ToolResult(error=f"operator job {target} is not running any more")
+    await ctx.emit("operator.note", {"job_id": target, "text": note})
+    return ToolResult(
+        output=f"passed to operator job {target}; it picks this up on its next step",
+        card={"title": "operator", "preview": note[:90], "meta": "steered",
+              "tone": "accent", "job_id": target},
     )
 
 

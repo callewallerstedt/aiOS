@@ -82,7 +82,8 @@ def scale_actions(actions: list[dict], factor: float) -> list[dict]:
 TOOL_ACTIONS = {
     "click": "click", "type_text": "type", "key": "key", "hotkey": "hotkey",
     "scroll": "scroll", "open_url": "open_url", "wait": "wait",
-    "launch_app": "launch", "shell": "shell",
+    "launch_app": "launch", "shell": "shell", "drag": "drag",
+    "select_all_text": "select_all",
 }
 
 
@@ -212,6 +213,9 @@ async def execute(action: dict, settings: dict) -> str:
         keys = [str(k) for k in (action.get("keys") or [])]
         await x11.hotkey(keys, settings)
         return f"hotkey {'+'.join(keys)}"
+    if kind == "select_all":
+        await x11.hotkey(["ctrl", "a"], settings)
+        return "selected all text in the focused field"
     if kind == "key_down":
         await x11.key_down(str(action.get("key") or ""), settings)
         return f"hold {action.get('key')}"
@@ -250,7 +254,8 @@ async def execute(action: dict, settings: dict) -> str:
 async def run_task(task: str, *, emit: Emit, settings: dict | None = None,
                    cancel: asyncio.Event | None = None,
                    ask_user: Callable[..., Awaitable[str]] | None = None,
-                   review_every: int = 0) -> dict:
+                   review_every: int = 0,
+                   follow_ups: Callable[[], list[str]] | None = None) -> dict:
     """Drive the screen until the task is done. Returns a result summary."""
     cfg = settings if settings is not None else config.load_settings()
     operator_cfg = cfg.get("operator", {}) or {}
@@ -270,6 +275,7 @@ async def run_task(task: str, *, emit: Emit, settings: dict | None = None,
     checkpoint_step = 0
     steps = 0
     last_performed = ""
+    notes: list[str] = []
 
     await emit("operator.started", {"task": task, "display": state.get("display"),
                                     "review_every": review_interval})
@@ -279,6 +285,15 @@ async def run_task(task: str, *, emit: Emit, settings: dict | None = None,
             await emit("operator.stopped", {"reason": "stopped by user", "steps": steps})
             return {"status": "stopped", "summary": "stopped by user", "steps": steps}
         steps += 1
+
+        # Anything Calle said since the last step outranks the original brief.
+        # There is one screen, so steering the run in flight is the only way to
+        # correct it without killing it and starting over.
+        if follow_ups is not None:
+            for note in follow_ups():
+                notes.append(note)
+                history.append(f"[{steps}] Calle added: {note[:400]}")
+                await emit("operator.note", {"step": steps, "text": note})
 
         width, height = await x11.screen_size(cfg)
         previous_image = last_shot[0] if last_shot else ""
@@ -301,7 +316,7 @@ async def run_task(task: str, *, emit: Emit, settings: dict | None = None,
         windows = await x11.window_list(settings=cfg)
         message = prompts.task_message(task, shot_w, shot_h,
                                        "\n".join(history[-MAX_HISTORY_STEPS:]),
-                                       windows, feedback)
+                                       windows, feedback, notes=notes, step=steps)
         items = [models.user_message([models.text_part(message), models.image_part(data_url)])]
 
         try:

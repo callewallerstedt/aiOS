@@ -76,6 +76,10 @@ class Runtime:
         # question_id -> the card a client should redraw if it opens or
         # reconnects while the question is still unanswered.
         self._open_questions: dict[str, dict] = {}
+        # job_id -> notes typed while that job runs. There is one screen, so a
+        # second operator run cannot start; steering the running one is the
+        # only sane way to add "no, the other button" mid-flight.
+        self._job_notes: dict[str, list[str]] = {}
 
     # ---------------- events ----------------
 
@@ -345,6 +349,7 @@ class Runtime:
                 result = {"status": "fail", "summary": f"{type(exc).__name__}: {exc}"}
             finally:
                 self._jobs.pop(job["id"], None)
+                self._job_notes.pop(job["id"], None)
             store.update_job(job["id"], status=str(result.get("status") or "done"),
                              result=result)
             await self.emit("job.finished", {"id": job["id"], "kind": job["kind"], **result},
@@ -354,6 +359,33 @@ class Runtime:
             return result
 
         self._jobs[job["id"]] = asyncio.create_task(runner())
+
+    def live_jobs(self, kind: str = "") -> list[dict]:
+        """Jobs actually running in this process, not rows that say so.
+
+        A row left at "running" by a restart is not a live job, and treating it
+        as one would block the screen forever.
+        """
+        rows = []
+        for job_id, task in list(self._jobs.items()):
+            if task.done():
+                continue
+            row = store.get_job(job_id)
+            if row and (not kind or row.get("kind") == kind):
+                rows.append(row)
+        return rows
+
+    def note_job(self, job_id: str, text: str) -> bool:
+        """Hand a running job a note it will read on its next step."""
+        task = self._jobs.get(job_id)
+        if task is None or task.done():
+            return False
+        self._job_notes.setdefault(job_id, []).append(str(text or "").strip())
+        return True
+
+    def take_job_notes(self, job_id: str) -> list[str]:
+        """Drain the notes for a job. Read once, then acted on."""
+        return [n for n in self._job_notes.pop(job_id, []) if n]
 
     async def _report_job(self, job: dict, result: dict) -> None:
         """Feed a finished job back into the conversation as a fresh turn."""
