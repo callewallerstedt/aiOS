@@ -1,4 +1,4 @@
-"""Provider-neutral context manifests for aiOS CODE session handoffs.
+"""Provider-neutral context manifests for aiOS CODE session/model handoffs.
 
 Native Claude Code, Codex, and Cursor session ids are intentionally never
 treated as interchangeable.  This module builds a bounded, versioned snapshot
@@ -274,8 +274,10 @@ def validate_manifest(manifest: dict) -> None:
     for key in ("handoff_id", "logical_session", "source", "target", "context"):
         if not manifest.get(key):
             raise ValueError(f"handoff manifest is missing {key}")
-    if manifest["source"].get("provider") == manifest["target"].get("provider"):
-        raise ValueError("provider handoff requires a different target provider")
+    source = manifest["source"]
+    target = manifest["target"]
+    if all(source.get(key) == target.get(key) for key in ("provider", "model", "reasoning", "fast")):
+        raise ValueError("handoff requires a different provider, model, reasoning level, or speed tier")
     if not manifest["logical_session"].get("cwd"):
         raise ValueError("handoff manifest is missing cwd")
 
@@ -297,7 +299,7 @@ def bridge_prompt(manifest: dict) -> str:
     """Create the first user input for the fresh target provider session."""
     serialized = serialize_manifest(manifest)
     return (
-        "You are continuing an aiOS CODE logical session after a provider handoff. "
+        "You are continuing an aiOS CODE logical session after a provider or model handoff. "
         "This is a new native provider session, not a native transcript resume.\n\n"
         "Use the provider-neutral manifest below as continuity context. Treat the current working "
         "directory and on-disk files as the source of truth, inspect them before editing, preserve "

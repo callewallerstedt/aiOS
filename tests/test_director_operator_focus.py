@@ -1,114 +1,167 @@
-"""Nag dialogs that steal the keyboard.
+"""Input-target and progress invariants for the desktop operator."""
+from __future__ import annotations
 
-On 2026-08-15 an operator run typed a six-digit 2FA code into nothing for
-sixty steps. Five modal dialogs were stacked behind Chrome — two Ubuntu crash
-reporters, "Google Chrome has closed unexpectedly", a release-upgrade prompt
-and Software Updater. They held keyboard focus, so pointer clicks still landed
-on the page and only the keystrokes went nowhere. Nothing in the screenshot
-looked wrong, and the model had no way to tell.
-"""
 import asyncio
+import inspect
 
 import pytest
 
 from director.operator import display as display_mod
+from director.operator import loop, x11
 
 
-class FakeRun:
-    """Stands in for wmctrl: a window list, and a record of what was closed."""
+class FakeXdotool:
+    def __init__(self, *, pointer="200", active="100", activation_fails=False):
+        self.pointer = pointer
+        self.active = active
+        self.activation_fails = activation_fails
+        self.calls = []
 
-    def __init__(self, listing, fail=False):
-        self.listing = listing
-        self.fail = fail
-        self.closed = []
-
-    async def __call__(self, argv, timeout=20.0, env=None):
-        if argv[:2] == ["wmctrl", "-l"]:
-            return (1, "") if self.fail else (0, self.listing)
-        if argv[:2] == ["wmctrl", "-ic"]:
-            self.closed.append(argv[2])
+    async def __call__(self, *args, settings=None):
+        self.calls.append(args)
+        if args[:2] == ("getmouselocation", "--shell"):
+            return 0, f"X=10\nY=20\nWINDOW={self.pointer}"
+        if args == ("getactivewindow",):
+            return 0, self.active
+        if args[:2] == ("windowactivate", "--sync"):
+            if self.activation_fails:
+                return 1, "activation denied"
+            self.active = args[2]
             return 0, ""
+        if args[:2] == ("windowfocus", "--sync"):
+            return 1, "focus denied"
+        if args and args[0] == "getwindowname":
+            return 0, "Browser"
         return 0, ""
 
 
-LISTING = "\n".join([
-    "0x00600003  0 calle-linux Software Updater",
-    "0x03400003  0 calle-linux Ubuntu 24.04.4 LTS Upgrade Available",
-    "0x02c00004  0 calle-linux DistroKid - Google Chrome",
-    "0x01000001  0 calle-linux Sorry, Ubuntu 22.04 has experienced an internal error",
-    "0x01000002  0 calle-linux The application Google Chrome has closed unexpectedly",
-    "0x03e00003 -1 calle-linux @!0,0;BDHF",
-])
+async def _handled(value):
+    return {"handled": value}
 
 
-def test_the_nags_are_found_and_the_real_window_is_not(monkeypatch):
-    monkeypatch.setattr(display_mod, "_run", FakeRun(LISTING))
-    found = asyncio.run(display_mod.stray_dialogs({}))
-    assert len(found) == 4
-    blob = " ".join(found).casefold()
-    assert "software updater" in blob
-    assert "upgrade available" in blob
-    assert "internal error" in blob
-    assert "closed unexpectedly" in blob
-    assert "distrokid" not in blob, "the browser is the task, not a nag"
+def test_pointer_window_is_activated_before_click(monkeypatch):
+    fake = FakeXdotool()
+    monkeypatch.setattr(x11, "xdotool", fake)
+    monkeypatch.setattr(x11, "accessible_click", lambda *args, **kwargs: _handled(False))
+
+    asyncio.run(x11.click(40, 50, settings={}))
+
+    activate = fake.calls.index(("windowactivate", "--sync", "200"))
+    click = next(index for index, call in enumerate(fake.calls) if call[0] == "click")
+    assert activate < click
+    assert fake.active == "200"
 
 
-def test_closing_them_leaves_the_browser_alone(monkeypatch):
-    fake = FakeRun(LISTING)
-    monkeypatch.setattr(display_mod, "_run", fake)
-    closed = asyncio.run(display_mod.dismiss_stray_dialogs({}))
-    assert len(closed) == 4
-    assert "0x02c00004" not in fake.closed, "that is the page being worked on"
-    assert set(fake.closed) == {"0x00600003", "0x03400003", "0x01000001", "0x01000002"}
+def test_keyboard_action_refuses_to_claim_success_without_focus(monkeypatch):
+    fake = FakeXdotool(activation_fails=True)
+    monkeypatch.setattr(x11, "xdotool", fake)
+
+    with pytest.raises(RuntimeError, match="could not focus pointer window"):
+        asyncio.run(x11.press("tab", settings={}))
+    assert not any(call and call[0] == "key" for call in fake.calls)
 
 
-def test_a_clean_desktop_closes_nothing(monkeypatch):
-    fake = FakeRun("0x02c00004  0 calle-linux DistroKid - Google Chrome")
-    monkeypatch.setattr(display_mod, "_run", fake)
-    assert asyncio.run(display_mod.dismiss_stray_dialogs({})) == []
-    assert fake.closed == []
+def test_keyboard_action_keeps_an_already_focused_target(monkeypatch):
+    fake = FakeXdotool(pointer="200", active="200")
+    monkeypatch.setattr(x11, "xdotool", fake)
+
+    asyncio.run(x11.hotkey(["ctrl", "l"], settings={}))
+
+    assert not any(call and call[0] in {"windowactivate", "windowfocus"} for call in fake.calls)
+    assert ("key", "--clearmodifiers", "ctrl+l") in fake.calls
 
 
-def test_no_window_manager_is_not_an_error(monkeypatch):
-    """wmctrl is missing on a dev box; the run must still start."""
-    monkeypatch.setattr(display_mod, "_run", FakeRun("", fail=True))
-    assert asyncio.run(display_mod.stray_dialogs({})) == []
+def test_screen_signature_ignores_tiny_change_but_detects_page_change():
+    previous = bytes([4] * 100)
+    tiny = bytes([8] + [4] * 99)
+    different = bytes([8] * 100)
+
+    assert x11.image_change_ratio(previous, tiny) == pytest.approx(0.01)
+    assert x11.image_change_ratio(previous, different) == pytest.approx(1.0)
 
 
-def test_a_title_with_spaces_survives_the_parse(monkeypatch):
-    fake = FakeRun("0x00600003  0 calle-linux Software Updater")
-    monkeypatch.setattr(display_mod, "_run", fake)
-    assert asyncio.run(display_mod.stray_dialogs({})) == ["0x00600003 Software Updater"]
+def test_action_signatures_group_same_effect_without_exposing_typed_text():
+    first = loop.action_signature({"type": "click", "x": 100, "y": 100})
+    nearby = loop.action_signature({"type": "click", "x": 108, "y": 111})
+    typed = loop.action_signature({"type": "type", "text": "private value"})
+
+    assert first == nearby
+    assert typed[1] == len("private value")
+    assert "private value" not in str(typed)
 
 
-def test_chrome_is_launched_without_the_bubble_that_eats_the_keyboard():
-    """`--disable-session-crashed-bubble` covers the old infobar only; current
-    Chrome shows a "Restore pages?" bubble that takes keyboard focus."""
-    argv = display_mod.chrome_argv("", {}) if hasattr(display_mod, "chrome_argv") else None
-    if argv is None:  # the builder is private; read the source instead
-        import inspect
-        argv = inspect.getsource(display_mod)
-    blob = " ".join(argv) if isinstance(argv, list) else argv
-    assert "--hide-crash-restore-bubble" in blob
-    assert "--disable-session-crashed-bubble" in blob
-
-
-def test_the_run_clears_them_before_it_starts():
-    import inspect
-
-    from director.operator import loop
-
+def test_operator_loop_has_a_bounded_unchanged_action_budget():
     source = inspect.getsource(loop.run_task)
-    assert "dismiss_stray_dialogs" in source
-    before = source.index("dismiss_stray_dialogs")
-    assert before < source.index("while True:"), "must happen before the first step"
+    assert "MAX_REPEATED_NO_EFFECT_ROUNDS" in source
+    assert "MAX_DISTINCT_ACTIONS_ON_SCREEN" in source
+    assert "actions_on_screen" in source
+    assert "operator.stuck" in source
 
 
-def test_an_unchanged_screen_looks_for_a_dialog_that_appeared_mid_run():
-    import inspect
+def test_unchanged_loop_executes_once_then_stops(monkeypatch):
+    events = []
+    model_calls = []
+    executed = []
 
-    from director.operator import loop
+    async def ready(*_args, **_kwargs):
+        return {"ready": True, "display": ":0"}
 
-    source = inspect.getsource(loop.run_task)
-    assert source.count("dismiss_stray_dialogs") >= 2
-    assert "did not reach the" in source, "the model must be told to retype"
+    async def size(*_args, **_kwargs):
+        return 100, 100
+
+    async def capture(*_args, **_kwargs):
+        return b"same-screen"
+
+    async def windows(*_args, **_kwargs):
+        return ["Browser"]
+
+    async def complete(**_kwargs):
+        model_calls.append(True)
+        return {
+            "tool_calls": [{
+                "name": "click",
+                "arguments": '{"x": 48, "y": 48}',
+            }],
+            "reasoning": "try the visible control",
+            "model": "test",
+        }
+
+    async def execute(action, _settings):
+        executed.append(action)
+        return "click (48,48)"
+
+    async def emit(kind, payload):
+        events.append((kind, payload))
+
+    monkeypatch.setattr(loop.display_mod, "ensure_running", ready)
+    monkeypatch.setattr(loop.x11, "screen_size", size)
+    monkeypatch.setattr(loop.x11, "capture", capture)
+    monkeypatch.setattr(loop.x11, "encode_jpeg", lambda _data: ("data:image/jpeg;base64,x", 100, 100))
+    monkeypatch.setattr(loop.x11, "image_signature", lambda _data: bytes([5] * 100))
+    monkeypatch.setattr(loop.x11, "window_list", windows)
+    monkeypatch.setattr(loop.models, "complete", complete)
+    monkeypatch.setattr(loop, "execute", execute)
+    monkeypatch.setattr(loop, "background", lambda: "")
+
+    result = asyncio.run(loop.run_task(
+        "click the control", emit=emit,
+        settings={"operator": {"review_every": 30}},
+    ))
+
+    assert result["status"] == "stopped"
+    assert result["steps"] == loop.MAX_REPEATED_NO_EFFECT_ROUNDS + 2
+    assert len(executed) == 1
+    assert len(model_calls) == loop.MAX_REPEATED_NO_EFFECT_ROUNDS + 1
+    assert events[-1][0] == "operator.stuck"
+
+
+def test_chrome_prevents_restore_bubbles_at_startup():
+    source = inspect.getsource(display_mod)
+    assert "--hide-crash-restore-bubble" in source
+    assert "--disable-session-crashed-bubble" in source
+
+
+def test_operator_does_not_close_windows_by_matching_titles():
+    source = inspect.getsource(display_mod) + inspect.getsource(loop.run_task)
+    assert "NAG_TITLES" not in source
+    assert "dismiss_stray_dialogs" not in source

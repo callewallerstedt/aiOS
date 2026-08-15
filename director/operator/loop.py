@@ -7,6 +7,7 @@ emits events so the phone can watch the work happen and step in.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 import shlex
@@ -19,11 +20,60 @@ from . import prompts, x11
 Emit = Callable[[str, dict], Awaitable[None]]
 
 MAX_HISTORY_STEPS = 12
+MEANINGFUL_SCREEN_CHANGE = 0.005
+MAX_REPEATED_NO_EFFECT_ROUNDS = 3
+MAX_DISTINCT_ACTIONS_ON_SCREEN = 12
 # The operator's own memory, kept apart from the coordinator's so notes about
 # which button moved and where a login lives do not fill every chat's prompt.
 MEMORY_SCOPE = "operator"
 RECALL_RUNS = 6
 JSON_BLOCK = re.compile(r"(?s)\{.*\}")
+
+
+def action_signature(action: dict[str, Any]) -> tuple[Any, ...] | None:
+    """Describe an action by effect so unchanged-screen retries can be caught."""
+    kind = str(action.get("type") or "").strip().casefold()
+
+    def bucket(value: Any) -> int:
+        try:
+            return int(float(value or 0)) // 24
+        except (TypeError, ValueError, OverflowError):
+            return 0
+
+    def point(value: Any) -> tuple[int, int]:
+        if not isinstance(value, (list, tuple)) or len(value) < 2:
+            return 0, 0
+        return bucket(value[0]), bucket(value[1])
+
+    def integer(value: Any, default: int = 0) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError, OverflowError):
+            return default
+
+    if kind in {"click", "double_click", "right_click"}:
+        return (kind, bucket(action.get("x")), bucket(action.get("y")),
+                str(action.get("button") or "left"), integer(action.get("clicks"), 1))
+    if kind == "type":
+        text = str(action.get("text") or "")
+        return (kind, len(text), hashlib.sha256(text.encode("utf-8")).hexdigest()[:12])
+    if kind in {"key", "press", "key_down", "key_up"}:
+        return (kind, str(action.get("key") or "").casefold(),
+                integer(action.get("presses"), 1))
+    if kind == "hotkey":
+        return (kind, tuple(str(key).casefold() for key in (action.get("keys") or [])))
+    if kind == "scroll":
+        amount = integer(action.get("dy"))
+        return (kind, bucket(action.get("x")), bucket(action.get("y")),
+                1 if amount > 0 else -1, min(abs(amount), 25))
+    if kind == "select_all":
+        return (kind, bucket(action.get("x")), bucket(action.get("y")))
+    if kind == "drag":
+        return (kind, *point(action.get("from")), *point(action.get("to")))
+    if kind in {"open_url", "launch", "shell"}:
+        value = str(action.get("url") or action.get("command") or "")
+        return (kind, hashlib.sha256(value.encode("utf-8")).hexdigest()[:12])
+    return None
 
 
 def parse_reply(text: str) -> dict:
@@ -305,24 +355,30 @@ async def run_task(task: str, *, emit: Emit, settings: dict | None = None,
     history: list[str] = []
     review_history: list[str] = []
     need_screen = True
-    last_shot: tuple[str, int, int] | None = None
-    checkpoint_shot: tuple[str, int, int] | None = None
+    last_shot: tuple[str, int, int, bytes] | None = None
+    checkpoint_shot: tuple[str, int, int, bytes] | None = None
     checkpoint_step = 0
     steps = 0
     last_performed = ""
     notes: list[str] = []
-
-    # A nag dialog behind the browser takes the keyboard without changing
-    # anything the screenshot shows: clicks still land on the page, keystrokes
-    # go to the modal. Sixty steps of a 2FA code went nowhere that way. Clear
-    # them before the run rather than making the model diagnose it.
-    dismissed = await display_mod.dismiss_stray_dialogs(cfg)
+    actions_on_screen: set[tuple[Any, ...]] = set()
+    screen_state_signature = b""
+    repeated_no_effect_rounds = 0
+    max_repeated_no_effect = max(
+        2, int(operator_cfg.get("max_repeated_no_effect_rounds")
+               or MAX_REPEATED_NO_EFFECT_ROUNDS))
+    max_distinct_actions = max(
+        max_repeated_no_effect + 1,
+        int(operator_cfg.get("max_distinct_actions_on_screen")
+            or MAX_DISTINCT_ACTIONS_ON_SCREEN))
+    meaningful_change = max(
+        0.0001, min(float(operator_cfg.get("meaningful_screen_change")
+                         or MEANINGFUL_SCREEN_CHANGE), 1.0))
 
     recalled = background()
     await emit("operator.started", {"task": task, "display": state.get("display"),
                                     "review_every": review_interval,
-                                    "recalled": bool(recalled),
-                                    "dismissed": dismissed})
+                                    "recalled": bool(recalled)})
 
     while True:
         if cancel.is_set():
@@ -340,33 +396,46 @@ async def run_task(task: str, *, emit: Emit, settings: dict | None = None,
                 await emit("operator.note", {"step": steps, "text": note})
 
         width, height = await x11.screen_size(cfg)
-        previous_image = last_shot[0] if last_shot else ""
+        screen_unchanged = False
         if need_screen or last_shot is None:
             png = await x11.capture(cfg)
             data_url, shot_w, shot_h = x11.encode_jpeg(png)
-            last_shot = (data_url, shot_w or width, shot_h or height)
+            signature = x11.image_signature(png)
+            last_shot = (data_url, shot_w or width, shot_h or height, signature)
+            if screen_state_signature:
+                screen_unchanged = (
+                    x11.image_change_ratio(screen_state_signature, signature)
+                    < meaningful_change
+                )
+                if not screen_unchanged:
+                    screen_state_signature = signature
+                    repeated_no_effect_rounds = 0
+                    actions_on_screen.clear()
+            else:
+                screen_state_signature = signature
             await emit("operator.screenshot", {"step": steps, "image": data_url,
                                                "width": last_shot[1], "height": last_shot[2]})
             if checkpoint_shot is None:
                 checkpoint_shot = last_shot
-        data_url, shot_w, shot_h = last_shot
+        data_url, shot_w, shot_h, _signature = last_shot
         factor = (width / float(shot_w)) if shot_w else 1.0
         feedback = ""
-        if previous_image and previous_image == data_url and last_performed:
+        if screen_unchanged and last_performed:
             feedback = (
                 f"The screen is unchanged after: {last_performed[:300]}. "
                 "Do not repeat that action; choose a different method.")
-            # One of these can open mid-run and quietly take the keyboard from
-            # here on. An unchanged screen is exactly when that has happened,
-            # so this is where it is worth looking again.
-            late = await display_mod.dismiss_stray_dialogs(cfg)
-            if late:
-                feedback += (" A dialog was sitting on top and holding the "
-                             f"keyboard ({'; '.join(late)}); it has been closed. "
-                             "Anything you typed before now did not reach the "
-                             "page — type it again.")
-                await emit("operator.note", {"step": steps,
-                                             "text": f"closed: {'; '.join(late)}"})
+        if (repeated_no_effect_rounds >= max_repeated_no_effect
+                or len(actions_on_screen) >= max_distinct_actions):
+            issue = (
+                "The operator exhausted distinct approaches or repeated actions that had no "
+                "visible effect on the same screen, so it stopped instead of looping."
+            )
+            await emit("operator.stuck", {
+                "steps": steps, "issue": issue,
+                "attempts": sorted(str(item) for item in actions_on_screen),
+            })
+            return {"status": "stopped", "summary": issue, "steps": steps,
+                    "issue": issue}
 
         windows = await x11.window_list(settings=cfg)
         message = prompts.task_message(task, shot_w, shot_h,
@@ -400,14 +469,31 @@ async def run_task(task: str, *, emit: Emit, settings: dict | None = None,
         })
 
         performed: list[str] = []
+        no_effect_action = False
         for action in actions:
             if cancel.is_set():
                 break
+            signature = action_signature(action)
+            if screen_unchanged and signature is not None and signature in actions_on_screen:
+                performed.append(
+                    f"{action.get('type')} blocked: that action already had no visible effect "
+                    "on this screen")
+                no_effect_action = True
+                continue
             try:
                 performed.append(await execute(action, cfg))
+                if signature is not None:
+                    actions_on_screen.add(signature)
             except Exception as exc:  # one bad action must not kill the run
                 performed.append(f"{action.get('type')} failed: {exc}")
+                no_effect_action = True
+                if signature is not None:
+                    actions_on_screen.add(signature)
             await asyncio.sleep(0.08)
+
+        if screen_unchanged:
+            repeated_no_effect_rounds = (
+                repeated_no_effect_rounds + 1 if no_effect_action else 0)
 
         if performed:
             await emit("operator.actions", {"step": steps, "performed": performed})
@@ -445,7 +531,10 @@ async def run_task(task: str, *, emit: Emit, settings: dict | None = None,
             await asyncio.sleep(0.15)
             png = await x11.capture(cfg)
             review_image, review_w, review_h = x11.encode_jpeg(png)
-            current_shot = (review_image, review_w or width, review_h or height)
+            current_shot = (
+                review_image, review_w or width, review_h or height,
+                x11.image_signature(png),
+            )
             await emit("operator.screenshot", {
                 "step": steps, "image": review_image,
                 "width": current_shot[1], "height": current_shot[2],

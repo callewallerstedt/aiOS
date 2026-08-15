@@ -155,49 +155,6 @@ def _get_recovery_lock() -> asyncio.Lock:
     return _recovery_lock
 
 
-# Desktop nags that open on top of everything and take the keyboard. They are
-# not part of any task, and on a box that gets restarted by deploys they pile
-# up: five of them once sat behind Chrome while the operator typed a 2FA code
-# into nothing for sixty steps. Clicks still landed on the page — only the
-# keystrokes went to the modal — so nothing about the screenshot looked wrong.
-NAG_TITLES = (
-    "software updater",
-    "upgrade available",
-    "system program problem",
-    "has experienced an internal error",
-    "closed unexpectedly",
-    "report problem",
-    "crash report",
-)
-
-
-async def stray_dialogs(settings: dict[str, Any] | None = None) -> list[str]:
-    """Titles of nag windows currently open on the operator display."""
-    code, out = await _run(["wmctrl", "-l"], timeout=10, env=display_env(settings))
-    if code != 0:
-        return []
-    found = []
-    for line in out.splitlines():
-        parts = line.split(None, 3)
-        if len(parts) < 4:
-            continue
-        window_id, title = parts[0], parts[3]
-        if any(nag in title.casefold() for nag in NAG_TITLES):
-            found.append(f"{window_id} {title}")
-    return found
-
-
-async def dismiss_stray_dialogs(settings: dict[str, Any] | None = None) -> list[str]:
-    """Close those nags. Returns what was closed, for the run log."""
-    closed = []
-    for row in await stray_dialogs(settings):
-        window_id, title = row.split(" ", 1)
-        code, _ = await _run(["wmctrl", "-ic", window_id], timeout=10, env=display_env(settings))
-        if code == 0:
-            closed.append(title)
-    return closed
-
-
 async def ensure_running(settings: dict[str, Any] | None = None, *,
                          with_chrome: bool = False) -> dict:
     """Start the virtual display if it is down. Idempotent.

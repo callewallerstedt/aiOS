@@ -94,18 +94,17 @@ def test_provider_switch_keeps_logical_job_and_starts_fresh_native_session(tmp_p
     monkeypatch.setattr(code_jobs, "provider_status", lambda provider: (True, f"{provider} ready"))
     monkeypatch.setattr(
         code_jobs,
-        "capabilities",
-        lambda force=False: {
-            "ok": True,
-            "providers": [
+        "_selection_capabilities",
+        lambda provider: next(
+            row for row in [
                 {"provider": "codex", "ready": True, "models": [
                     {"id": "gpt-test", "reasoning": ["high"], "fast": True}
                 ]},
                 {"provider": "claude", "ready": True, "models": [
                     {"id": "sonnet", "reasoning": ["high"], "fast": False}
                 ]},
-            ],
-        },
+            ] if row["provider"] == provider
+        ),
     )
     monkeypatch.setattr(
         code_handoff,
@@ -137,7 +136,7 @@ def test_provider_switch_keeps_logical_job_and_starts_fresh_native_session(tmp_p
         job.append(event.pop("kind"), event.pop("text", ""), **event)
     code_jobs._LIVE[job.id] = job
     queued = []
-    monkeypatch.setattr(job, "_queue_payload", lambda payload, attachments=None: queued.append(payload))
+    monkeypatch.setattr(job, "_queue_payload", lambda payload, attachments=None, **kwargs: queued.append(payload))
 
     result = code_jobs.handoff_job(
         job.id,
@@ -205,7 +204,7 @@ def test_active_handoff_interrupts_source_before_queuing_target(tmp_path, monkey
         return {"ok": True}
 
     monkeypatch.setattr(job, "stop", fake_stop)
-    monkeypatch.setattr(job, "_queue_payload", lambda payload, attachments=None: order.append(("queue", payload)))
+    monkeypatch.setattr(job, "_queue_payload", lambda payload, attachments=None, **kwargs: order.append(("queue", payload)))
 
     result = job.handoff("cursor", "composer-test", "auto", False)
 
@@ -261,3 +260,43 @@ def test_handoff_bridge_runs_as_first_target_turn_and_records_new_native_id(tmp_
     assert "Continue with backend wiring." in target_payloads[0]
     kinds = [event["kind"] for event in code_jobs.read_events(job.id, 0)["events"]]
     assert kinds.index("provider_switch") < kinds.index("result")
+
+
+def test_same_provider_model_change_uses_a_fresh_visible_segment(tmp_path, monkeypatch):
+    jobs_dir = tmp_path / "jobs"
+    jobs_dir.mkdir()
+    monkeypatch.setattr(code_jobs, "JOBS_DIR", jobs_dir)
+    monkeypatch.setattr(code_jobs, "provider_status", lambda _provider: (True, "ready"))
+    monkeypatch.setattr(code_jobs, "selection_error", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(code_handoff, "collect_worktree_changes", lambda _cwd: [])
+    job = code_jobs.CodeJob("modelchange")
+    job.directory.mkdir()
+    job.meta_path.write_text(json.dumps({
+        **base_meta(tmp_path),
+        "id": job.id,
+        "provider": "codex",
+        "model": "gpt-old",
+        "reasoning": "medium",
+        "status": "completed",
+        "queued": 0,
+        "native_session_id": "native-old",
+        "provider_sessions": [{
+            "provider": "codex", "model": "gpt-old", "reasoning": "medium",
+            "fast": False, "native_session_id": "native-old", "started_at": 1,
+        }],
+        "handoffs": [],
+    }), encoding="utf-8")
+    job.events_path.touch()
+    queued = []
+    monkeypatch.setattr(job, "_queue_payload", lambda payload, attachments=None, **kwargs: queued.append(payload))
+
+    result = job.handoff("codex", "gpt-new", "high", False)
+
+    assert result["ok"] is True
+    assert result["job"]["native_session_id"] == ""
+    assert result["job"]["provider_sessions"][-1]["model"] == "gpt-new"
+    assert len(queued) == 1
+    switch = next(event for event in code_jobs.read_events(job.id, 0)["events"] if event["kind"] == "provider_switch")
+    assert switch["from_provider"] == switch["to_provider"] == "codex"
+    assert switch["from_model"] == "gpt-old"
+    assert switch["to_model"] == "gpt-new"

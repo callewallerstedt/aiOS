@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import io
 import json
 import os
@@ -123,6 +124,23 @@ def encode_jpeg(png_bytes: bytes, *, max_width: int = 1400, quality: int = 68) -
         return f"data:image/jpeg;base64,{encoded}", img.width, img.height
 
 
+def image_signature(png_bytes: bytes, *, width: int = 64, height: int = 36) -> bytes:
+    """Return a compact perceptual screen signature for progress checks."""
+    if Image is None:
+        return hashlib.sha256(png_bytes).digest()
+    with Image.open(io.BytesIO(png_bytes)) as img:
+        resampling = getattr(getattr(Image, "Resampling", Image), "BILINEAR")
+        pixels = img.convert("L").resize((width, height), resampling).getdata()
+        return bytes(int(value) // 16 for value in pixels)
+
+
+def image_change_ratio(previous: bytes, current: bytes) -> float:
+    """Fraction of signature cells that changed by a visible amount."""
+    if not previous or not current or len(previous) != len(current):
+        return 1.0
+    return sum(abs(left - right) >= 2 for left, right in zip(previous, current)) / len(current)
+
+
 async def type_text(text: str, settings: dict[str, Any] | None = None) -> None:
     """Paste text without translating punctuation through the keyboard layout.
 
@@ -131,6 +149,7 @@ async def type_text(text: str, settings: dict[str, Any] | None = None) -> None:
     """
     if not text:
         return
+    await focus_pointer_window(settings)
     if shutil.which("xclip"):
         proc = await asyncio.create_subprocess_exec(
             "xclip", "-selection", "clipboard", "-in", "-quiet",
@@ -144,7 +163,8 @@ async def type_text(text: str, settings: dict[str, Any] | None = None) -> None:
             # xclip owns the selection until another X client requests it, so
             # Paste must happen before waiting for the process to exit.
             await asyncio.sleep(0.05)
-            await hotkey(["ctrl", "v"], settings)
+            await _checked_xdotool(
+                "key", "--clearmodifiers", "ctrl+v", settings=settings)
             await asyncio.sleep(0.05)
             return
         finally:
@@ -155,19 +175,22 @@ async def type_text(text: str, settings: dict[str, Any] | None = None) -> None:
                 except asyncio.TimeoutError:
                     proc.kill()
                     await proc.wait()
-    await xdotool("type", "--clearmodifiers", "--delay", "12", text, settings=settings)
+    await _checked_xdotool(
+        "type", "--clearmodifiers", "--delay", "12", text, settings=settings)
 
 
 async def press(key: str, presses: int = 1, settings: dict[str, Any] | None = None) -> None:
+    await focus_pointer_window(settings)
     sym = keysym(key)
     for _ in range(max(1, int(presses or 1))):
-        await xdotool("key", "--clearmodifiers", sym, settings=settings)
+        await _checked_xdotool("key", "--clearmodifiers", sym, settings=settings)
 
 
 async def hotkey(keys: list[str], settings: dict[str, Any] | None = None) -> None:
     combo = "+".join(keysym(k) for k in keys if str(k).strip())
     if combo:
-        await xdotool("key", "--clearmodifiers", combo, settings=settings)
+        await focus_pointer_window(settings)
+        await _checked_xdotool("key", "--clearmodifiers", combo, settings=settings)
 
 
 async def move(x: int, y: int, settings: dict[str, Any] | None = None) -> None:
@@ -184,6 +207,30 @@ async def pointer_window(settings: dict[str, Any] | None = None) -> str:
         if separator and key.strip() == "WINDOW" and value.strip().isdigit():
             return value.strip()
     return ""
+
+
+async def active_window(settings: dict[str, Any] | None = None) -> str:
+    """Return the window that will receive keyboard input."""
+    code, out = await xdotool("getactivewindow", settings=settings)
+    return out.strip() if code == 0 and out.strip().isdigit() else ""
+
+
+async def focus_pointer_window(settings: dict[str, Any] | None = None) -> str:
+    """Make mouse and keyboard actions target the same visible window."""
+    window = await pointer_window(settings)
+    if not window or await active_window(settings) == window:
+        return window
+    code, _ = await xdotool("windowactivate", "--sync", window, settings=settings)
+    if code != 0:
+        code, out = await xdotool("windowfocus", "--sync", window, settings=settings)
+        if code != 0:
+            raise RuntimeError(
+                f"could not focus pointer window {window}: {out or 'xdotool failed'}")
+    focused = await active_window(settings)
+    if focused != window:
+        raise RuntimeError(
+            f"pointer window {window} did not acquire keyboard focus (active {focused or 'unknown'})")
+    return window
 
 
 async def window_name(window: str, settings: dict[str, Any] | None = None) -> str:
@@ -221,7 +268,7 @@ async def click(x: int | None, y: int | None, button: str = "left", clicks: int 
     if x is not None and y is not None:
         await move(x, y, settings)
     button_code = str(BUTTONS.get(str(button or "left").lower(), 1))
-    window = await pointer_window(settings)
+    window = await focus_pointer_window(settings)
     if (x is not None and y is not None and button_code == "1"
             and int(clicks or 1) == 1):
         title = await window_name(window, settings)
@@ -245,7 +292,9 @@ async def mouse_down(x: int | None, y: int | None, button: str = "left",
                      settings: dict[str, Any] | None = None) -> None:
     if x is not None and y is not None:
         await move(x, y, settings)
-    await xdotool("mousedown", BUTTONS.get(str(button or "left").lower(), 1), settings=settings)
+    await focus_pointer_window(settings)
+    await _checked_xdotool(
+        "mousedown", str(BUTTONS.get(str(button or "left").lower(), 1)), settings=settings)
 
 
 async def mouse_up(x: int | None, y: int | None, button: str = "left",
@@ -286,7 +335,7 @@ async def scroll(x: int | None, y: int | None, dy: int = 3,
         await move(x, y, settings)
     amount = int(dy)
     button = "5" if amount > 0 else "4"       # 4 = wheel up, 5 = wheel down
-    window = await pointer_window(settings)
+    window = await focus_pointer_window(settings)
     args = ["click"]
     if window:
         args += ["--window", window]
