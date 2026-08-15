@@ -31,11 +31,15 @@ Write-Host "Deploying Director to $remote ..." -ForegroundColor Cyan
 & ssh @ssh $remote "mkdir -p ~/aios-director/director"
 
 # One archive, one copy. tar writes the file itself — piping binary through
-# PowerShell corrupts it. --force-local because GNU tar (the one Git for
-# Windows puts on PATH) reads "C:\..." as host "C", and the deploy dies with
-# "Cannot connect to C: resolve failed".
+# PowerShell corrupts it. GNU tar needs --force-local for Windows drive paths;
+# the BSD tar bundled with Windows handles them natively and rejects that flag.
 $tmp = Join-Path $env:TEMP "aios-director-deploy.tar.gz"
-& tar "--force-local" "-czf" $tmp "--exclude=__pycache__" "--exclude=*.pyc" "-C" $here "director"
+$tarHelp = (& tar --help 2>&1 | Out-String)
+$tarArgs = @("-czf", $tmp, "--exclude=__pycache__", "--exclude=*.pyc", "-C", $here, "director")
+if ($tarHelp -match "--force-local") {
+    $tarArgs = @("--force-local") + $tarArgs
+}
+& tar @tarArgs
 if ($LASTEXITCODE -ne 0) { throw "tar failed" }
 
 & scp @ssh $tmp "${remote}:/tmp/aios-director-deploy.tar.gz"
