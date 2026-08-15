@@ -312,10 +312,17 @@ async def run_task(task: str, *, emit: Emit, settings: dict | None = None,
     last_performed = ""
     notes: list[str] = []
 
+    # A nag dialog behind the browser takes the keyboard without changing
+    # anything the screenshot shows: clicks still land on the page, keystrokes
+    # go to the modal. Sixty steps of a 2FA code went nowhere that way. Clear
+    # them before the run rather than making the model diagnose it.
+    dismissed = await display_mod.dismiss_stray_dialogs(cfg)
+
     recalled = background()
     await emit("operator.started", {"task": task, "display": state.get("display"),
                                     "review_every": review_interval,
-                                    "recalled": bool(recalled)})
+                                    "recalled": bool(recalled),
+                                    "dismissed": dismissed})
 
     while True:
         if cancel.is_set():
@@ -349,6 +356,17 @@ async def run_task(task: str, *, emit: Emit, settings: dict | None = None,
             feedback = (
                 f"The screen is unchanged after: {last_performed[:300]}. "
                 "Do not repeat that action; choose a different method.")
+            # One of these can open mid-run and quietly take the keyboard from
+            # here on. An unchanged screen is exactly when that has happened,
+            # so this is where it is worth looking again.
+            late = await display_mod.dismiss_stray_dialogs(cfg)
+            if late:
+                feedback += (" A dialog was sitting on top and holding the "
+                             f"keyboard ({'; '.join(late)}); it has been closed. "
+                             "Anything you typed before now did not reach the "
+                             "page — type it again.")
+                await emit("operator.note", {"step": steps,
+                                             "text": f"closed: {'; '.join(late)}"})
 
         windows = await x11.window_list(settings=cfg)
         message = prompts.task_message(task, shot_w, shot_h,
