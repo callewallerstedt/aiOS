@@ -593,6 +593,28 @@ def test_claude_activity_stream_normalizes_thinking_and_tool_results(isolated_jo
     assert tool[1]["output"] == "2 passed"
 
 
+def test_thinking_stream_removes_provider_token_gaps_without_flattening_paragraphs(isolated_jobs):
+    job = code_jobs.CodeJob("thinkingwhitespace")
+    job.save(id=job.id, status="running")
+
+    thinking = job.activity_delta(
+        "thought-1",
+        "thinking",
+        "Thinking",
+        "one\n\n\n\n two\n\nnormal paragraph",
+        stream="summary",
+    )
+    command = job.activity_delta(
+        "command-1",
+        "command",
+        "Running command",
+        "one\n\n\n\n two",
+    )
+
+    assert thinking["delta"] == "one two\n\nnormal paragraph"
+    assert command["delta"] == "one\n\n\n\n two"
+
+
 def test_cursor_activity_stream_normalizes_tool_lifecycle(isolated_jobs):
     job = code_jobs.CodeJob("cursoractivity")
     job.save(id=job.id, status="running")

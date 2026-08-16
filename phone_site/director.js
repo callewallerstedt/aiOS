@@ -1063,6 +1063,24 @@ function settleThinking() {
   state.thinking = null;
 }
 
+function configureCodeJob(wrap, card, fallbackDetail = "") {
+  const id = String(card?.job_id || "");
+  if (!id) return;
+  const preview = String(card?.preview || fallbackDetail || "").trim();
+  wrap.classList.add("code-job");
+  wrap.dataset.jobId = id;
+  if (card?.session_id) wrap.dataset.sessionId = card.session_id;
+  wrap.dataset.jobTitle = preview;
+  const chip = wrap.querySelector(".tool-chip");
+  if (!chip) return;
+  chip.querySelector(".name").textContent = "aiOS CODE session";
+  chip.querySelector(".detail").textContent = preview
+    ? `AI-generated code session · ${preview}`
+    : "AI-generated code session";
+  chip.querySelector(".meta").textContent = "Open";
+  chip.setAttribute("aria-label", preview ? `Open aiOS CODE session: ${preview}` : "Open aiOS CODE session");
+}
+
 function toolCard({ callId, name, args, card, running }) {
   if (running) settleWorking();
   const wrap = el("div", `tool-card${running ? " running" : ""}`);
@@ -1103,10 +1121,7 @@ function toolCard({ callId, name, args, card, running }) {
   if (card?.job_id && (card?.job_kind === "operator" || name === "operator")) {
     configureOperatorJob(wrap, card.job_id);
   } else if (card?.job_id) {
-    wrap.classList.add("code-job");
-    wrap.dataset.jobId = card.job_id;
-    if (card.session_id) wrap.dataset.sessionId = card.session_id;
-    wrap.dataset.jobTitle = card.preview || detail;
+    configureCodeJob(wrap, card, detail);
   }
   if (callId) state.tools.set(callId, wrap);
   appendTranscript(wrap);
@@ -1146,10 +1161,7 @@ function finishTool(callId, name, card) {
   if (card?.job_id && (card?.job_kind === "operator" || name === "operator")) {
     configureOperatorJob(wrap, card.job_id);
   } else if (card?.job_id) {
-    wrap.classList.add("code-job");
-    wrap.dataset.jobId = card.job_id;
-    if (card.session_id) wrap.dataset.sessionId = card.session_id;
-    wrap.dataset.jobTitle = card.preview || "";
+    configureCodeJob(wrap, card);
   }
   if (card?.takeover) {
     const open = el("button", "btn ghost", "Open the screen");

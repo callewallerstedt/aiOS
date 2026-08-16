@@ -2410,7 +2410,31 @@ body .loading-pixels span { background: var(--accent); }
   font-size: 11px;
   font-weight: 600;
 }
-.tool-card.code-job .tool-chip { cursor: pointer; }
+.tool-card.code-job {
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface));
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--accent) 58%, transparent),
+    0 4px 18px color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.tool-card.code-job .tool-chip {
+  min-height: 38px;
+  cursor: pointer;
+}
+.tool-card.code-job .glyph,
+.tool-card.code-job .name,
+.tool-card.code-job .meta { color: var(--accent-ink); }
+.tool-card.code-job .detail { color: var(--ink-2); }
+.tool-card.code-job .meta {
+  padding: 4px 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  font-weight: 650;
+}
+.tool-card.code-job:active {
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 78%, transparent);
+}
 
 #screen-code {
   position: relative;

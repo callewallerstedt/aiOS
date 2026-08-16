@@ -1976,6 +1976,12 @@ class CodeJob:
     def activity_delta(self, activity_id: str, activity_type: str, title: str,
                        delta: Any, *, stream: str = "output", **extra: Any) -> dict | None:
         text = str(delta or "")
+        if str(activity_type or "").casefold() == "thinking":
+            # Some reasoning providers stream token separators as four or more
+            # newlines.  Keeping that transport artefact made the transcript
+            # render one word per paragraph.  Preserve ordinary paragraphs and
+            # lists, but join only the pathological 3+-blank-line separator.
+            text = re.sub(r"\n(?:[ \t]*\n){2,}[ \t]*", " ", text)
         if not text:
             return None
         key = str(activity_id)
