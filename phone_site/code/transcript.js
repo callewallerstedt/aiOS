@@ -33,7 +33,7 @@ const CHECK_ICON = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" 
 const X_ICON = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12" /></svg>';
 const SPARK_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l2.4 7.2L22 12l-7.6 2.8L12 22l-2.4-7.2L2 12l7.6-2.8z" /></svg>';
 // Exact inline SVGs from aicss.dev/components/task-list and /file-diff.
-const TODO_LIST_ICON = '<svg class="todoListIcon" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M8.25 6.75h12M8.25 12h12m-12 5.25h12M3.75 6.75h.007v.008H3.75V6.75Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0ZM3.75 12h.007v.008H3.75V12Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Zm-.375 5.25h.007v.008H3.75v-.008Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" /></svg>';
+const TODO_GRID_ICON = `<span class="todoGridIcon" aria-hidden="true">${"<span></span>".repeat(9)}</span>`;
 const TODO_CHEVRON_ICON = '<svg class="todoChevron" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="m19.5 8.25-7.5 7.5-7.5-7.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>';
 const TODO_HEAD_CHECK_ICON = '<svg class="todoHeadCheck" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill-rule="evenodd" clip-rule="evenodd" d="M2.25 12c0-5.385 4.365-9.75 9.75-9.75s9.75 4.365 9.75 9.75-4.365 9.75-9.75 9.75S2.25 17.385 2.25 12Zm13.36-1.814a.75.75 0 1 0-1.22-.872l-3.236 4.53L9.53 12.22a.75.75 0 0 0-1.06 1.06l2.25 2.25a.75.75 0 0 0 1.14-.094l3.75-5.25Z" fill="currentColor" /></svg>';
 const TODO_CHECK_ICON = '<svg class="todoIcon" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M9 12.75 11.25 15 15 9.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" /></svg>';
@@ -1392,8 +1392,7 @@ export class Transcript {
       const markup = type === "plan" ? `
         <button type="button" class="todoHead" aria-expanded="true" aria-label="Toggle to-dos">
           <span class="todoHeadIcon">
-            ${TODO_LIST_ICON}
-            <span class="todoHeadPie" aria-hidden="true"><svg class="todoHeadPieRing" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10.5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-dasharray="2.2 4.4" stroke-linecap="round" /></svg></span>
+            ${TODO_GRID_ICON}
             ${TODO_HEAD_CHECK_ICON}
             ${TODO_CHEVRON_ICON}
           </span>
@@ -1484,10 +1483,8 @@ export class Transcript {
     const activeIndex = steps.findIndex((step) => String(step.status || "") === "in_progress");
     const allDone = steps.length > 0 && completed === steps.length;
     const running = activeIndex >= 0 && !allDone;
-    const pct = Math.round((Math.min(Math.max(completed, 0), steps.length || 1) / (steps.length || 1)) * 100);
     node.classList.toggle("plan-active", running);
     node.classList.toggle("plan-complete", allDone);
-    node.style.setProperty("--todo-pie", `${pct}%`);
     node.querySelector(".todoHead")?.setAttribute("aria-expanded", String(node.classList.contains("expanded")));
     updateRollingCount(node.querySelector(".todoCount"), `${completed}/${steps.length}`);
     const icon = (markup, on) => on ? markup.replace('class="todoIcon', 'class="todoIcon on') : markup;
