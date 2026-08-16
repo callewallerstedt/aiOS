@@ -762,144 +762,99 @@
 .tool-run-thought > :first-child { margin-top: 0; }
 .tool-run-thought > :last-child { margin-bottom: 0; }
 
-/* aicss File Diff component, adapted only to aiOS theme tokens. */
-.tool-run-diffs {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 10px;
-  flex-wrap: initial;
-  border-top: 0;
-}
-.file-diff {
-  min-width: 0;
-  overflow: hidden;
-  padding: 12px 16px 16px;
-  border-radius: 12px;
-  background: var(--bui-surface);
-  box-shadow: 0 0 0 1px var(--bui-line), 0 2px 6px color-mix(in srgb, #000 10%, transparent);
-  font-family: var(--font-mono);
-}
-.file-diff-head {
-  width: 100%;
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin: 0;
-  padding: 0 0 10px;
-  border: 0;
-  border-bottom: 1px solid var(--bui-line);
-  background: transparent;
-  color: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-.file-diff-name { min-width: 0; display: flex; align-items: center; gap: 8px; color: var(--bui-ink); font-size: 12px; font-weight: 600; }
-.file-diff-name svg { width: 15px; height: 15px; flex: 0 0 15px; color: var(--bui-ink-3); }
-.file-diff-name span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.file-diff-stat { flex: 0 0 auto; display: flex; gap: 8px; font-size: 11px; }
-.file-diff-stat .add { color: var(--bui-green); }
-.file-diff-stat .del { color: var(--bui-red); }
-.file-diff-body {
-  position: relative;
-  max-height: 330px;
-  margin-top: 10px;
-  overflow: auto;
-  scrollbar-width: thin;
-}
-.file-diff-body::before {
-  content: "";
-  position: absolute;
-  inset: 0 auto 0 64px;
-  z-index: 2;
-  width: 1px;
-  background: var(--bui-line);
-  pointer-events: none;
-}
-.file-diff-row {
-  position: relative;
-  min-width: max-content;
-  display: grid;
-  grid-template-columns: 32px 32px 18px minmax(360px, 1fr);
-  align-items: stretch;
-  min-height: 22px;
-  color: var(--bui-ink-2);
-  font-size: 11.5px;
-  line-height: 22px;
-}
-.file-diff-row .ln { padding-right: 7px; color: var(--bui-ink-3); text-align: right; user-select: none; }
-.file-diff-row .sign { text-align: center; user-select: none; }
-.file-diff-row code { padding: 0 8px; color: inherit; font: inherit; white-space: pre; }
-.file-diff-row.add { color: color-mix(in srgb, var(--bui-green) 82%, var(--bui-ink)); background: color-mix(in srgb, var(--bui-green) 9%, transparent); }
-.file-diff-row.del { color: color-mix(in srgb, var(--bui-red) 82%, var(--bui-ink)); background: color-mix(in srgb, var(--bui-red) 9%, transparent); }
-.file-diff-row.add::after,
-.file-diff-row.del::after { content: ""; position: absolute; inset: 0 auto 0 64px; width: 2px; background: currentColor; opacity: .55; }
+/* Exact source from aicss.dev/components/file-diff. The aicss-diff parent only
+   scopes CSS-module class names so they cannot leak into aiOS. */
+.tool-run-diffs { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; flex-wrap: initial; border-top: 0; }
+.aicss-diff.diff { border-radius: 12px; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,0.05), 0 2px 4px rgba(0,0,0,0.02), 0 0 0 0.5px rgba(0,0,0,0.08); padding: 12px 16px 16px; overflow: hidden; font-family: ui-monospace, "SF Mono", Menlo, monospace; cursor: pointer; }
+.aicss-diff .diffHead { display: flex; align-items: center; gap: 8px; margin: -12px -16px 0; padding: 10px 12px 10px 16px; background: transparent; border-bottom: 0.5px solid #e6e8ec; font-size: 12.5px; }
+.aicss-diff .diffFileWrap { display: inline-flex; align-items: center; gap: 7px; min-width: 0; }
+.aicss-diff .diffIcon { display: block; width: 15px; height: 15px; color: #a1a1a1; flex: none; }
+.aicss-diff .diffFile { color: #1a1a1a; line-height: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.aicss-diff .diffStat { margin-left: auto; display: inline-flex; align-items: center; gap: 8px; font-size: 12px; line-height: 1; }
+.aicss-diff .diffStat .add { color: #15a06a; }
+.aicss-diff .diffStat .del { color: #dc2626; }
+.aicss-diff .diffBody { position: relative; margin: 0 -16px -16px; overflow: hidden; padding: 4px 0; font-size: 12.5px; line-height: 20px; }
+.aicss-diff .diffBody::before { content: ""; position: absolute; top: 0; bottom: 0; left: 64px; width: 0.5px; background: #e6e8eb; z-index: 1; }
+.aicss-diff .diffRow { position: relative; display: grid; grid-template-columns: 32px 32px 18px 1fr; align-items: stretch; }
+.aicss-diff .diffRow .ln, .aicss-diff .diffRow .sign { user-select: none; color: #a1a1a1; font-size: 11px; }
+.aicss-diff .diffRow .ln { text-align: right; padding: 0 7px; }
+.aicss-diff .diffRow .sign { text-align: center; }
+.aicss-diff .diffRow code { white-space: pre; padding: 0 12px 0 8px; color: #a1a1a1; }
+.aicss-diff .diffRow.add::before, .aicss-diff .diffRow.del::before { content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 3px; }
+.aicss-diff .diffRow.add::before { background: #15a06a; }
+.aicss-diff .diffRow.del::before { background: repeating-linear-gradient(45deg, #dc2626 0, #dc2626 1.5px, transparent 1.5px, transparent 3px); }
+.aicss-diff .diffRow.add { background: rgba(26, 127, 55, 0.09); }
+.aicss-diff .diffRow.add .sign, .aicss-diff .diffRow.add .new { color: #15a06a; }
+.aicss-diff .diffRow.add code { color: #1a1a1a; }
+.aicss-diff .diffRow.del { background: rgba(207, 34, 46, 0.09); }
+.aicss-diff .diffRow.del .sign, .aicss-diff .diffRow.del .old { color: #dc2626; }
+.aicss-diff .diffRow.del code { color: #1a1a1a; }
 
-/* aicss Todo List component with aiOS's active 3x3 pixel animation. */
-.tool-card.task-row.is-plan {
-  overflow: hidden;
-  padding: 6px 12px 12px;
-  border-radius: 8px;
-  background: var(--bui-surface);
-  box-shadow: 0 0 0 1px var(--bui-line);
-  cursor: pointer;
+/* Exact source from aicss.dev/components/task-list, scoped like its CSS module. */
+.tool-card.aicss-todo.todo { box-sizing: border-box; width: 100%; max-width: 920px; margin-inline: auto; font-family: "Inter", system-ui, sans-serif; font-size: 13px; color: #1a1a1a; background: #fff; border-radius: 8px; padding: 6px 12px 12px; box-shadow: 0 0 0 1px #e6e8ec; cursor: pointer; }
+.aicss-todo .todoHead { display: flex; width: 100%; align-items: center; gap: 8px; padding: 0; border: 0; background: transparent; cursor: pointer; color: #1a1a1a; font-size: 13px; min-height: 22px; }
+.aicss-todo .todoHeadIcon { position: relative; width: 16px; height: 16px; flex: none; color: #a1a1a1; }
+.aicss-todo .todoListIcon, .aicss-todo .todoChevron, .aicss-todo .todoHeadCheck { position: absolute; inset: 0; margin: auto; transition: opacity 140ms ease; }
+.aicss-todo .todoListIcon, .aicss-todo .todoChevron { width: 13px; height: 13px; }
+.aicss-todo .todoHeadCheck { width: 16px; height: 16px; color: #15a06a; opacity: 0; }
+.aicss-todo .todoChevron { opacity: 0; transition: opacity 140ms ease, transform 220ms ease; }
+.aicss-todo .todoHead[aria-expanded="false"] .todoChevron { transform: rotate(-90deg); }
+.aicss-todo.plan-active .todoListIcon, .aicss-todo.plan-complete .todoListIcon { opacity: 0; }
+.aicss-todo .todoHeadPie { display: none; }
+.aicss-todo.plan-active .todoHeadPie { display: block; }
+.aicss-todo.plan-complete .todoHeadCheck { opacity: 1; }
+.aicss-todo .todoHead:hover .todoListIcon, .aicss-todo .todoHead:hover .todoHeadPie, .aicss-todo .todoHead:hover .todoHeadCheck { opacity: 0; }
+.aicss-todo .todoHead:hover .todoChevron { opacity: 1; }
+.aicss-todo .todoTitle { font-weight: 500; }
+.aicss-todo .todoCount { margin-left: auto; color: #a1a1a1; font-variant-numeric: tabular-nums; }
+.aicss-todo .rollCount { display: inline-flex; align-items: baseline; }
+.aicss-todo .rollDigit { display: inline-block; overflow: hidden; height: 1em; line-height: 1em; }
+.aicss-todo .rollInner { display: flex; flex-direction: column; transition: transform 350ms cubic-bezier(0.4, 0, 0.2, 1); }
+.aicss-todo .rollInner span { height: 1em; line-height: 1em; }
+.aicss-todo .rollInner.on { transform: translateY(-1em); }
+.aicss-todo .todoCollapsible { display: grid; grid-template-rows: 1fr; opacity: 1; transition: grid-template-rows 280ms ease, opacity 200ms ease; }
+.aicss-todo:not(.expanded) .todoCollapsible { grid-template-rows: 0fr; opacity: 0; pointer-events: none; }
+.aicss-todo .todoInner { min-height: 0; overflow: hidden; }
+.aicss-todo .todoList { list-style: none; display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 10px 0 0; }
+.aicss-todo .todoItem { display: flex; align-items: flex-start; gap: 9px; line-height: 18px; color: #a1a1a1; animation: todo-item-in 360ms ease backwards; animation-delay: calc(var(--i, 0) * 50ms); }
+@keyframes todo-item-in { from { opacity: 0; transform: translateY(-7px); } to { opacity: 1; transform: translateY(0); } }
+.aicss-todo .todoIconWrap { position: relative; width: 16px; height: 16px; flex: none; margin-top: 1px; }
+.aicss-todo .todoIcon { position: absolute; inset: 0; width: 16px; height: 16px; color: #a1a1a1; opacity: 0; transition: opacity 320ms ease; }
+.aicss-todo .todoIcon.on { opacity: 1; }
+.aicss-todo .todoIcon.strong { color: #1a1a1a; }
+.aicss-todo .todoLabel { position: relative; font-weight: 400; color: #a1a1a1; transition: color 360ms ease; }
+.aicss-todo .todoLabel::before { content: attr(data-label); position: absolute; inset: 0; background: linear-gradient(90deg, #1a1a1a 0%, #1a1a1a 30%, rgba(26, 26, 26, 0.45) 45%, rgba(26, 26, 26, 0.45) 55%, #1a1a1a 70%, #1a1a1a 100%); background-size: 300% 100%; -webkit-background-clip: text; background-clip: text; color: transparent; -webkit-text-fill-color: transparent; opacity: 0; transition: opacity 360ms ease; pointer-events: none; }
+.aicss-todo .todoItem.active .todoLabel { color: transparent; }
+.aicss-todo .todoItem.active .todoLabel::before { opacity: 1; animation: todo-shine 2.25s cubic-bezier(0.25, 0.1, 0.25, 1) infinite; }
+.aicss-todo .todoItem.done .todoLabel { color: #a1a1a1; text-decoration: line-through; }
+@keyframes todo-shine { 0%, 18% { background-position: 100% 0; } 82%, 100% { background-position: 0% 0; } }
+@property --todo-pie { syntax: "<percentage>"; inherits: true; initial-value: 0%; }
+.aicss-todo .todoHeadPie { position: absolute; inset: 0; margin: auto; width: 13px; height: 13px; border-radius: 50%; color: #1a1a1a; transition: opacity 140ms ease, --todo-pie 400ms ease; }
+.aicss-todo .todoHeadPieRing { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; color: #a1a1a1; }
+.aicss-todo .todoHeadPie::after { content: ""; position: absolute; inset: 2.6px; border-radius: 50%; background: conic-gradient(currentColor var(--todo-pie, 0%), transparent 0); }
+
+@media (prefers-color-scheme: dark) {
+  .aicss-diff.diff { background: #1a1a1a; box-shadow: 0 1px 2px rgba(0,0,0,0.4), 0 2px 4px rgba(0,0,0,0.3), 0 0 0 0.5px rgba(255,255,255,0.12); }
+  .aicss-diff .diffHead { border-bottom-color: #303030; }
+  .aicss-diff .diffFile { color: #f5f5f5; }
+  .aicss-diff .diffStat .add { color: #34d399; }
+  .aicss-diff .diffStat .del { color: #f87171; }
+  .aicss-diff .diffBody::before { background: #303030; }
+  .aicss-diff .diffRow.add { background: rgba(63, 185, 80, 0.15); }
+  .aicss-diff .diffRow.add::before { background: #34d399; }
+  .aicss-diff .diffRow.add .sign, .aicss-diff .diffRow.add .new { color: #34d399; }
+  .aicss-diff .diffRow.add code { color: #f5f5f5; }
+  .aicss-diff .diffRow.del { background: rgba(248, 81, 73, 0.15); }
+  .aicss-diff .diffRow.del::before { background: repeating-linear-gradient(45deg, #f87171 0, #f87171 1.5px, transparent 1.5px, transparent 3px); }
+  .aicss-diff .diffRow.del .sign, .aicss-diff .diffRow.del .old { color: #f87171; }
+  .aicss-diff .diffRow.del code { color: #f5f5f5; }
+  .tool-card.aicss-todo.todo { color: #f5f5f5; background: #1a1a1a; box-shadow: 0 0 0 1px #303030; }
+  .aicss-todo .todoHead { color: #f5f5f5; }
+  .aicss-todo .todoHeadCheck { color: #34d399; }
+  .aicss-todo .todoHeadIcon, .aicss-todo .todoCount, .aicss-todo .todoHeadPieRing, .aicss-todo .todoItem, .aicss-todo .todoIcon, .aicss-todo .todoLabel { color: #737373; }
+  .aicss-todo .todoHeadPie, .aicss-todo .todoIcon.strong { color: #f5f5f5; }
+  .aicss-todo .todoLabel::before { background: linear-gradient(90deg, #f5f5f5 0%, #f5f5f5 30%, rgba(245, 245, 245, 0.45) 45%, rgba(245, 245, 245, 0.45) 55%, #f5f5f5 70%, #f5f5f5 100%); background-size: 300% 100%; -webkit-background-clip: text; background-clip: text; }
 }
-.tool-card.task-row.is-plan .line { min-height: 30px; padding: 0; border-radius: 5px; }
-.tool-card.task-row.is-plan .glyph { width: 16px; height: 16px; flex-basis: 16px; color: var(--bui-ink-3); }
-.tool-card.task-row.is-plan .glyph > svg { width: 16px; height: 16px; }
-.tool-card.task-row.is-plan .glyph .loading-pixels { width: 15px; height: 15px; gap: 1px; }
-.tool-card.task-row.is-plan .glyph .loading-pixels span { width: 4px; height: 4px; }
-.tool-card.task-row.is-plan .name { font-size: 12px; font-weight: 600; }
-.tool-card.task-row.is-plan .agent-status { margin-left: auto; padding: 0; background: transparent; color: var(--bui-ink-3); box-shadow: none; font: 11px/1 var(--font-mono); }
-.tool-card.task-row.is-plan .card-chevron { display: inline-flex; width: 16px; height: 16px; margin-left: 0; transform: rotate(-90deg); transition: transform 180ms ease; }
-.tool-card.task-row.is-plan.expanded .card-chevron { transform: rotate(0); }
-.tool-card.task-row.is-plan .steps {
-  max-height: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  overflow: hidden;
-  margin: 0;
-  padding: 0;
-  border: 0;
-  opacity: 0;
-  transition: max-height 260ms cubic-bezier(.23, 1, .32, 1), opacity 180ms ease, padding 260ms ease;
-}
-.tool-card.task-row.is-plan.expanded .steps { max-height: 480px; padding-top: 10px; opacity: 1; }
-.tool-card.task-row.is-plan .step.todo-item {
-  min-width: 0;
-  min-height: 20px;
-  display: grid;
-  grid-template-columns: 16px minmax(0, 1fr);
-  gap: 8px;
-  align-items: start;
-  color: var(--bui-ink-2);
-  font-size: 12px;
-  line-height: 1.45;
-  animation: bui-fade-up 240ms calc(var(--i, 0) * 35ms) both;
-}
-.tool-card.task-row.is-plan .step .mark { width: 16px; height: 16px; display: inline-flex; align-items: center; justify-content: center; color: var(--bui-ink-3); }
-.tool-card.task-row.is-plan .step .mark svg { width: 15px; height: 15px; }
-.tool-card.task-row.is-plan .step .mark .loading-pixels { width: 15px; height: 15px; gap: 1px; }
-.tool-card.task-row.is-plan .step .mark .loading-pixels span { width: 4px; height: 4px; }
-.tool-card.task-row.is-plan .step.in_progress { color: var(--bui-ink); }
-.tool-card.task-row.is-plan .step.in_progress .todo-label {
-  color: transparent;
-  background: linear-gradient(90deg, var(--bui-ink-2) 28%, var(--bui-accent-ink) 50%, var(--bui-ink-2) 72%);
-  background-size: 220% 100%;
-  background-clip: text;
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  animation: bui-shimmer-text 1.8s linear infinite;
-}
-.tool-card.task-row.is-plan .step.completed { color: var(--bui-ink-3); }
-.tool-card.task-row.is-plan .step.completed .todo-label { text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--bui-ink-3) 62%, transparent); }
-.roll-count { display: inline-flex; overflow: hidden; }
-.roll-digit { position: relative; width: .64em; height: 1em; overflow: hidden; text-align: center; }
-.roll-inner { display: flex; flex-direction: column; transform: translateY(0); transition: transform 260ms cubic-bezier(.23, 1, .32, 1); }
-.roll-inner > span { height: 1em; }
-.roll-inner.on { transform: translateY(-1em); }
 
 @media (max-width: 640px) {
   .transcript-controls { min-height: 32px; padding-inline: 2px; }
@@ -910,18 +865,11 @@
   .tool-run-latest::before { display: none; }
   .tool-run-latest-text { font-size: 10.5px; }
   .tool-run-reasoning { padding: 8px; }
-  .file-diff { padding: 10px 10px 12px; }
-  .file-diff-row { grid-template-columns: 28px 28px 16px minmax(300px, 1fr); }
-  .file-diff-body::before,
-  .file-diff-row.add::after,
-  .file-diff-row.del::after { left: 56px; }
-  .tool-card.task-row.is-plan { padding: 5px 10px 10px; }
+  .aicss-diff .diffBody { max-height: 42vh; overflow: auto; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .roll-inner,
-  .tool-card.task-row.is-plan .steps { transition: none; }
-  .tool-card.task-row.is-plan .step,
-  .tool-card.task-row.is-plan .step.in_progress .todo-label { animation: none; }
-  .tool-card.task-row.is-plan .step.in_progress .todo-label { color: var(--bui-ink); -webkit-text-fill-color: currentColor; }
+  .aicss-todo .todoItem { animation: none; }
+  .aicss-todo .todoIcon, .aicss-todo .todoLabel, .aicss-todo .todoLabel::before { transition: none; }
+  .aicss-todo .todoItem.active .todoLabel::before { animation: none; }
 }

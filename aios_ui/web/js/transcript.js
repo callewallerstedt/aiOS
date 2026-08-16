@@ -32,10 +32,14 @@ const CHEVRON_ICON = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none
 const CHECK_ICON = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5" /></svg>';
 const X_ICON = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12" /></svg>';
 const SPARK_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l2.4 7.2L22 12l-7.6 2.8L12 22l-2.4-7.2L2 12l7.6-2.8z" /></svg>';
-const LIST_ICON = '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M8.25 6.75h12M8.25 12h12m-12 5.25h12M3.75 6.75h.007v.008H3.75V6.75Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0ZM3.75 12h.007v.008H3.75V12Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Zm-.375 5.25h.007v.008H3.75v-.008Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" /></svg>';
-const TODO_CHECK_ICON = '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M9 12.75 11.25 15 15 9.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" /></svg>';
-const TODO_DASHED_ICON = '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.8" stroke-dasharray="1.8 3.6" stroke-linecap="round" /></svg>';
-const CODE_FILE_ICON = '<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="M17.25 6.75 22.5 12l-5.25 5.25m-10.5 0L1.5 12l5.25-5.25m7.5-3-4.5 16.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>';
+// Exact inline SVGs from aicss.dev/components/task-list and /file-diff.
+const TODO_LIST_ICON = '<svg class="todoListIcon" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M8.25 6.75h12M8.25 12h12m-12 5.25h12M3.75 6.75h.007v.008H3.75V6.75Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0ZM3.75 12h.007v.008H3.75V12Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Zm-.375 5.25h.007v.008H3.75v-.008Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" /></svg>';
+const TODO_CHEVRON_ICON = '<svg class="todoChevron" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="m19.5 8.25-7.5 7.5-7.5-7.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>';
+const TODO_HEAD_CHECK_ICON = '<svg class="todoHeadCheck" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill-rule="evenodd" clip-rule="evenodd" d="M2.25 12c0-5.385 4.365-9.75 9.75-9.75s9.75 4.365 9.75 9.75-4.365 9.75-9.75 9.75S2.25 17.385 2.25 12Zm13.36-1.814a.75.75 0 1 0-1.22-.872l-3.236 4.53L9.53 12.22a.75.75 0 0 0-1.06 1.06l2.25 2.25a.75.75 0 0 0 1.14-.094l3.75-5.25Z" fill="currentColor" /></svg>';
+const TODO_CHECK_ICON = '<svg class="todoIcon" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M9 12.75 11.25 15 15 9.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" /></svg>';
+const TODO_ARROW_ICON = '<svg class="todoIcon strong" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="m12.75 15 3-3m0 0-3-3m3 3h-7.5M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" /></svg>';
+const TODO_DASHED_ICON = '<svg class="todoIcon" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.8" stroke-dasharray="1.8 3.6" stroke-linecap="round" /></svg>';
+const CODE_FILE_ICON = '<svg class="diffIcon" viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="M17.25 6.75 22.5 12l-5.25 5.25m-10.5 0L1.5 12l5.25-5.25m7.5-3-4.5 16.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>';
 
 const TOOL_ICONS = {
   think: '<path d="M12 2l2.4 7.2L22 12l-7.6 2.8L12 22l-2.4-7.2L2 12l7.6-2.8z" />',
@@ -120,31 +124,39 @@ function diffRows(change) {
 
 function fileDiffMarkup(change) {
   const rows = diffRows(change);
-  return `<section class="file-diff" data-reveal="${escapeHtml(change.path)}" title="${escapeHtml(change.path)}">
-    <button type="button" class="file-diff-head" data-reveal="${escapeHtml(change.path)}">
-      <span class="file-diff-name">${CODE_FILE_ICON}<span>${escapeHtml(change.name)}</span></span>
-      <span class="file-diff-stat"><span class="add">+${Number(change.add || 0).toLocaleString()}</span><span class="del">-${Number(change.del || 0).toLocaleString()}</span></span>
-    </button>
-    ${rows.length ? `<div class="file-diff-body">${rows.map((row) => `<div class="file-diff-row ${row.type}"><span class="ln old">${row.old ?? ""}</span><span class="ln new">${row.cur ?? ""}</span><span class="sign">${row.type === "add" ? "+" : row.type === "del" ? "-" : ""}</span><code>${escapeHtml(row.text)}</code></div>`).join("")}</div>` : ""}
-  </section>`;
+  const added = rows.filter((row) => row.type === "add").length;
+  const removed = rows.filter((row) => row.type === "del").length;
+  return `<div class="aicss-diff diff" data-reveal="${escapeHtml(change.path)}" title="${escapeHtml(change.path)}">
+    <div class="diffHead">
+      <span class="diffFileWrap">${CODE_FILE_ICON}<span class="diffFile">${escapeHtml(change.name)}</span></span>
+      <span class="diffStat"><span class="add">+${added.toLocaleString()}</span><span class="del">-${removed.toLocaleString()}</span></span>
+    </div>
+    <div class="diffBody">${rows.map((row) => `<div class="diffRow ${row.type}"><span class="ln old">${row.old ?? ""}</span><span class="ln new">${row.cur ?? ""}</span><span class="sign">${row.type === "add" ? "+" : row.type === "del" ? "-" : ""}</span><code>${escapeHtml(row.text)}</code></div>`).join("")}</div>
+  </div>`;
 }
 
 function updateRollingCount(node, value) {
   const next = String(value || "0/0");
   const previous = String(node.dataset.value || next);
   node.dataset.value = next;
-  if (!node.firstChild || previous === next) {
-    node.innerHTML = `<span class="roll-count">${[...next].map((char) => `<span class="roll-digit">${escapeHtml(char)}</span>`).join("")}</span>`;
+  if (!node.firstChild) {
+    node.innerHTML = `<span class="rollCount">${[...next].map((char) => `<span class="rollDigit">${escapeHtml(char)}</span>`).join("")}</span>`;
     return;
   }
+  if (previous === next) return;
   const width = Math.max(previous.length, next.length);
-  node.innerHTML = `<span class="roll-count">${Array.from({ length: width }, (_, index) => {
+  node.innerHTML = `<span class="rollCount">${Array.from({ length: width }, (_, index) => {
     const from = previous[index] || "";
     const to = next[index] || "";
-    if (from === to) return `<span class="roll-digit">${escapeHtml(to)}</span>`;
-    return `<span class="roll-digit"><span class="roll-inner"><span>${escapeHtml(from)}</span><span>${escapeHtml(to)}</span></span></span>`;
+    if (from === to) return `<span class="rollDigit">${escapeHtml(to)}</span>`;
+    return `<span class="rollDigit"><span class="rollInner"><span>${escapeHtml(from)}</span><span>${escapeHtml(to)}</span></span></span>`;
   }).join("")}</span>`;
-  requestAnimationFrame(() => node.querySelectorAll(".roll-inner").forEach((inner) => inner.classList.add("on")));
+  requestAnimationFrame(() => requestAnimationFrame(() =>
+    node.querySelectorAll(".rollInner").forEach((inner) => inner.classList.add("on"))));
+  setTimeout(() => {
+    if (node.dataset.value !== next) return;
+    node.innerHTML = `<span class="rollCount">${[...next].map((char) => `<span class="rollDigit">${escapeHtml(char)}</span>`).join("")}</span>`;
+  }, 380);
 }
 
 // 3x3 pixel animations. Timing lives in CSS rather than inline delays so a
@@ -405,6 +417,7 @@ export class Transcript {
         card.dataset.manual = "true";
         this.setFollow(false, true);
         card.querySelector(".card-chevron")?.setAttribute("aria-expanded", String(card.classList.contains("expanded")));
+        card.querySelector(".todoHead")?.setAttribute("aria-expanded", String(card.classList.contains("expanded")));
         requestAnimationFrame(() => {
           if (!card.isConnected) return;
           this.transcript.scrollTop = beforeScroll + (card.getBoundingClientRect().top - beforeTop);
@@ -990,7 +1003,7 @@ export class Transcript {
     run.node.querySelector(".tool-run-summary").textContent = [
       count ? `${count} tool call${count === 1 ? "" : "s"}` : "Activity",
       reasoningCount ? `${reasoningCount} thought${reasoningCount === 1 ? "" : "s"}` : "",
-      files ? `${files} file${files === 1 ? "" : "s"}` : "",
+      files ? `${files} file${files === 1 ? "" : "s"} changed` : "",
     ].filter(Boolean).join(" · ");
     const cards = [...run.cards].map((key) => this.cards.get(key)).filter(Boolean);
     const activeTool = cards.filter((card) => ["started", "update"].includes(String(card.state.phase || "")))
@@ -1376,7 +1389,19 @@ export class Transcript {
       const taskActivity = ["plan", "consultant", "subagent", "review"].includes(type);
       if (taskActivity) this.closeToolRun();
       const run = taskActivity ? null : this.ensureToolRun();
-      const node = this.addRow("tool-card", `
+      const markup = type === "plan" ? `
+        <button type="button" class="todoHead" aria-expanded="true" aria-label="Toggle to-dos">
+          <span class="todoHeadIcon">
+            ${TODO_LIST_ICON}
+            <span class="todoHeadPie" aria-hidden="true"><svg class="todoHeadPieRing" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10.5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-dasharray="2.2 4.4" stroke-linecap="round" /></svg></span>
+            ${TODO_HEAD_CHECK_ICON}
+            ${TODO_CHEVRON_ICON}
+          </span>
+          <span class="todoTitle">To-dos</span>
+          <span class="todoCount"></span>
+        </button>
+        <div class="todoCollapsible"><div class="todoInner"><ul class="todoList"></ul></div></div>
+      ` : `
         <button type="button" class="line tool-chip-row">
           <span class="glyph tool-icon task-badge"></span>
           <span class="name"></span>
@@ -1395,7 +1420,8 @@ export class Transcript {
             <div class="review-actions"></div>
           </div>
         </div>
-      `, run?.body || this.transcript);
+      `;
+      const node = this.addRow(type === "plan" ? "tool-card aicss-todo todo expandable expanded" : "tool-card", markup, run?.body || this.transcript);
       node.dataset.activityKey = key;
       card = { node, state: {}, run };
       this.cards.set(key, card);
@@ -1451,57 +1477,67 @@ export class Transcript {
     this.paintActivity(card);
   }
 
+  paintPlan(card) {
+    const { node, state } = card;
+    const steps = Array.isArray(state.steps) ? state.steps : [];
+    const completed = steps.filter((step) => String(step.status || "") === "completed").length;
+    const activeIndex = steps.findIndex((step) => String(step.status || "") === "in_progress");
+    const allDone = steps.length > 0 && completed === steps.length;
+    const running = activeIndex >= 0 && !allDone;
+    const pct = Math.round((Math.min(Math.max(completed, 0), steps.length || 1) / (steps.length || 1)) * 100);
+    node.classList.toggle("plan-active", running);
+    node.classList.toggle("plan-complete", allDone);
+    node.style.setProperty("--todo-pie", `${pct}%`);
+    node.querySelector(".todoHead")?.setAttribute("aria-expanded", String(node.classList.contains("expanded")));
+    updateRollingCount(node.querySelector(".todoCount"), `${completed}/${steps.length}`);
+    const icon = (markup, on) => on ? markup.replace('class="todoIcon', 'class="todoIcon on') : markup;
+    node.querySelector(".todoList").innerHTML = steps.map((step, index) => {
+      const status = String(step.status || "pending");
+      const done = status === "completed";
+      const active = status === "in_progress";
+      const label = String(step.step || "");
+      return `<li class="todoItem${done ? " done" : active ? " active" : ""}" style="--i:${index}">
+        <span class="todoIconWrap">${icon(TODO_DASHED_ICON, !done && !active)}${icon(TODO_ARROW_ICON, active)}${icon(TODO_CHECK_ICON, done)}</span>
+        <span class="todoLabel" data-label="${escapeHtml(label)}">${escapeHtml(label)}</span>
+      </li>`;
+    }).join("");
+  }
+
   paintActivity(card) {
     const { node, state } = card;
     const rawType = String(state.activity_type || "");
     const type = rawType === "planner" ? "consultant" : rawType;
-    const steps = type === "plan" && Array.isArray(state.steps) ? state.steps : [];
-    const done = steps.filter((step) => String(step.status || "") === "completed").length;
-    const planActive = steps.some((step) => String(step.status || "") === "in_progress");
-    const planComplete = steps.length > 0 && done === steps.length;
-    // A plan is a living checklist, not a task that "finishes" -- it only ever
-    // reports phase:update, which is why its spinner used to run forever.
-    const busy = type !== "plan" && (state.phase === "started" || state.phase === "update");
+    if (type === "plan" && node.classList.contains("aicss-todo")) {
+      this.paintPlan(card);
+      return;
+    }
+    const busy = state.phase === "started" || state.phase === "update";
     node.classList.toggle("running", busy);
     node.classList.toggle("failed", state.phase === "failed");
-    node.classList.toggle("is-plan", type === "plan");
     node.classList.toggle("is-consultant", type === "consultant");
     node.classList.toggle("is-subagent", type === "subagent");
     node.classList.toggle("is-review", type === "review");
     node.classList.toggle("is-file", type === "files" || type === "read");
-    node.classList.toggle("task-row", type === "plan" || type === "consultant" || type === "subagent" || type === "review");
+    node.classList.toggle("task-row", type === "consultant" || type === "subagent" || type === "review");
     // Scouts and Consultants are live work streams: open them while work is
     // happening so their receipts are visible, then close them when the final
     // report arrives. The user can still reopen a settled card manually.
     const autoOpen = (type === "subagent" || type === "consultant") && busy;
     if (autoOpen) node.classList.add("expanded");
     else if ((type === "subagent" || type === "consultant") && !busy) node.classList.remove("expanded");
-    // Start a new checklist open, then respect the user's disclosure choice.
-    if (type === "plan" && !node.dataset.planReady) {
-      node.classList.add("expanded");
-      node.dataset.planReady = "true";
-    }
     if (type === "review" && busy) node.classList.add("expanded");
     if (type === "review" && state.verdict === "pass") node.classList.remove("failed");
 
-    const roleType = type === "consultant" ? "C" : type === "subagent" ? "S" : type === "review" ? "R" : type === "plan" ? "P" : "";
+    const roleType = type === "consultant" ? "C" : type === "subagent" ? "S" : type === "review" ? "R" : "";
     const glyph = node.querySelector(".glyph");
-    const glyphMode = type === "plan"
-      ? `plan:${planComplete ? "done" : planActive ? "active" : "pending"}`
-      : `${roleType || type}:${busy ? "busy" : state.phase}`;
+    const glyphMode = `${roleType || type}:${busy ? "busy" : state.phase}`;
     // Do not recreate animated glyph markup for every streamed tool receipt.
     // Replacing the spans resets their CSS animation phase and causes visible
     // churning stutter; only change the glyph when its semantic mode changes.
     if (glyph.dataset.mode !== glyphMode) {
-      glyph.innerHTML = type === "plan"
-        ? planComplete
-          ? TODO_CHECK_ICON
-          : planActive
-            ? loadingPixelsMarkup("bloom")
-            : LIST_ICON
-        : roleType
-          ? taskBadgeMarkup(busy ? "started" : state.phase, roleType)
-          : busy ? loadingPixelsMarkup() : toolIconMarkup(type);
+      glyph.innerHTML = roleType
+        ? taskBadgeMarkup(busy ? "started" : state.phase, roleType)
+        : busy ? loadingPixelsMarkup() : toolIconMarkup(type);
       glyph.dataset.mode = glyphMode;
     }
     const consultantTitle = String(state.title || "Consultant").replace(/planner/gi, "Consultant");
@@ -1510,15 +1546,13 @@ export class Transcript {
       : type === "consultant"
         ? consultantTitle
         : (state.title || state.agent_name || type || "Working");
-    // The plan header carried "Plan - 0/3" next to a pill that also read
-    // "Plan". Name the card once and let the pill carry the count.
-    node.querySelector(".name").textContent = type === "plan" ? "To-dos" : visibleName;
+    node.querySelector(".name").textContent = visibleName;
 
     // Files show only the basename in the collapsed line; the full path lives
     // in the expanded body next to an Explorer button.
     const paths = (state.files && state.files.length ? state.files : [state.detail]).filter(Boolean);
     const isFile = node.classList.contains("is-file");
-    const detailText = isFile || type === "plan" ? "" : type === "consultant"
+    const detailText = isFile ? "" : type === "consultant"
       ? String(state.question || state.detail || (busy ? "Thinking through the hard part\u2026" : "Advice below"))
         .replace(/planner/gi, "consultant")
       : type === "subagent"
@@ -1558,24 +1592,9 @@ export class Transcript {
     if (state.exit_code !== undefined && state.exit_code !== null && state.exit_code !== 0) bits.push(`exit ${state.exit_code}`);
     if (state.duration_ms) bits.push(`${(Number(state.duration_ms) / 1000).toFixed(1)}s`);
     node.querySelector(".timing").textContent = bits.join(" \u00b7 ");
-    // Plan steps render as a real checklist so the card actually has contents.
-    // Only plans own the always-visible checklist. Subagent `steps` are tool
-    // receipts, which belong inside the expandable activity details.
     const agentStatus = node.querySelector(".agent-status");
-    if (type === "plan") updateRollingCount(agentStatus, `${done}/${steps.length}`);
-    else agentStatus.textContent = busy ? "Running" : state.phase === "failed" ? "Failed" : "Done";
-    node.classList.toggle("plan-complete", type === "plan" && planComplete);
-    node.classList.toggle("plan-active", type === "plan" && planActive);
-    node.querySelector(".steps").innerHTML = steps.map((step, index) => {
-      const status = String(step.status || "pending");
-      const mark = status === "completed"
-        ? TODO_CHECK_ICON
-        : status === "in_progress"
-          ? loadingPixelsMarkup("bloom")
-          : TODO_DASHED_ICON;
-      const label = String(step.step || "");
-      return `<div class="step todo-item ${escapeHtml(status)}" style="--i:${index}"><span class="mark" aria-hidden="true">${mark}</span><span class="todo-label" data-label="${escapeHtml(label)}">${escapeHtml(label)}</span></div>`;
-    }).join("");
+    agentStatus.textContent = busy ? "Running" : state.phase === "failed" ? "Failed" : "Done";
+    node.querySelector(".steps").innerHTML = "";
 
     const fullPath = isFile ? String(paths[0] || "") : "";
     node.querySelector(".fullpath").innerHTML = fullPath
@@ -1663,7 +1682,7 @@ export class Transcript {
       actions.innerHTML = "";
       actions.hidden = true;
     }
-    node.classList.toggle("expandable", !!(steps.length || body || fullPath || rawAgentTools.length || (type === "review" && !actions.hidden)));
+    node.classList.toggle("expandable", !!(body || fullPath || rawAgentTools.length || (type === "review" && !actions.hidden)));
     node.querySelector(".card-chevron")
       .setAttribute("aria-expanded", String(node.classList.contains("expanded")));
   }

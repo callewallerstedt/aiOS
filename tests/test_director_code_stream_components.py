@@ -21,14 +21,18 @@ def test_stream_uses_file_diff_and_todo_components_with_active_pixel_state():
     script = (ROOT / "aios_ui/web/js/transcript.js").read_text(encoding="utf-8")
     styles = (ROOT / "aios_ui/web/css/code-beautiful.css").read_text(encoding="utf-8")
 
-    assert 'class="file-diff-row ${row.type}"' in script
-    assert 'class="step todo-item ${escapeHtml(status)}"' in script
-    assert 'loadingPixelsMarkup("bloom")' in script
-    assert "updateRollingCount(agentStatus" in script
-    assert ".file-diff-body::before" in styles
-    assert "grid-template-columns: 32px 32px 18px minmax(360px, 1fr)" in styles
-    assert ".tool-card.task-row.is-plan.expanded .steps" in styles
-    assert ".roll-inner.on" in styles
+    assert 'class="aicss-diff diff"' in script
+    assert 'class="diffRow ${row.type}"' in script
+    assert '"tool-card aicss-todo todo expandable expanded"' in script
+    assert 'class="todoItem${done ? " done" : active ? " active" : ""}"' in script
+    assert 'loadingPixelsMarkup("orbit")' in script
+    assert 'updateRollingCount(node.querySelector(".todoCount")' in script
+    assert ".aicss-diff .diffBody::before" in styles
+    assert "grid-template-columns: 32px 32px 18px 1fr" in styles
+    assert "background: repeating-linear-gradient(45deg, #dc2626 0, #dc2626 1.5px" in styles
+    assert ".aicss-todo .todoCollapsible" in styles
+    assert ".aicss-todo .rollInner.on" in styles
+    assert "animation: todo-shine 2.25s cubic-bezier(0.25, 0.1, 0.25, 1) infinite" in styles
 
 
 def test_director_code_session_tool_is_labeled_and_accented():
