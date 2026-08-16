@@ -79,7 +79,7 @@ def test_app_boots_without_the_code_transcript_module():
     outside the phone_site project) and Safari never runs load(), so a paired
     phone sees Connect again with the token still in localStorage."""
     assert 'from "/code/transcript.js"' not in JS
-    assert 'await import("/code/transcript.js")' in JS
+    assert 'await import("/code/transcript.js?v=42")' in JS
     assert 'localStorage.getItem("aios-director")' in HTML
     assert (ROOT / "phone_site" / "code" / "transcript.js").is_file()
     assert (ROOT / "phone_site" / "code" / "markdown.js").is_file()
@@ -89,7 +89,7 @@ def test_app_boots_without_the_code_transcript_module():
 
 def test_offline_mock_is_localhost_only():
     """The playground mock must not ship to Vercel or run on the live PWA."""
-    assert 'src="/mock.js"' in HTML
+    assert 'src="/mock.js?v=42"' in HTML
     assert 'host !== "localhost"' in HTML
     assert 'host !== "127.0.0.1"' in HTML
     build = (ROOT / "phone_site" / "scripts" / "build.js").read_text(encoding="utf-8")
@@ -359,7 +359,9 @@ def test_push_uses_agent_heading_and_is_silent_while_app_is_visible():
     assert 'payload.agent || payload.title || "Director"' in SW
     assert 'client.visibilityState === "visible"' in SW
     assert "showNotification(title" in SW
-    assert 'const VERSION = "director-v41"' in SW
+    assert 'const VERSION = "director-v42"' in SW
+    assert 'director.js?v=42' in HTML
+    assert 'director.css?v=42' in HTML
 
 
 def test_stop_button_clears_stale_working_state_after_server_acknowledges():
@@ -418,7 +420,7 @@ def test_takeover_toolbar_can_request_the_software_keyboard():
     assert "director.keyboard-input" in shell
     assert "director.keyboard-key" in shell
     assert ".takeover-keyboard-input" in CSS
-    assert 'const VERSION = "director-v41"' in SW
+    assert 'const VERSION = "director-v42"' in SW
 
 
 def test_home_voice_change_does_not_restyle_the_chat_microphone():

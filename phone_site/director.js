@@ -1006,6 +1006,10 @@ function loadingPixels() {
   return `<span class="loading-pixels anim-wave" aria-hidden="true">${"<span></span>".repeat(9)}</span>`;
 }
 
+function codeLogo() {
+  return `<span class="code-logo-grid" aria-hidden="true">${"<span></span>".repeat(9)}</span>`;
+}
+
 function churningRow(label) {
   const node = el("div", "working-sentinel live");
   node.innerHTML = `${loadingPixels()}<span class="working-label">${escapeHtml(label)}</span>`;
@@ -1073,12 +1077,11 @@ function configureCodeJob(wrap, card, fallbackDetail = "") {
   wrap.dataset.jobTitle = preview;
   const chip = wrap.querySelector(".tool-chip");
   if (!chip) return;
-  chip.querySelector(".name").textContent = "aiOS CODE session";
-  chip.querySelector(".detail").textContent = preview
-    ? `AI-generated code session · ${preview}`
-    : "AI-generated code session";
-  chip.querySelector(".meta").textContent = "Open";
-  chip.setAttribute("aria-label", preview ? `Open aiOS CODE session: ${preview}` : "Open aiOS CODE session");
+  chip.querySelector(".glyph").innerHTML = codeLogo();
+  chip.querySelector(".name").textContent = preview || "CODE session";
+  chip.querySelector(".detail").textContent = "";
+  chip.querySelector(".meta").textContent = "";
+  chip.setAttribute("aria-label", preview ? `Open ${preview}` : "Open CODE session");
 }
 
 function toolCard({ callId, name, args, card, running }) {
@@ -4462,7 +4465,7 @@ async function openCodeSession(jobId, sessionId = "", title = "", { pushHistory 
   mount.textContent = "";
   let Transcript;
   try {
-    ({ Transcript } = await import("/code/transcript.js"));
+    ({ Transcript } = await import("/code/transcript.js?v=42"));
   } catch (error) {
     mount.textContent = String(error.message || error);
     show("code");

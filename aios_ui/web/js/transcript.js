@@ -326,8 +326,8 @@ export class Transcript {
     node.className = "transcript-controls";
     node.innerHTML = `
       <span class="transcript-controls-label">Show</span>
-      <button type="button" data-transcript-toggle="thinking" aria-pressed="${this.showThinking}">Thinking</button>
-      <button type="button" data-transcript-toggle="reasoning" aria-pressed="${this.showReasoning}">Reasoning</button>
+      <button class="transcript-toggle" type="button" data-transcript-toggle="thinking" aria-pressed="${this.showThinking}">Thinking</button>
+      <button class="transcript-toggle" type="button" data-transcript-toggle="reasoning" aria-pressed="${this.showReasoning}">Reasoning</button>
     `;
     this.transcript.prepend(node);
     this.transcript.classList.toggle("hide-live-thinking", !this.showThinking);

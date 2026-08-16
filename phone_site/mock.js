@@ -84,6 +84,18 @@
     power_state: "on", reachable: true, online: true, name: "calle-windows",
   };
 
+  const codeEvents = [
+    { ts: now() - 68, kind: "user", role: "user", text: "Polish the Director phone stream." },
+    { ts: now() - 67, kind: "activity", activity_id: "think-1", activity_type: "thinking", phase: "started", title: "Thinking" },
+    { ts: now() - 66, kind: "activity", activity_id: "think-1", activity_type: "thinking", phase: "update", title: "Thinking", delta: "Tracing the compact phone layout and its event flow.", stream: "summary" },
+    { ts: now() - 65, kind: "activity", activity_id: "think-1", activity_type: "thinking", phase: "completed", title: "Thought through the approach" },
+    { ts: now() - 64, kind: "activity", activity_id: "read-1", activity_type: "read", phase: "completed", title: "Read file", detail: "phone_site/director.js" },
+    { ts: now() - 63, kind: "activity", activity_id: "think-2", activity_type: "thinking", phase: "started", title: "Thinking" },
+    { ts: now() - 62, kind: "activity", activity_id: "think-2", activity_type: "thinking", phase: "update", title: "Thinking", delta: "Keeping every reasoning round inside one Activity disclosure.", stream: "summary" },
+    { ts: now() - 61, kind: "activity", activity_id: "think-2", activity_type: "thinking", phase: "completed", title: "Thought through the approach" },
+    { ts: now() - 60, kind: "assistant", role: "assistant", text: "The phone stream is compact and the controls now reflect their state." },
+  ];
+
   function msg(threadId, role, content, meta, ageSec, sequence) {
     return {
       id: nid("msg"), thread_id: threadId, role, content,
@@ -113,6 +125,16 @@
           "PC is on. Chrome is up on the virtual display — not black this time.",
           { reasoning: "Checking the live machine state and comparing it with the latest bridge heartbeat." },
           90, 4),
+        msg("thr_director", "user", "Polish the Director phone stream.", {}, 78, 5),
+        msg("thr_director", "tool_call", "", {
+          call_id: "c2", name: "code_session", arguments: JSON.stringify({ task: "Polish the Director phone stream." }),
+        }, 76, 6),
+        msg("thr_director", "tool_result", "ok", {
+          call_id: "c2", name: "code_session",
+          card: { title: "code", preview: "Polish the Director phone stream", meta: "calle-windows", tone: "accent", job_id: "job_phone_ui", session_id: "session_phone_ui" },
+          output: "CODE session running.",
+        }, 74, 7),
+        msg("thr_director", "assistant", "I started the focused aiOS CODE session.", {}, 72, 8),
       ],
       working: [], questions: [],
     },
@@ -477,6 +499,13 @@
     if (path === "/api/voice/transcribe") return json({ ok: true, text: "offline voice note" });
     if (path.startsWith("/api/questions/")) return json({ ok: true });
     if (path.startsWith("/api/approvals/")) return json({ ok: true });
+    const codeEventJob = path.match(/^\/api\/jobs\/([^/]+)\/code-events$/);
+    if (codeEventJob) {
+      return json({
+        ok: true, job_id: codeEventJob[1], session_id: "session_phone_ui",
+        reset: true, events: codeEvents, size: codeEvents.length,
+      });
+    }
     if (path.startsWith("/api/jobs/")) return json({ ok: true, job: { id: "job_x", status: "done" } });
     if (path.startsWith("/api/avatar/")) return json({ ok: false, error: "offline — no image gen" }, 400);
 
