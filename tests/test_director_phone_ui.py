@@ -346,7 +346,7 @@ def test_push_uses_agent_heading_and_is_silent_while_app_is_visible():
     assert 'payload.agent || payload.title || "Director"' in SW
     assert 'client.visibilityState === "visible"' in SW
     assert "showNotification(title" in SW
-    assert 'const VERSION = "director-v40"' in SW
+    assert 'const VERSION = "director-v41"' in SW
 
 
 def test_stop_button_clears_stale_working_state_after_server_acknowledges():
@@ -405,7 +405,7 @@ def test_takeover_toolbar_can_request_the_software_keyboard():
     assert "director.keyboard-input" in shell
     assert "director.keyboard-key" in shell
     assert ".takeover-keyboard-input" in CSS
-    assert 'const VERSION = "director-v40"' in SW
+    assert 'const VERSION = "director-v41"' in SW
 
 
 def test_home_voice_change_does_not_restyle_the_chat_microphone():

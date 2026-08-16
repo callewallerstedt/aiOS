@@ -794,17 +794,16 @@
 .tool-card.aicss-todo.todo { box-sizing: border-box; width: 100%; max-width: 920px; margin-inline: auto; font-family: "Inter", system-ui, sans-serif; font-size: 13px; color: #1a1a1a; background: #fff; border-radius: 8px; padding: 6px 12px 12px; box-shadow: 0 0 0 1px #e6e8ec; cursor: pointer; }
 .aicss-todo .todoHead { display: flex; width: 100%; align-items: center; gap: 8px; padding: 0; border: 0; background: transparent; cursor: pointer; color: #1a1a1a; font-size: 13px; min-height: 22px; }
 .aicss-todo .todoHeadIcon { position: relative; width: 16px; height: 16px; flex: none; color: #a1a1a1; }
-.aicss-todo .todoGridIcon, .aicss-todo .todoChevron, .aicss-todo .todoHeadCheck { position: absolute; inset: 0; margin: auto; transition: opacity 140ms ease; }
-.aicss-todo .todoGridIcon { width: 13px; height: 13px; display: grid; grid-template-columns: repeat(3, 3px); grid-template-rows: repeat(3, 3px); gap: 2px; }
-.aicss-todo .todoGridIcon > span { width: 3px; height: 3px; border-radius: 1.25px; background: #fff; box-shadow: 0 0 0 .5px rgba(0, 0, 0, .2); }
-.aicss-todo .todoGridIcon > span:nth-child(5), .aicss-todo .todoGridIcon > span:nth-child(7) { background: #ef4444; box-shadow: none; }
-.aicss-todo .todoChevron { width: 13px; height: 13px; }
+.aicss-todo .todoListIcon, .aicss-todo .todoChevron, .aicss-todo .todoHeadCheck { position: absolute; inset: 0; margin: auto; transition: opacity 140ms ease; }
+.aicss-todo .todoListIcon, .aicss-todo .todoChevron { width: 13px; height: 13px; }
 .aicss-todo .todoHeadCheck { width: 16px; height: 16px; color: #15a06a; opacity: 0; }
 .aicss-todo .todoChevron { opacity: 0; transition: opacity 140ms ease, transform 220ms ease; }
 .aicss-todo .todoHead[aria-expanded="false"] .todoChevron { transform: rotate(-90deg); }
-.aicss-todo.plan-complete .todoGridIcon { opacity: 0; }
+.aicss-todo.plan-active .todoListIcon, .aicss-todo.plan-complete .todoListIcon { opacity: 0; }
+.aicss-todo .todoHeadPie { display: none; }
+.aicss-todo.plan-active .todoHeadPie { display: block; }
 .aicss-todo.plan-complete .todoHeadCheck { opacity: 1; }
-.aicss-todo .todoHead:hover .todoGridIcon, .aicss-todo .todoHead:hover .todoHeadCheck { opacity: 0; }
+.aicss-todo .todoHead:hover .todoListIcon, .aicss-todo .todoHead:hover .todoHeadPie, .aicss-todo .todoHead:hover .todoHeadCheck { opacity: 0; }
 .aicss-todo .todoHead:hover .todoChevron { opacity: 1; }
 .aicss-todo .todoTitle { font-weight: 500; }
 .aicss-todo .todoCount { margin-left: auto; color: #a1a1a1; font-variant-numeric: tabular-nums; }
@@ -829,6 +828,10 @@
 .aicss-todo .todoItem.active .todoLabel::before { opacity: 1; animation: todo-shine 2.25s cubic-bezier(0.25, 0.1, 0.25, 1) infinite; }
 .aicss-todo .todoItem.done .todoLabel { color: #a1a1a1; text-decoration: line-through; }
 @keyframes todo-shine { 0%, 18% { background-position: 100% 0; } 82%, 100% { background-position: 0% 0; } }
+@property --todo-pie { syntax: "<percentage>"; inherits: true; initial-value: 0%; }
+.aicss-todo .todoHeadPie { position: absolute; inset: 0; margin: auto; width: 13px; height: 13px; border-radius: 50%; color: #1a1a1a; transition: opacity 140ms ease, --todo-pie 400ms ease; }
+.aicss-todo .todoHeadPieRing { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; color: #a1a1a1; }
+.aicss-todo .todoHeadPie::after { content: ""; position: absolute; inset: 2.6px; border-radius: 50%; background: conic-gradient(currentColor var(--todo-pie, 0%), transparent 0); }
 
 @media (prefers-color-scheme: dark) {
   .aicss-diff.diff { background: #1a1a1a; box-shadow: 0 1px 2px rgba(0,0,0,0.4), 0 2px 4px rgba(0,0,0,0.3), 0 0 0 0.5px rgba(255,255,255,0.12); }
@@ -848,8 +851,8 @@
   .tool-card.aicss-todo.todo { color: #f5f5f5; background: #1a1a1a; box-shadow: 0 0 0 1px #303030; }
   .aicss-todo .todoHead { color: #f5f5f5; }
   .aicss-todo .todoHeadCheck { color: #34d399; }
-  .aicss-todo .todoHeadIcon, .aicss-todo .todoCount, .aicss-todo .todoItem, .aicss-todo .todoIcon, .aicss-todo .todoLabel { color: #737373; }
-  .aicss-todo .todoIcon.strong { color: #f5f5f5; }
+  .aicss-todo .todoHeadIcon, .aicss-todo .todoCount, .aicss-todo .todoHeadPieRing, .aicss-todo .todoItem, .aicss-todo .todoIcon, .aicss-todo .todoLabel { color: #737373; }
+  .aicss-todo .todoHeadPie, .aicss-todo .todoIcon.strong { color: #f5f5f5; }
   .aicss-todo .todoLabel::before { background: linear-gradient(90deg, #f5f5f5 0%, #f5f5f5 30%, rgba(245, 245, 245, 0.45) 45%, rgba(245, 245, 245, 0.45) 55%, #f5f5f5 70%, #f5f5f5 100%); background-size: 300% 100%; -webkit-background-clip: text; background-clip: text; }
 }
 
