@@ -238,6 +238,40 @@ async def patch_agent(request: web.Request) -> web.Response:
     return json_response({"ok": True, "agent": agent})
 
 
+@ROUTES.post("/api/avatar/generate")
+async def generate_avatar(request: web.Request) -> web.Response:
+    """Generate an agent profile picture with OpenAI's GPT Image 2.
+
+    The phone PWA never holds an API key, so the prompt travels here and the
+    generated image comes back as a data URL that becomes the agent's avatar.
+    """
+    body = await request.json()
+    prompt = str(body.get("prompt") or "").strip()
+    if not prompt:
+        return error("describe the picture you want")
+    settings = config.load_settings()
+    key = config.openai_key(settings)
+    if not key:
+        return error("no OpenAI key configured for AI avatars", status=503)
+    payload = {"model": "gpt-image-2", "prompt": prompt, "size": "1024x1024"}
+    timeout = aiohttp.ClientTimeout(total=120)
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post("https://api.openai.com/v1/images/generations",
+                                    json=payload,
+                                    headers={"Authorization": f"Bearer {key}"}) as resp:
+                data = await resp.json(content_type=None)
+                if resp.status != 200:
+                    detail = str((data or {}).get("error", {}).get("message") or data)[:300]
+                    return error(f"image generation failed: {detail}", status=502)
+    except aiohttp.ClientError as exc:
+        return error(f"could not reach OpenAI: {exc}", status=502)
+    rows = (data or {}).get("data") or []
+    if not rows or not rows[0].get("b64_json"):
+        return error("OpenAI returned no image", status=502)
+    return json_response({"ok": True, "avatar": f"data:image/png;base64,{rows[0]['b64_json']}"})
+
+
 @ROUTES.get("/api/prompt")
 async def get_prompt(request: web.Request) -> web.Response:
     """The whole system prompt an agent is given, in the pieces it is built of.

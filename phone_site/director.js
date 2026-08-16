@@ -3596,9 +3596,48 @@ async function agentEditor(agent) {
   const clearPhoto = el("button", "btn ghost", "Use a blob");
   clearPhoto.addEventListener("click", () => { draft.avatar = ""; paintAvatar(); });
   const pickerButtons = el("div", "avatar-actions");
-  pickerButtons.append(choose, clearPhoto);
+  const aiButton = el("button", "btn ghost", "Use AI");
+  const aiBox = el("div", "avatar-ai");
+  aiBox.hidden = true;
+  aiBox.append(el("div", "blob-label", "Describe the picture"));
+  const aiInput = el("textarea");
+  aiInput.rows = 3;
+  aiInput.placeholder = "A friendly robot with a glowing blue visor…";
+  const aiActions = el("div", "avatar-ai-actions");
+  const aiGenerate = el("button", "btn primary", "Generate");
+  const aiCancel = el("button", "btn ghost", "Cancel");
+  aiActions.append(aiGenerate, aiCancel);
+  aiBox.append(aiInput, aiActions);
+  const closeAi = () => {
+    aiBox.hidden = true;
+    aiInput.value = "";
+    aiGenerate.disabled = false;
+    aiGenerate.textContent = "Generate";
+  };
+  aiButton.addEventListener("click", () => { aiBox.hidden = false; aiInput.focus(); });
+  aiCancel.addEventListener("click", closeAi);
+  aiGenerate.addEventListener("click", async () => {
+    const prompt = aiInput.value.trim();
+    if (!prompt) { alert("Describe the picture you want."); return; }
+    aiGenerate.disabled = true;
+    aiGenerate.textContent = "Generating…";
+    try {
+      const result = await api("/api/avatar/generate", {
+        method: "POST",
+        body: JSON.stringify({ prompt }),
+      });
+      draft.avatar = result.avatar;
+      paintAvatar();
+      closeAi();
+    } catch (error) {
+      alert(String(error.message || error));
+      aiGenerate.disabled = false;
+      aiGenerate.textContent = "Generate";
+    }
+  });
+  pickerButtons.append(choose, clearPhoto, aiButton);
   picker.append(preview, pickerButtons, file);
-  identity.append(picker);
+  identity.append(picker, aiBox);
 
   const blobBox = el("div", "blob-customize");
   const paintChoices = () => {

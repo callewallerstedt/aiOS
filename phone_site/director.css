@@ -1643,6 +1643,22 @@ body .loading-pixels span { background: var(--accent); }
 .avatar-actions { display: grid; gap: 6px; }
 .avatar-actions .btn { min-height: 34px; padding: 0 10px; }
 
+.avatar-ai { display: grid; gap: 8px; margin-top: 10px; }
+.avatar-ai textarea {
+  width: 100%;
+  min-height: 64px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: var(--field);
+  color: var(--ink);
+  resize: vertical;
+  outline: none;
+  line-height: 1.5;
+}
+.avatar-ai-actions { display: flex; gap: 8px; }
+.avatar-ai-actions .btn { flex: 1; }
+
 .blob-customize { display: grid; gap: 12px; }
 .blob-row { display: grid; gap: 6px; }
 .blob-label {

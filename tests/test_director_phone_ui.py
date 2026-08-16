@@ -432,4 +432,23 @@ def test_supplied_eye_sheet_is_selectable_and_rotates_on_active_blobs():
     assert "ACTIVE_EYE_INTERVAL = 4500" in JS
     assert "setInterval(rotateActiveBlobEyes, ACTIVE_EYE_INTERVAL)" in JS
     assert 'btn.setAttribute("aria-label", btn.title)' in picker
+
+
+def test_agent_editor_offers_an_ai_avatar_generator():
+    """The agent editor's avatar picker has a 'Use AI' button that prompts for
+    a description and calls the avatar generation endpoint, then sets the
+    returned image as the draft avatar."""
+    picker = _block(JS, 'const pickerButtons = el("div", "avatar-actions")',
+                    "const blobBox = el(\"div\", \"blob-customize\")")
+    assert '"Use AI"' in picker
+    assert 'aiBox.hidden = true' in picker
+    assert 'aiInput.placeholder' in picker
+    assert '"/api/avatar/generate"' in picker
+    assert 'draft.avatar = result.avatar' in picker
+    assert 'paintAvatar()' in picker
+    assert 'aiGenerate.textContent = "Generating…"' in picker
+    assert "closeAi" in picker
+    assert ".avatar-ai {" in CSS
+    assert ".avatar-ai textarea {" in CSS
+    assert ".avatar-ai-actions {" in CSS
     assert ".blob-grid.eyes { grid-template-columns: repeat(3" in CSS
