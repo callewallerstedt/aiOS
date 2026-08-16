@@ -54,9 +54,12 @@ def action_signature(action: dict[str, Any]) -> tuple[Any, ...] | None:
     if kind in {"click", "double_click", "right_click"}:
         return (kind, bucket(action.get("x")), bucket(action.get("y")),
                 str(action.get("button") or "left"), integer(action.get("clicks"), 1))
+    if kind == "move":
+        return (kind, bucket(action.get("x")), bucket(action.get("y")))
     if kind == "type":
         text = str(action.get("text") or "")
-        return (kind, len(text), hashlib.sha256(text.encode("utf-8")).hexdigest()[:12])
+        return (kind, bucket(action.get("x")), bucket(action.get("y")),
+                len(text), hashlib.sha256(text.encode("utf-8")).hexdigest()[:12])
     if kind in {"key", "press", "key_down", "key_up"}:
         return (kind, str(action.get("key") or "").casefold(),
                 integer(action.get("presses"), 1))
@@ -70,6 +73,11 @@ def action_signature(action: dict[str, Any]) -> tuple[Any, ...] | None:
         return (kind, bucket(action.get("x")), bucket(action.get("y")))
     if kind == "drag":
         return (kind, *point(action.get("from")), *point(action.get("to")))
+    if kind == "path":
+        points = action.get("points") or []
+        return (kind, tuple(point(value) for value in points[:24]))
+    if kind == "wait_screen":
+        return (kind, str(action.get("condition") or "stable").casefold())
     if kind in {"open_url", "launch", "shell"}:
         value = str(action.get("url") or action.get("command") or "")
         return (kind, hashlib.sha256(value.encode("utf-8")).hexdigest()[:12])
@@ -136,8 +144,10 @@ def scale_actions(actions: list[dict], factor: float) -> list[dict]:
 TOOL_ACTIONS = {
     "click": "click", "type_text": "type", "key": "key", "hotkey": "hotkey",
     "scroll": "scroll", "open_url": "open_url", "wait": "wait",
+    "wait_for_screen": "wait_screen",
     "launch_app": "launch", "shell": "shell", "drag": "drag",
     "select_all_text": "select_all", "remember": "remember",
+    "move_pointer": "move", "draw_path": "path",
 }
 
 
@@ -179,7 +189,8 @@ def tool_decision(reply: dict) -> dict:
                 "message": f"{name} returned malformed arguments"}
     if not isinstance(args, dict):
         args = {}
-    thought = str(reply.get("reasoning") or reply.get("text") or "").strip()
+    thought = str(args.pop("thought", "") or reply.get("reasoning")
+                  or reply.get("text") or "").strip()
     if name == "finish":
         return {"thought": thought, "status": str(args.get("status") or "done"),
                 "actions": [], "message": str(args.get("message") or ""),
@@ -280,10 +291,14 @@ async def execute(action: dict, settings: dict) -> str:
         return f"mouse up ({x},{y})"
     if kind == "type":
         text = str(action.get("text") or "")
-        await x11.type_text(text, settings)
+        if x is None or y is None:
+            await x11.type_text(text, settings)
+        else:
+            await x11.type_text(text, settings, x=x, y=y,
+                                replace=bool(action.get("replace")))
         # A typed value can be a one-time verification code. Keep its content
         # out of the persisted action trace while still recording the action.
-        return f"typed {len(text)} characters"
+        return f"focused ({x},{y}) and typed {len(text)} characters"
     if kind == "key":
         await x11.press(str(action.get("key") or ""), int(action.get("presses") or 1), settings)
         return f"key {action.get('key')}"
@@ -314,6 +329,26 @@ async def execute(action: dict, settings: dict) -> str:
         seconds = max(0.0, min(float(action.get("seconds") or 0.5), 10.0))
         await asyncio.sleep(seconds)
         return f"wait {seconds}s"
+    if kind == "wait_screen":
+        condition = str(action.get("condition") or "stable").strip().casefold()
+        timeout = max(0.5, min(float(action.get("timeout") or 10.0), 20.0))
+        stable_for = max(0.2, min(float(action.get("stable_for") or 0.8), 3.0))
+        previous = x11.image_signature(await x11.capture(settings))
+        deadline = asyncio.get_running_loop().time() + timeout
+        stable_since = asyncio.get_running_loop().time()
+        while asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.2)
+            current = x11.image_signature(await x11.capture(settings))
+            changed = x11.image_change_ratio(previous, current) >= MEANINGFUL_SCREEN_CHANGE
+            if condition == "change" and changed:
+                return "screen changed"
+            if condition == "stable":
+                if changed:
+                    stable_since = asyncio.get_running_loop().time()
+                elif asyncio.get_running_loop().time() - stable_since >= stable_for:
+                    return "screen became stable"
+            previous = current
+        return f"screen did not become {condition} within {timeout}s"
     if kind == "open_url":
         url = str(action.get("url") or "")
         return await display_mod.launch_chrome(url, settings)
@@ -438,10 +473,12 @@ async def run_task(task: str, *, emit: Emit, settings: dict | None = None,
                     "issue": issue}
 
         windows = await x11.window_list(settings=cfg)
+        controls = await x11.accessible_controls(settings=cfg)
         message = prompts.task_message(task, shot_w, shot_h,
                                        "\n".join(history[-MAX_HISTORY_STEPS:]),
                                        windows, feedback, notes=notes, step=steps,
-                                       background=recalled if steps == 1 else "")
+                                       background=recalled if steps == 1 else "",
+                                       controls=controls)
         items = [models.user_message([models.text_part(message), models.image_part(data_url)])]
 
         try:
@@ -512,6 +549,10 @@ async def run_task(task: str, *, emit: Emit, settings: dict | None = None,
             summary = str(parsed.get("message") or thought or "failed")
             await emit("operator.failed", {"steps": steps, "error": summary})
             return {"status": "fail", "summary": summary, "steps": steps}
+        if status == "stopped":
+            summary = str(parsed.get("message") or thought or "stopped")
+            await emit("operator.stopped", {"steps": steps, "reason": summary})
+            return {"status": "stopped", "summary": summary, "steps": steps}
         if status in ("ask", "handoff") and ask_user is not None:
             question = str(parsed.get("message") or thought or "")
             answer = await ask_user(

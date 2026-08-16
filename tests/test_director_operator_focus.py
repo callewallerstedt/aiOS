@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+from pathlib import Path
 
 import pytest
 
@@ -120,8 +121,48 @@ def test_action_signatures_group_same_effect_without_exposing_typed_text():
     typed = loop.action_signature({"type": "type", "text": "private value"})
 
     assert first == nearby
-    assert typed[1] == len("private value")
+    assert typed[3] == len("private value")
     assert "private value" not in str(typed)
+
+
+def test_typed_text_signatures_include_the_target_control():
+    first = loop.action_signature({"type": "type", "x": 100, "y": 100,
+                                   "text": "same"})
+    other_field = loop.action_signature({"type": "type", "x": 100, "y": 200,
+                                         "text": "same"})
+
+    assert first != other_field
+
+
+def test_type_text_focuses_the_requested_control_before_paste(monkeypatch):
+    calls = []
+
+    async def fake_click(x, y, *args, **kwargs):
+        calls.append(("click", x, y))
+
+    async def fake_focus(*args, **kwargs):
+        calls.append(("focus",))
+        return "200"
+
+    async def fake_checked(*args, **kwargs):
+        calls.append(args)
+
+    monkeypatch.setattr(x11, "click", fake_click)
+    monkeypatch.setattr(x11, "focus_pointer_window", fake_focus)
+    monkeypatch.setattr(x11, "_checked_xdotool", fake_checked)
+    monkeypatch.setattr(x11.shutil, "which", lambda _name: None)
+
+    asyncio.run(x11.type_text("hello", {}, x=320, y=240))
+
+    assert calls[0] == ("click", 320, 240)
+    assert calls[1] == ("focus",)
+    assert calls[2][-1] == "hello"
+
+
+def test_kernel_keyboard_chords_hold_modifiers_until_the_key_is_released():
+    assert x11.kernel_key_events(["ctrl", "a"]) == [
+        [29, 1], [30, 1], [30, 0], [29, 0],
+    ]
 
 
 def test_operator_loop_has_a_bounded_unchanged_action_budget():
@@ -149,6 +190,9 @@ def test_unchanged_loop_executes_once_then_stops(monkeypatch):
     async def windows(*_args, **_kwargs):
         return ["Browser"]
 
+    async def controls(*_args, **_kwargs):
+        return []
+
     async def complete(**_kwargs):
         model_calls.append(True)
         return {
@@ -173,6 +217,7 @@ def test_unchanged_loop_executes_once_then_stops(monkeypatch):
     monkeypatch.setattr(loop.x11, "encode_jpeg", lambda _data: ("data:image/jpeg;base64,x", 100, 100))
     monkeypatch.setattr(loop.x11, "image_signature", lambda _data: bytes([5] * 100))
     monkeypatch.setattr(loop.x11, "window_list", windows)
+    monkeypatch.setattr(loop.x11, "accessible_controls", controls)
     monkeypatch.setattr(loop.models, "complete", complete)
     monkeypatch.setattr(loop, "execute", execute)
     monkeypatch.setattr(loop, "background", lambda: "")
@@ -193,6 +238,21 @@ def test_chrome_prevents_restore_bubbles_at_startup():
     source = inspect.getsource(display_mod)
     assert "--hide-crash-restore-bubble" in source
     assert "--disable-session-crashed-bubble" in source
+
+
+def test_chrome_exposes_real_control_bounds_to_the_operator():
+    argv = display_mod.chrome_argv("", {"operator": {"width": 1280, "height": 720}})
+    assert "--force-renderer-accessibility" in argv
+    service = (Path(__file__).parents[1]
+               / "director/deploy/aios-director-chrome.service").read_text()
+    assert "--force-renderer-accessibility" in service
+
+
+def test_deployment_installs_a_kernel_level_keyboard_driver():
+    installer = (Path(__file__).parents[1]
+                 / "director/deploy/install.sh").read_text()
+    assert "uinput_keyboard.py" in installer
+    assert "aios-director-keyboard.service" in installer
 
 
 def test_operator_does_not_close_windows_by_matching_titles():

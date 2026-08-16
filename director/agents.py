@@ -24,7 +24,7 @@ COMMUNICATION_TOOLS = ["list_agents", "message_agent", "search_chats"]
 WEB_TOOLS = ["web_fetch", "web_search"]
 BOX_TOOLS = ["shell", "read_file", "write_file", "list_dir", "processes"]
 OPERATOR_TOOLS = ["operator", "operator_say", "operator_screenshot",
-                  "operator_takeover", "handoff"]
+                  "operator_stop", "operator_takeover", "handoff"]
 CODE_TOOLS = ["code_session", "code_status", "code_stop", "code_configs",
               "code_reply", "machines"]
 # Reach onto the paired machine. Looking is free; `machine_shell` runs there
@@ -121,6 +121,8 @@ The operator:
 * While it runs, anything Calle adds goes straight through with `operator_say`
   — a correction, a missing detail, an answer. Do not wait for the run to end
   and do not start over.
+* If Calle asks to stop or cancel the run, call `operator_stop`. A stop is not a
+  steering note and must not become a question inside the operator loop.
 * It reports back here when it finishes. Say what it found, including when it
   got stuck, and use `operator_screenshot` if he asks what is on screen now.
 

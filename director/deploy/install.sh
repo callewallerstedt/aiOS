@@ -51,6 +51,20 @@ systemctl --user daemon-reload
 chmod +x "$APP_DIR/director/deploy/xvfb-start.sh"
 chmod +x "$APP_DIR/director/deploy/real-desktop-start.sh"
 
+# Chromium rejects XTest keyboard events. Keep one kernel uinput keyboard alive
+# behind a local socket owned only by this Director user; this gives shortcuts
+# and special keys the same delivery semantics as a physical keyboard.
+sudo install -d -m 755 /usr/local/lib/aios-director
+sudo install -m 755 "$APP_DIR/director/operator/uinput_keyboard.py" \
+  /usr/local/lib/aios-director/uinput_keyboard.py
+printf 'AIOS_KEYBOARD_UID=%s\nAIOS_KEYBOARD_GID=%s\n' "$(id -u)" "$(id -g)" \
+  | sudo tee /etc/default/aios-director-keyboard >/dev/null
+sudo install -m 644 "$APP_DIR/director/deploy/aios-director-keyboard.service" \
+  /etc/systemd/system/aios-director-keyboard.service
+sudo systemctl daemon-reload
+sudo systemctl enable aios-director-keyboard.service
+sudo systemctl restart aios-director-keyboard.service
+
 # The operator now drives the physical GNOME/Xorg seat. Retire the synthetic
 # Xvfb/Openbox stack and attach VNC + Chrome to :0.
 systemctl --user disable --now aios-director-xvfb.service aios-director-wm.service || true

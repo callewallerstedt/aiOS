@@ -133,6 +133,37 @@ async def operator_say(ctx: ToolContext, text: str = "", job_id: str = "") -> To
 
 
 @tool(
+    "operator_stop",
+    "Stop the operator job immediately. Use this when Calle asks to stop, cancel, "
+    "or abort the live screen run; do not send a stop sentence through operator_say.",
+    {
+        "type": "object",
+        "properties": {
+            "job_id": {"type": "string",
+                       "description": "Operator job to stop. Defaults to the live run."},
+        },
+    },
+)
+async def operator_stop(ctx: ToolContext, job_id: str = "") -> ToolResult:
+    live = ctx.hub.live_jobs("operator")
+    target = str(job_id or "").strip() or (live[0]["id"] if live else "")
+    if not target:
+        return ToolResult(error="no operator run is going right now")
+    row = next((job for job in live if job.get("id") == target), None)
+    row = row or store.get_job(target)
+    if not row or row.get("kind") != "operator":
+        return ToolResult(error=f"no such operator job: {target}")
+    result = await ctx.hub.stop_job(target)
+    if not result.get("ok"):
+        return ToolResult(error=str(result.get("error") or "could not stop operator"))
+    return ToolResult(
+        output=f"Stopped operator job {target}.",
+        card={"title": "operator", "preview": target, "meta": "stopped",
+              "tone": "ok", "job_id": target, "job_kind": "operator"},
+    )
+
+
+@tool(
     "operator_screenshot",
     "Look at the operator screen right now, without starting a run.",
     {"type": "object", "properties": {}},

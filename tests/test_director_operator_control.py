@@ -28,6 +28,10 @@ class FakeHub:
     def take_job_notes(self, job_id):
         return self.notes.pop(job_id, [])
 
+    async def stop_job(self, job_id):
+        self.stopped = job_id
+        return {"ok": True, "job_id": job_id, "status": "stopped"}
+
     def start_job(self, job, factory):
         self.started.append(job)
 
@@ -139,6 +143,18 @@ def test_an_empty_follow_up_is_refused(director):
     assert result.error
 
 
+def test_operator_stop_cancels_the_live_job_instead_of_steering_it(director):
+    from director.tools import operator
+
+    hub = FakeHub(live=[{"id": "job_1", "kind": "operator",
+                         "request": {"task": "browse"}}])
+    result = asyncio.run(operator.operator_stop(_ctx(hub)))
+
+    assert not result.error
+    assert hub.stopped == "job_1"
+    assert not hub.notes
+
+
 # ---------------- the runtime side ----------------
 
 def test_live_jobs_ignores_rows_left_running_by_a_restart(director):
@@ -200,6 +216,19 @@ def test_the_prompt_puts_a_follow_up_last_and_calls_it_an_instruction():
     assert "actually use the other one" in message
 
 
+def test_accessible_controls_are_rendered_with_exact_centers():
+    from director.operator import prompts
+
+    message = prompts.task_message(
+        "type in the field", 1280, 720, "", controls=[{
+            "role": "entry", "name": "Search", "x": 10, "y": 20,
+            "width": 200, "height": 40, "focused": False,
+        }])
+
+    assert "VISIBLE ACCESSIBLE CONTROLS" in message
+    assert "center=(110,40)" in message
+
+
 def test_the_prompt_is_unchanged_when_nothing_was_added():
     from director.operator import prompts
 
@@ -221,6 +250,39 @@ def test_the_operator_is_told_to_reason_before_it_clicks():
     assert "Clicking to see what happens" in prompts.SYSTEM_PROMPT
 
 
+def test_action_tools_require_visible_plain_language_thoughts():
+    from director.operator import loop, prompts
+
+    for action_tool in prompts.ACTION_TOOLS:
+        required = action_tool["parameters"]["required"]
+        assert "thought" in required
+    typing = next(tool for tool in prompts.ACTION_TOOLS if tool["name"] == "type_text")
+    assert {"thought", "x", "y", "text"} <= set(typing["parameters"]["required"])
+
+    decision = loop.tool_decision({
+        "reasoning": "**Planning generic input**",
+        "tool_calls": [{
+            "name": "type_text",
+            "arguments": '{"thought":"The search field is visible; I will focus it and enter the query.","x":30,"y":40,"text":"query"}',
+        }],
+    })
+    assert decision["thought"].startswith("The search field is visible")
+    assert "thought" not in decision["actions"][0]
+
+
+def test_stop_is_a_terminal_operator_status():
+    from director.operator import loop, prompts
+
+    decision = loop.tool_decision({"tool_calls": [{
+        "name": "finish",
+        "arguments": '{"thought":"Calle asked me to stop, so I am ending the run now.","status":"stopped","message":"Stopped immediately."}',
+    }]})
+
+    assert decision["status"] == "stopped"
+    finish = next(tool for tool in prompts.ACTION_TOOLS if tool["name"] == "finish")
+    assert "stopped" in finish["parameters"]["properties"]["status"]["enum"]
+
+
 def test_done_requires_seeing_the_result():
     from director.operator import prompts
 
@@ -238,6 +300,23 @@ def test_the_operator_can_drag_and_replace_a_field():
     assert {"drag", "select_all_text"} <= names
     assert loop.TOOL_ACTIONS["drag"] == "drag"
     assert loop.TOOL_ACTIONS["select_all_text"] == "select_all"
+
+
+def test_the_operator_can_hover_and_draw_freehand():
+    from director.operator import loop, prompts
+
+    names = {tool["name"] for tool in prompts.ACTION_TOOLS}
+    assert {"move_pointer", "draw_path"} <= names
+    assert loop.TOOL_ACTIONS["move_pointer"] == "move"
+    assert loop.TOOL_ACTIONS["draw_path"] == "path"
+
+
+def test_the_operator_can_wait_for_the_desktop_instead_of_guessing_a_delay():
+    from director.operator import loop, prompts
+
+    names = {tool["name"] for tool in prompts.ACTION_TOOLS}
+    assert "wait_for_screen" in names
+    assert loop.TOOL_ACTIONS["wait_for_screen"] == "wait_screen"
 
 
 def test_a_drag_call_becomes_a_drag_action():

@@ -18,6 +18,11 @@ Reason about the screenshot, then call exactly one supplied tool. Use the mouse
 and keyboard tools for visible interaction. After each action you receive a new
 screenshot. Call `finish` only when the task is done, blocked, or needs Calle.
 
+Every action tool has a `thought` field. Put one concise plain-language sentence
+there saying what is visibly true, what you are targeting, and what should
+change. This is shown live to Calle. Do not put Markdown or generic labels such
+as planning, analyzing, or implementing in that field.
+
 Coordinates are screen pixels, top-left is (0,0). The user message states the
 exact width and height; every x,y you emit must be inside that rectangle.
 
@@ -76,6 +81,8 @@ Rules that matter:
   with "done", the screenshot in front of you must show the result — the page
   loaded, the value saved, the message sent. If it does not, keep working or
   say plainly what you could not confirm.
+* If Calle tells you to stop, call `finish` with status "stopped" immediately.
+  Do not turn a stop instruction into a question or handoff.
 * When the task is finished, call `finish` with status "done" and put the ANSWER in `message` — any
   value you were sent to find (a price, a name, a code, a status) must appear
   there literally, because that text is what gets reported back.
@@ -84,49 +91,81 @@ Rules that matter:
 """
 
 
-def _tool(name: str, description: str, properties: dict, required: list[str]) -> dict:
+def _tool(name: str, description: str, properties: dict, required: list[str],
+          *, visible_thought: bool = False) -> dict:
+    props = dict(properties)
+    needed = list(required)
+    if visible_thought:
+        props = {
+            "thought": {
+                "type": "string",
+                "description": "One concise plain sentence: visible state, target, and expected result. No Markdown or generic planning label.",
+            },
+            **props,
+        }
+        needed = ["thought", *needed]
     return {"name": name, "description": description,
-            "parameters": {"type": "object", "properties": properties,
-                           "required": required}}
+            "parameters": {"type": "object", "properties": props,
+                           "required": needed}}
+
+
+def _action_tool(name: str, description: str, properties: dict,
+                 required: list[str]) -> dict:
+    return _tool(name, description, properties, required, visible_thought=True)
 
 
 COORD = {"type": "integer", "minimum": 0}
 ACTION_TOOLS = [
-    _tool("click", "Click a visible point on the current screenshot.",
+    _action_tool("click", "Click a visible point on the current screenshot.",
           {"x": COORD, "y": COORD,
            "button": {"type": "string", "enum": ["left", "right", "middle"]},
            "clicks": {"type": "integer", "minimum": 1, "maximum": 2}}, ["x", "y"]),
-    _tool("type_text", "Type text into the currently focused control.",
-          {"text": {"type": "string"}}, ["text"]),
-    _tool("key", "Press a keyboard key one or more times.",
+    _action_tool("move_pointer", "Move the pointer without clicking, for hover menus, tooltips, previews, and revealing hidden controls.",
+          {"x": COORD, "y": COORD}, ["x", "y"]),
+    _action_tool("type_text", "Click the visible text control at x,y, focus it, then type text. Use the accessibility control center when one is listed.",
+          {"x": COORD, "y": COORD, "text": {"type": "string"},
+           "replace": {"type": "boolean", "description": "Replace the field's current text instead of inserting at the clicked position."}},
+          ["x", "y", "text"]),
+    _action_tool("key", "Press a keyboard key one or more times.",
           {"key": {"type": "string"},
            "presses": {"type": "integer", "minimum": 1, "maximum": 20}}, ["key"]),
-    _tool("hotkey", "Press a keyboard shortcut such as ctrl+l.",
+    _action_tool("hotkey", "Press a keyboard shortcut such as ctrl+l.",
           {"keys": {"type": "array", "items": {"type": "string"}, "minItems": 1}}, ["keys"]),
-    _tool("scroll", "Scroll at a visible point; positive dy scrolls down and negative dy scrolls up.",
+    _action_tool("scroll", "Scroll at a visible point; positive dy scrolls down and negative dy scrolls up.",
           {"x": COORD, "y": COORD,
            "dy": {"type": "integer", "minimum": -25, "maximum": 25}}, ["x", "y", "dy"]),
     # The loop could always perform a drag; until now the model had no way to
     # ask for one, which put sliders, range pickers, reordering and canvas work
     # out of reach.
-    _tool("drag", "Press at one point, move, and release at another. For sliders, "
+    _action_tool("drag", "Press at one point, move, and release at another. For sliders, "
                   "range handles, reordering lists and drawing.",
           {"from": {"type": "array", "items": COORD, "minItems": 2, "maxItems": 2},
            "to": {"type": "array", "items": COORD, "minItems": 2, "maxItems": 2},
            "button": {"type": "string", "enum": ["left", "right", "middle"]}},
           ["from", "to"]),
-    _tool("select_all_text", "Select everything in the focused field, so the next "
+    _action_tool("draw_path", "Press and draw one continuous freehand path through the supplied screen points, then release.",
+          {"points": {"type": "array", "items": {
+               "type": "array", "items": COORD, "minItems": 2, "maxItems": 2},
+               "minItems": 2, "maxItems": 80},
+           "button": {"type": "string", "enum": ["left", "right", "middle"]}},
+          ["points"]),
+    _action_tool("select_all_text", "Select everything in the focused field, so the next "
                              "type_text replaces it instead of appending.",
           {}, []),
-    _tool("open_url", "Open a URL in the persistent Chrome profile. This is the preferred, reliable way to navigate to any named site.",
+    _action_tool("open_url", "Open a URL in the persistent Chrome profile. This is the preferred, reliable way to navigate to any named site.",
           {"url": {"type": "string"}}, ["url"]),
-    _tool("wait", "Wait briefly for the desktop or page to settle.",
+    _action_tool("wait", "Wait briefly for the desktop or page to settle.",
           {"seconds": {"type": "number", "minimum": 0.1, "maximum": 10}}, ["seconds"]),
-    _tool("launch_app", "Launch a GUI application on the real desktop.",
+    _action_tool("wait_for_screen", "Wait until the visible desktop changes or remains stable. Use this after navigation, submission, app launch, or animation when readiness matters more than a guessed delay.",
+          {"condition": {"type": "string", "enum": ["change", "stable"]},
+           "timeout": {"type": "number", "minimum": 0.5, "maximum": 20},
+           "stable_for": {"type": "number", "minimum": 0.2, "maximum": 3}},
+          ["condition", "timeout"]),
+    _action_tool("launch_app", "Launch a GUI application on the real desktop.",
           {"command": {"type": "string"}}, ["command"]),
-    _tool("shell", "Run a bounded shell command on this Linux machine.",
+    _action_tool("shell", "Run a bounded shell command on this Linux machine.",
           {"command": {"type": "string"}}, ["command"]),
-    _tool("remember", "Keep something for your future runs on this screen: where a "
+    _action_tool("remember", "Keep something for your future runs on this screen: where a "
                       "control lives, which account is the right one, what did not "
                       "work. You are shown these at the start of every run.",
           {"key": {"type": "string",
@@ -134,8 +173,8 @@ ACTION_TOOLS = [
            "value": {"type": "string",
                      "description": "The lesson, in one or two sentences."}},
           ["key", "value"]),
-    _tool("finish", "Finish, ask Calle, hand off for credentials, or report failure.",
-          {"status": {"type": "string", "enum": ["done", "ask", "handoff", "fail"]},
+    _action_tool("finish", "Finish, stop, ask Calle, hand off for credentials, or report failure.",
+          {"status": {"type": "string", "enum": ["done", "stopped", "ask", "handoff", "fail"]},
            "message": {"type": "string"}}, ["status", "message"]),
 ]
 
@@ -165,7 +204,8 @@ PROGRESS_REVIEW_TOOLS = [
 def task_message(task: str, width: int, height: int, history: str,
                  windows: list[str] | None = None, feedback: str = "",
                  notes: list[str] | None = None, step: int = 0,
-                 background: str = "") -> str:
+                 background: str = "",
+                 controls: list[dict] | None = None) -> str:
     lines = [f"TASK: {task}", "", f"SCREEN: {width}x{height} pixels."]
     if step:
         lines.append(f"STEP: {step}")
@@ -175,6 +215,20 @@ def task_message(task: str, width: int, height: int, history: str,
         lines += ["", background]
     if windows:
         lines += ["", "OPEN WINDOWS: " + " | ".join(windows[:8])]
+    if controls:
+        lines += ["", "VISIBLE ACCESSIBLE CONTROLS (use these real screen bounds when they match the screenshot):"]
+        for row in controls[:60]:
+            x = int(row.get("x") or 0)
+            y = int(row.get("y") or 0)
+            control_width = int(row.get("width") or 0)
+            control_height = int(row.get("height") or 0)
+            center_x = x + control_width // 2
+            center_y = y + control_height // 2
+            name = str(row.get("name") or "").replace("\n", " ")[:120]
+            role = str(row.get("role") or "control")
+            focused = " focused" if row.get("focused") else ""
+            lines.append(
+                f'- {role} {name!r}: center=({center_x},{center_y}), bounds=({x},{y},{control_width},{control_height}){focused}')
     if history:
         lines += ["", "HISTORY:", history]
     if feedback:

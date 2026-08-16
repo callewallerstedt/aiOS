@@ -302,6 +302,7 @@ def chrome_argv(url: str = "", settings: dict[str, Any] | None = None) -> list[s
         "--password-store=basic",
         "--disable-dev-shm-usage",
         "--ozone-platform=x11",
+        "--force-renderer-accessibility",
         f"--window-size={width},{height}",
         "--window-position=0,0",
         "--start-maximized",

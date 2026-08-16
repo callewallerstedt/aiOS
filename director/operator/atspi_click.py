@@ -108,22 +108,75 @@ def _windows(desktop: Any, pyatspi: Any) -> list[Any]:
     return rows
 
 
+def _window_candidates(desktop: Any, pyatspi: Any, title: str = "") -> list[Any]:
+    """Return only the foreground window named by X11."""
+    wanted = str(title or "").strip().casefold()
+    windows = _windows(desktop, pyatspi)
+    if not wanted:
+        return []
+    exact = [row for row in windows if _label(row).strip().casefold() == wanted]
+    partial = [row for row in windows if wanted in _label(row).casefold()
+               or _label(row).casefold() in wanted]
+    return exact or partial
+
+
+def inspect_controls(title: str = "", limit: int = 60) -> dict[str, Any]:
+    """List visible interactive controls and their real screen bounds."""
+    import pyatspi  # system package; intentionally lazy for offline unit tests
+
+    desktop = pyatspi.Registry.getDesktop(0)
+    controls: list[dict[str, Any]] = []
+    interactive_roles = {
+        pyatspi.ROLE_CHECK_BOX, pyatspi.ROLE_COMBO_BOX,
+        pyatspi.ROLE_ENTRY, pyatspi.ROLE_LINK, pyatspi.ROLE_LIST_BOX,
+        pyatspi.ROLE_MENU_ITEM, pyatspi.ROLE_PAGE_TAB,
+        pyatspi.ROLE_PASSWORD_TEXT, pyatspi.ROLE_PUSH_BUTTON,
+        pyatspi.ROLE_RADIO_BUTTON, pyatspi.ROLE_SLIDER,
+        pyatspi.ROLE_SPIN_BUTTON, pyatspi.ROLE_TOGGLE_BUTTON,
+    }
+
+    def visit(node: Any, depth: int = 0) -> None:
+        if len(controls) >= max(1, int(limit)) or depth > 24:
+            return
+        try:
+            state = node.getState()
+            showing = state.contains(pyatspi.STATE_SHOWING)
+            visible = state.contains(pyatspi.STATE_VISIBLE)
+            role = node.getRole()
+            bounds = node.queryComponent().getExtents(pyatspi.DESKTOP_COORDS)
+        except Exception:
+            showing = visible = False
+            role = None
+            bounds = None
+        if (showing and visible and role in interactive_roles and bounds
+                and bounds.width > 1 and bounds.height > 1):
+            controls.append({
+                "role": str(node.getRoleName() or "control"),
+                "name": _label(node)[:160],
+                "x": int(bounds.x), "y": int(bounds.y),
+                "width": int(bounds.width), "height": int(bounds.height),
+                "focused": bool(state.contains(pyatspi.STATE_FOCUSED)),
+            })
+        try:
+            children = list(node)
+        except Exception:
+            children = []
+        for child in children:
+            visit(child, depth + 1)
+            if len(controls) >= max(1, int(limit)):
+                break
+
+    for window in _window_candidates(desktop, pyatspi, title):
+        visit(window)
+    return {"controls": controls}
+
+
 def click_at(x: int, y: int, title: str = "") -> dict[str, Any]:
     import pyatspi  # system package; intentionally lazy for offline unit tests
 
     desktop = pyatspi.Registry.getDesktop(0)
-    wanted = str(title or "").strip().casefold()
-    windows = _windows(desktop, pyatspi)
-    candidates = [row for row in windows if _contains(row, x, y, pyatspi.DESKTOP_COORDS)]
-    if wanted:
-        exact = [row for row in candidates if _label(row).strip().casefold() == wanted]
-        partial = [row for row in candidates if wanted in _label(row).casefold()
-                   or _label(row).casefold() in wanted]
-        candidates = exact or partial
-    else:
-        # The caller identifies the front X11 window by title. Without that
-        # identity, do not risk activating a covered window at the same point.
-        candidates = []
+    candidates = [row for row in _window_candidates(desktop, pyatspi, title)
+                  if _contains(row, x, y, pyatspi.DESKTOP_COORDS)]
     for window in candidates:
         found = _deepest_action(window, x, y, pyatspi.DESKTOP_COORDS, pyatspi)
         if not found:
@@ -147,6 +200,11 @@ def click_at(x: int, y: int, title: str = "") -> dict[str, Any]:
 
 def main(argv: list[str]) -> int:
     try:
+        if len(argv) > 1 and argv[1] == "inspect":
+            title = argv[2] if len(argv) > 2 else ""
+            limit = int(argv[3]) if len(argv) > 3 else 60
+            print(json.dumps(inspect_controls(title, limit), ensure_ascii=True))
+            return 0
         x, y = int(argv[1]), int(argv[2])
         title = argv[3] if len(argv) > 3 else ""
         result = click_at(x, y, title)

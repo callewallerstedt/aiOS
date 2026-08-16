@@ -1,0 +1,17 @@
+[Unit]
+Description=aiOS Director persistent virtual keyboard
+After=systemd-udev-settle.service
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/default/aios-director-keyboard
+ExecStart=/usr/bin/python3 /usr/local/lib/aios-director/uinput_keyboard.py --socket /run/aios-director/keyboard.sock --uid ${AIOS_KEYBOARD_UID} --gid ${AIOS_KEYBOARD_GID}
+Restart=on-failure
+RestartSec=2
+RuntimeDirectory=aios-director
+RuntimeDirectoryMode=0711
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
