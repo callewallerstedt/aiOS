@@ -245,6 +245,13 @@
 
 <script>
 (function () {
+  var host = location.hostname;
+  if (host !== "localhost" && host !== "127.0.0.1") return;
+  document.write('<script src="/mock.js"><\/script>');
+})();
+</script>
+<script>
+(function () {
   try {
     var raw = JSON.parse(localStorage.getItem("aios-director") || "{}");
     if (raw.token && raw.url) {

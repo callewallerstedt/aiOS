@@ -776,7 +776,7 @@ button { border: 0; background: none; cursor: pointer; }
 .transcript-spacer {
   flex: none;
   width: 100%;
-  height: 4px;
+  height: calc(52px + var(--composer-bottom));
   min-height: 0;
   pointer-events: none;
 }
@@ -1356,12 +1356,14 @@ body .loading-pixels span { background: var(--accent); }
 
 /* ---------------- composer ---------------- */
 
-/* Keep the composer in the chat's flex layout so the transcript can never
-   extend underneath it. max() avoids double-counting the base gap on devices
-   that already expose a larger home-indicator safe area. */
+/* The pill floats over the transcript. The wrapper stays transparent so
+   there is no solid bar behind it; a spacer keeps the last message clear
+   of the pill. max() avoids double-counting the home-indicator inset. */
 .composer {
-  position: relative;
-  flex: none;
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
   z-index: 8;
   display: grid;
   gap: 8px;
@@ -2002,7 +2004,7 @@ body .loading-pixels span { background: var(--accent); }
   .home-voice-wrap { padding-bottom: 8px; }
 
   #screen-chat {
-    background: var(--canvas);
+    background: transparent;
   }
   #screen-code {
     grid-column: 2;

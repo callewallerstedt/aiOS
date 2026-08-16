@@ -46,18 +46,18 @@ def test_tool_preview_ellipsis_is_not_a_flex_item():
     assert "overflow-x: clip" in CSS
 
 
-def test_composer_reserves_layout_space_and_respects_the_safe_area():
-    """The composer is a flex row, not an overlay. Its safe-area gap replaces
-    the base gap when larger so rounded-screen insets are not double-counted."""
+def test_composer_floats_over_the_transcript_with_a_transparent_bar():
+    """The pill overlays the thread. The wrapper is transparent so there is
+    no solid bar behind it; a spacer keeps the last message above the pill."""
     block = _block(CSS, ".composer {", ".composer-pill,")
-    assert "position: relative" in block
-    assert "flex: none" in block
+    assert "position: absolute" in block
+    assert "left: 0" in block
+    assert "right: 0" in block
+    assert "bottom: 0" in block
     assert "max(12px, env(safe-area-inset-right, 0px))" in block
     assert "var(--composer-bottom)" in block
     assert "max(12px, env(safe-area-inset-left, 0px))" in block
     assert "background: transparent" in block
-    assert "bottom: 0;" not in block
-    assert "position: absolute" not in block
     assert "interactive-widget=resizes-visual" in HTML
     assert "function syncKeyboardViewport()" in JS
     assert 'style.setProperty("--visual-height"' in JS
@@ -66,9 +66,12 @@ def test_composer_reserves_layout_space_and_respects_the_safe_area():
     transcript = _block(CSS, ".transcript {", ".transcript > *")
     assert "padding: 14px 12px" in transcript
     assert "safe-area-inset-bottom" not in transcript
+    spacer = _block(CSS, ".transcript-spacer {", ".chat-stamp")
+    assert "var(--composer-bottom)" in spacer
     chat = _block(CSS, "#screen-chat {", "#screen-chat .topbar")
     assert "display: flex" in chat
     assert "flex-direction: column" in chat
+    assert "position: relative" in chat
 
 
 def test_app_boots_without_the_code_transcript_module():
@@ -82,6 +85,16 @@ def test_app_boots_without_the_code_transcript_module():
     assert (ROOT / "phone_site" / "code" / "markdown.js").is_file()
     build = (ROOT / "phone_site" / "scripts" / "build.js").read_text(encoding="utf-8")
     assert "localCode" in build
+
+
+def test_offline_mock_is_localhost_only():
+    """The playground mock must not ship to Vercel or run on the live PWA."""
+    assert 'src="/mock.js"' in HTML
+    assert 'host !== "localhost"' in HTML
+    assert 'host !== "127.0.0.1"' in HTML
+    build = (ROOT / "phone_site" / "scripts" / "build.js").read_text(encoding="utf-8")
+    assert "mock.js" not in build
+    assert (ROOT / "phone_site" / "mock.js").is_file()
 
 
 def test_compacted_history_has_a_small_disclosure_control():

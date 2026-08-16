@@ -2,7 +2,19 @@
 
 Installable PWA and Cloudflare relay for securely controlling OPERATOR on multiple Windows PCs.
 
-## Local development
+## Local playground
+
+Serves these real files (`index.html`, `director.css`, `director.js`) with a
+localhost-only mock backend so you can edit the UI without pairing. `mock.js`
+is not deployed.
+
+```powershell
+python -m http.server 4173
+```
+
+Then open http://127.0.0.1:4173
+
+## Worker development
 
 ```powershell
 npm install
