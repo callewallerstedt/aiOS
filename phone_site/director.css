@@ -2225,7 +2225,7 @@ body .loading-pixels span { background: var(--accent); }
   inset: 0;
   z-index: 90;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto minmax(0, 1fr);
   min-height: 100dvh;
   overflow: hidden;
   background:
@@ -2248,6 +2248,70 @@ body .loading-pixels span { background: var(--accent); }
 .phone-mouse-head h1 { margin: 0; font-size: 15px; font-weight: 650; }
 .phone-mouse-head p { margin: -1px 0 0; color: var(--ink-3); font-size: 10.5px; }
 .phone-mouse-head .conn-dot { justify-self: center; }
+.phone-mouse-clicks {
+  display: grid;
+  grid-template-columns: 1fr 78px 1fr;
+  gap: 8px;
+  padding: 10px max(12px, env(safe-area-inset-right, 0px)) 10px
+           max(12px, env(safe-area-inset-left, 0px));
+  border-bottom: 1px solid var(--line);
+  background: #202124eb;
+  backdrop-filter: blur(18px);
+}
+.phone-mouse-click,
+.phone-mouse-wheel {
+  min-height: 96px;
+  display: grid;
+  place-content: center;
+  gap: 2px;
+  border: 1px solid var(--line-strong);
+  background: linear-gradient(#303236, #292b2e);
+  box-shadow: 0 4px 16px #0004;
+  color: var(--ink);
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
+}
+.phone-mouse-click { border-radius: 18px; }
+.phone-mouse-click span { font-size: 16px; font-weight: 700; }
+.phone-mouse-click small,
+.phone-mouse-wheel small { color: var(--ink-3); font-size: 10px; }
+.phone-mouse-wheel {
+  position: relative;
+  border-radius: 999px;
+  overflow: hidden;
+}
+.phone-mouse-wheel-well {
+  width: 34px;
+  height: 62px;
+  border-radius: 999px;
+  background: repeating-linear-gradient(
+    to bottom,
+    #0d0e10 0 4px,
+    #5a5e66 4px 8px
+  );
+  box-shadow: inset 0 0 10px #000a, 0 0 0 1px #ffffff10;
+  will-change: transform;
+}
+.phone-mouse-wheel small {
+  position: absolute;
+  bottom: 7px;
+  left: 0;
+  right: 0;
+  text-align: center;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+.phone-mouse-click.pressed,
+.phone-mouse-wheel.pressed {
+  transform: translateY(1px);
+  border-color: #f2f0df66;
+  background: #3a3c40;
+  box-shadow: inset 0 2px 8px #0005;
+}
+.phone-mouse-pad.pressed { background: #ffffff0a; }
+.phone-mouse-wheel.scrolling { border-color: var(--accent); }
 .phone-mouse-body {
   min-height: 0;
   width: min(100%, 520px);
@@ -2255,10 +2319,11 @@ body .loading-pixels span { background: var(--accent); }
   overflow-y: auto;
   overflow-x: hidden;
   display: grid;
-  grid-template-rows: auto auto minmax(190px, 1fr) auto auto;
+  grid-template-rows: auto auto auto minmax(160px, 1fr) auto auto;
   align-items: center;
   gap: 12px;
-  padding: 16px max(16px, env(safe-area-inset-right, 0px)) 18px
+  padding: 14px max(16px, env(safe-area-inset-right, 0px))
+           max(14px, env(safe-area-inset-bottom, 0px))
            max(16px, env(safe-area-inset-left, 0px));
 }
 .phone-mouse-machine {
@@ -2287,6 +2352,27 @@ body .loading-pixels span { background: var(--accent); }
 .phone-mouse-status[data-tone="working"] { color: var(--orange); }
 .phone-mouse-status[data-tone="ready"] { color: var(--green); }
 .phone-mouse-status[data-tone="error"] { color: var(--red); }
+.phone-mouse-modes {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #1c1d20;
+}
+.phone-mouse-modes button {
+  min-height: 38px;
+  border-radius: 9px;
+  color: var(--ink-2);
+  font-size: 12.5px;
+  font-weight: 650;
+}
+.phone-mouse-modes button[aria-pressed="true"] {
+  color: var(--ink);
+  background: #32353b;
+  box-shadow: 0 1px 0 #ffffff0d;
+}
 .phone-mouse-field {
   position: relative;
   width: min(72vw, 330px);
@@ -2300,6 +2386,18 @@ body .loading-pixels span { background: var(--accent); }
   border-radius: 50%;
   background: radial-gradient(circle, #30343a 0 5%, #24272b 6% 33%, #202225 34% 100%);
   box-shadow: inset 0 0 60px #0005, 0 18px 70px #0005;
+}
+.phone-mouse-field[data-mode="trackpad"] {
+  width: 100%;
+  max-width: none;
+  max-height: none;
+  height: 100%;
+  min-height: 180px;
+  aspect-ratio: auto;
+  border-radius: 24px;
+  background:
+    linear-gradient(#ffffff08, #0000 28%),
+    radial-gradient(circle at 50% 50%, #2c3036 0 18%, #22252a 55% 100%);
 }
 .phone-mouse-rings,
 .phone-mouse-rings::before,
@@ -2324,14 +2422,27 @@ body .loading-pixels span { background: var(--accent); }
   transition: transform 60ms linear;
   will-change: transform;
 }
-.phone-mouse-field > span {
+.phone-mouse-pad {
+  display: none;
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  touch-action: none;
+}
+.phone-mouse-field[data-mode="trackpad"] .phone-mouse-rings,
+.phone-mouse-field[data-mode="trackpad"] .phone-mouse-dot { display: none; }
+.phone-mouse-field[data-mode="trackpad"] .phone-mouse-pad { display: block; }
+.phone-mouse-field[data-mode="accelerometer"] .phone-mouse-pad { display: none; }
+.phone-mouse-hint {
   position: absolute;
   bottom: 15%;
   color: var(--ink-3);
   font-size: 10px;
   letter-spacing: .08em;
   text-transform: uppercase;
+  pointer-events: none;
 }
+.phone-mouse-field[data-mode="trackpad"] .phone-mouse-hint { bottom: 12px; }
 .phone-mouse-sensitivity {
   display: grid;
   grid-template-columns: auto minmax(140px, 1fr);
@@ -2340,59 +2451,38 @@ body .loading-pixels span { background: var(--accent); }
   color: var(--ink-3);
   font-size: 11px;
 }
+.phone-mouse-sensitivity strong { color: var(--ink-2); font-variant-numeric: tabular-nums; }
 .phone-mouse-sensitivity input { width: 100%; accent-color: var(--accent); }
 .phone-mouse-actions { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
 .phone-mouse-actions .btn { min-height: 40px; }
 .phone-mouse-actions .phone-mouse-start { min-width: 180px; }
-.phone-mouse-buttons {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 10px;
-  padding: 10px max(12px, env(safe-area-inset-right, 0px))
-           max(12px, env(safe-area-inset-bottom, 0px))
-           max(12px, env(safe-area-inset-left, 0px));
-  border-top: 1px solid var(--line);
-  background: #202124eb;
-  backdrop-filter: blur(18px);
-}
-.phone-mouse-buttons button {
-  min-height: 76px;
-  display: grid;
-  place-content: center;
-  gap: 1px;
-  border: 1px solid var(--line-strong);
-  border-radius: 16px;
-  background: linear-gradient(#303236, #292b2e);
-  box-shadow: 0 4px 16px #0004;
-  user-select: none;
-  -webkit-user-select: none;
-  touch-action: none;
-}
-.phone-mouse-buttons button span { font-size: 14px; font-weight: 650; }
-.phone-mouse-buttons button small { color: var(--ink-3); font-size: 10px; }
-.phone-mouse-buttons button.pressed {
-  transform: translateY(1px);
-  border-color: #f2f0df66;
-  background: #3a3c40;
-  box-shadow: inset 0 2px 8px #0005;
-}
+.phone-mouse-page[data-mode="trackpad"] .phone-mouse-calibrate { display: none; }
+.phone-mouse-page[data-mode="trackpad"] .phone-mouse-actions { grid-template-columns: 1fr; }
 
 @media (orientation: landscape) and (max-height: 560px) {
+  .phone-mouse-clicks { padding-block: 8px; }
+  .phone-mouse-click,
+  .phone-mouse-wheel { min-height: 72px; }
   .phone-mouse-body {
     grid-template-columns: minmax(220px, .9fr) minmax(230px, 1.1fr);
-    grid-template-rows: auto auto auto auto;
+    grid-template-rows: auto auto auto auto auto;
     column-gap: 20px;
     padding-block: 10px;
   }
   .phone-mouse-machine { grid-column: 2; grid-row: 1; }
   .phone-mouse-status { grid-column: 2; grid-row: 2; }
-  .phone-mouse-sensitivity { grid-column: 2; grid-row: 3; }
-  .phone-mouse-actions { grid-column: 2; grid-row: 4; }
+  .phone-mouse-modes { grid-column: 2; grid-row: 3; }
+  .phone-mouse-sensitivity { grid-column: 2; grid-row: 4; }
+  .phone-mouse-actions { grid-column: 2; grid-row: 5; }
   .phone-mouse-actions { grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr); }
   .phone-mouse-actions .phone-mouse-start { min-width: 0; }
   .phone-mouse-actions .btn { min-width: 0; padding-inline: 9px; }
-  .phone-mouse-field { grid-column: 1; grid-row: 1 / 5; width: min(52vh, 280px); }
-  .phone-mouse-buttons button { min-height: 58px; }
+  .phone-mouse-field { grid-column: 1; grid-row: 1 / 6; width: min(52vh, 280px); }
+  .phone-mouse-field[data-mode="trackpad"] {
+    width: 100%;
+    height: 100%;
+    min-height: 0;
+  }
 }
 
 /* ---------------- CODE session viewer ---------------- */

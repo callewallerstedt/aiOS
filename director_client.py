@@ -338,9 +338,13 @@ class MouseController:
     LEFT_UP = 0x0004
     RIGHT_DOWN = 0x0008
     RIGHT_UP = 0x0010
+    MIDDLE_DOWN = 0x0020
+    MIDDLE_UP = 0x0040
+    WHEEL = 0x0800
     BUTTON_FLAGS = {
         "left": (LEFT_DOWN, LEFT_UP),
         "right": (RIGHT_DOWN, RIGHT_UP),
+        "middle": (MIDDLE_DOWN, MIDDLE_UP),
     }
 
     def __init__(self, user32=None) -> None:
@@ -352,10 +356,10 @@ class MouseController:
     def available(self) -> bool:
         return self.user32 is not None and hasattr(self.user32, "mouse_event")
 
-    def _event(self, flags: int, dx: int = 0, dy: int = 0) -> None:
+    def _event(self, flags: int, dx: int = 0, dy: int = 0, data: int = 0) -> None:
         if not self.available():
             raise RuntimeError("mouse control is only available on Windows")
-        self.user32.mouse_event(flags, int(dx), int(dy), 0, 0)
+        self.user32.mouse_event(flags, int(dx), int(dy), int(data) & 0xFFFFFFFF, 0)
 
     def move(self, dx: int, dy: int) -> None:
         dx = max(-160, min(160, int(dx)))
@@ -363,10 +367,15 @@ class MouseController:
         if dx or dy:
             self._event(self.MOVE, dx, dy)
 
+    def scroll(self, dy: int) -> None:
+        dy = max(-160, min(160, int(dy)))
+        if dy:
+            self._event(self.WHEEL, 0, 0, dy)
+
     def button(self, name: str, pressed: bool) -> None:
         name = str(name or "").lower()
         if name not in self.BUTTON_FLAGS:
-            raise ValueError("button must be left or right")
+            raise ValueError("button must be left, right, or middle")
         if pressed:
             if name in self.pressed:
                 return
@@ -381,10 +390,11 @@ class MouseController:
     def release_all(self) -> None:
         if not self.available():
             return
-        # Send both releases even after reconnecting: the old process may have
+        # Send releases even after reconnecting: the old process may have
         # received a down event whose in-memory pressed set was then lost.
         self._event(self.LEFT_UP)
         self._event(self.RIGHT_UP)
+        self._event(self.MIDDLE_UP)
         self.pressed.clear()
 
 
@@ -812,6 +822,10 @@ class DirectorClient:
     async def do_mouse_button(self, payload: dict) -> dict:
         self.mouse.button(str(payload.get("button") or ""),
                           bool(payload.get("pressed")))
+        return {"ok": True}
+
+    async def do_mouse_scroll(self, payload: dict) -> dict:
+        self.mouse.scroll(int(payload.get("dy") or 0))
         return {"ok": True}
 
     async def do_mouse_stop(self, payload: dict) -> dict:

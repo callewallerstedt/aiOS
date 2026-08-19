@@ -469,12 +469,17 @@ def test_phone_mouse_moves_and_releases_both_buttons():
     mouse.button("left", True)  # one held button must not double-press
     mouse.button("left", False)
     mouse.button("right", True)
+    mouse.scroll(-40)
+    mouse.button("middle", True)
     mouse.release_all()
 
     assert calls[0][:3] == (mouse.MOVE, 17, -9)
     assert [call[0] for call in calls].count(mouse.LEFT_DOWN) == 1
-    assert calls[-2][0] == mouse.LEFT_UP
-    assert calls[-1][0] == mouse.RIGHT_UP
+    assert any(call[0] == mouse.WHEEL and (call[3] & 0xFFFFFFFF) == (-40 & 0xFFFFFFFF)
+               for call in calls)
+    assert calls[-3][0] == mouse.LEFT_UP
+    assert calls[-2][0] == mouse.RIGHT_UP
+    assert calls[-1][0] == mouse.MIDDLE_UP
     assert mouse.pressed == set()
 
 
@@ -494,6 +499,8 @@ def test_phone_mouse_client_handlers_share_the_controller():
             actions.append(("move", dx, dy))
         def button(self, button, pressed):
             actions.append(("button", button, pressed))
+        def scroll(self, dy):
+            actions.append(("scroll", dy))
 
     client = director_client.DirectorClient({
         "url": "https://director.example", "token": "x", "name": "calle-windows"})
@@ -503,11 +510,12 @@ def test_phone_mouse_client_handlers_share_the_controller():
         assert (await client.do_mouse_start({}))["ok"] is True
         await client.do_mouse_move({"dx": 4, "dy": -3})
         await client.do_mouse_button({"button": "right", "pressed": True})
+        await client.do_mouse_scroll({"dy": -24})
         await client.do_mouse_stop({})
 
     asyncio.run(run())
     assert actions == [
-        ("release",), ("move", 4, -3), ("button", "right", True), ("release",),
+        ("release",), ("move", 4, -3), ("button", "right", True), ("scroll", -24), ("release",),
     ]
     assert director_client.CAPS["mouse"] is True
 

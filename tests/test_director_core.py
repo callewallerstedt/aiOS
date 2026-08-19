@@ -1764,6 +1764,14 @@ def test_phone_mouse_packets_are_bounded_and_canonical():
         "machine_id": "mch_1", "action": "button",
         "payload": {"button": "LEFT", "pressed": True},
     }) == ("mch_1", "button", {"button": "left", "pressed": True})
+    assert validate_mouse_message({
+        "machine_id": "mch_1", "action": "scroll",
+        "payload": {"dy": -18.6, "ignored": True},
+    }) == ("mch_1", "scroll", {"dy": -19})
+    assert validate_mouse_message({
+        "machine_id": "mch_1", "action": "button",
+        "payload": {"button": "middle", "pressed": False},
+    }) == ("mch_1", "button", {"button": "middle", "pressed": False})
     with pytest.raises(ValueError):
         validate_mouse_message({
             "machine_id": "mch_1", "action": "move",
@@ -1772,7 +1780,7 @@ def test_phone_mouse_packets_are_bounded_and_canonical():
     with pytest.raises(ValueError):
         validate_mouse_message({
             "machine_id": "mch_1", "action": "button",
-            "payload": {"button": "middle", "pressed": True},
+            "payload": {"button": "forward", "pressed": True},
         })
 
 
@@ -1799,6 +1807,18 @@ def test_phone_mouse_cast_uses_the_live_machine_without_an_rpc_future(director):
         "type": "cast", "action": "mouse.move", "payload": {"dx": 4, "dy": -2},
     }]
     assert hub._pending_calls == {}
+
+
+def test_phone_mouse_start_is_a_cast_so_swipes_are_not_queued(director):
+    from pathlib import Path
+
+    source = Path(__file__).resolve().parents[1].joinpath(
+        "director", "server.py").read_text(encoding="utf-8")
+    start = source.split('if action == "start":', 1)[1].split(
+        "if machine_id not in mouse_targets:", 1)[0]
+    assert "cast_machine" in start
+    assert "call_machine" not in start
+    assert 'await mouse_status(machine_id, "ready")' in start
 
 
 def test_wake_send_broadcasts_to_the_house_lan(director, monkeypatch):

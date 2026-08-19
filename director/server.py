@@ -613,7 +613,17 @@ async def get_events(request: web.Request) -> web.Response:
                           "cursor": events[-1]["id"] if events else since})
 
 
-MOUSE_ACTIONS = {"start", "move", "button", "stop"}
+MOUSE_ACTIONS = {"start", "move", "button", "scroll", "stop"}
+
+
+def _mouse_delta(payload: dict, name: str) -> int:
+    value = payload.get(name, 0)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("invalid mouse movement")
+    value = float(value)
+    if not math.isfinite(value) or abs(value) > 160:
+        raise ValueError("mouse movement is out of range")
+    return int(round(value))
 
 
 def validate_mouse_message(message: dict) -> tuple[str, str, dict]:
@@ -628,20 +638,13 @@ def validate_mouse_message(message: dict) -> tuple[str, str, dict]:
     if not isinstance(payload, dict):
         payload = {}
     if action == "move":
-        values = []
-        for name in ("dx", "dy"):
-            value = payload.get(name, 0)
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
-                raise ValueError("invalid mouse movement")
-            value = float(value)
-            if not math.isfinite(value) or abs(value) > 160:
-                raise ValueError("mouse movement is out of range")
-            values.append(int(round(value)))
-        payload = {"dx": values[0], "dy": values[1]}
+        payload = {"dx": _mouse_delta(payload, "dx"), "dy": _mouse_delta(payload, "dy")}
+    elif action == "scroll":
+        payload = {"dy": _mouse_delta(payload, "dy")}
     elif action == "button":
         button = str(payload.get("button") or "").lower()
         pressed = payload.get("pressed")
-        if button not in {"left", "right"} or not isinstance(pressed, bool):
+        if button not in {"left", "right", "middle"} or not isinstance(pressed, bool):
             raise ValueError("invalid mouse button")
         payload = {"button": button, "pressed": pressed}
     else:
@@ -706,24 +709,24 @@ async def websocket(request: web.Request) -> web.WebSocketResponse:
                     await mouse_status("", "error", str(exc))
                     continue
                 if action == "start":
-                    result = await runtime.call_machine(
-                        machine_id, "mouse.start", {}, timeout=5.0)
-                    if result.get("ok"):
-                        mouse_targets.add(machine_id)
-                        await mouse_status(machine_id, "ready")
-                    else:
-                        await mouse_status(machine_id, "error", str(
-                            result.get("error") or "computer did not start the mouse"))
+                    # Cast start instead of awaiting an RPC reply. Pointer
+                    # packets share this receive loop, so a round trip here
+                    # queued every first swipe behind Tailscale.
+                    if not await runtime.cast_machine(machine_id, "mouse.start", {}):
+                        await mouse_status(machine_id, "error", "computer went offline")
+                        continue
+                    mouse_targets.add(machine_id)
+                    await mouse_status(machine_id, "ready")
                     continue
                 if machine_id not in mouse_targets:
                     await mouse_status(machine_id, "error", "start the phone mouse first")
                     continue
-                if action == "move":
+                if action in {"move", "scroll"}:
                     now = time.monotonic()
                     if now - mouse_window >= 1.0:
                         mouse_window, mouse_moves = now, 0
                     mouse_moves += 1
-                    if mouse_moves > 90:
+                    if mouse_moves > 120:
                         continue
                 forwarded = await runtime.cast_machine(
                     machine_id, f"mouse.{action}", mouse_payload)

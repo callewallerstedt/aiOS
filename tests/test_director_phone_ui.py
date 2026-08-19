@@ -79,7 +79,7 @@ def test_app_boots_without_the_code_transcript_module():
     outside the phone_site project) and Safari never runs load(), so a paired
     phone sees Connect again with the token still in localStorage."""
     assert 'from "/code/transcript.js"' not in JS
-    assert 'await import("/code/transcript.js?v=42")' in JS
+    assert 'await import("/code/transcript.js?v=43")' in JS
     assert 'localStorage.getItem("aios-director")' in HTML
     assert (ROOT / "phone_site" / "code" / "transcript.js").is_file()
     assert (ROOT / "phone_site" / "code" / "markdown.js").is_file()
@@ -89,7 +89,7 @@ def test_app_boots_without_the_code_transcript_module():
 
 def test_offline_mock_is_localhost_only():
     """The playground mock must not ship to Vercel or run on the live PWA."""
-    assert 'src="/mock.js?v=42"' in HTML
+    assert 'src="/mock.js?v=43"' in HTML
     assert 'host !== "localhost"' in HTML
     assert 'host !== "127.0.0.1"' in HTML
     build = (ROOT / "phone_site" / "scripts" / "build.js").read_text(encoding="utf-8")
@@ -345,8 +345,21 @@ def test_hidden_developer_menu_opens_the_accelerometer_phone_mouse():
     assert 'sendPhoneMouse("button", { button: name, pressed: false })' in JS
     assert 'sendPhoneMouse("stop"' in JS
     assert "phoneMouseMachines" in JS
+    assert 'data-mode="accelerometer"' in JS
+    assert 'data-mode="trackpad"' in JS
+    assert "bindPhoneMousePad" in JS
+    assert "bindPhoneMouseWheel" in JS
+    assert 'sendPhoneMouseDelta("scroll"' in JS
+    assert "activatePhoneMouse()" in _block(JS, "async function startPhoneMouse()", "async function activatePhoneMouse()")
+    assert "accelerationIncludingGravity" in JS
+    assert "rotationRate" not in _block(JS, "function handlePhoneMotion", "async function requestMotionPermission")
     assert ".phone-mouse-page" in CSS
-    assert ".phone-mouse-buttons" in CSS
+    assert ".phone-mouse-clicks" in CSS
+    assert ".phone-mouse-wheel" in CSS
+    assert ".phone-mouse-pad" in CSS
+    clicks = _block(CSS, ".phone-mouse-clicks {", ".phone-mouse-click,")
+    assert "grid-template-columns: 1fr 78px 1fr" in clicks
+    assert "min-height: 96px" in _block(CSS, ".phone-mouse-click,", ".phone-mouse-click {")
 
 
 def test_churning_pixels_survive_the_late_code_theme_override():
@@ -359,9 +372,9 @@ def test_push_uses_agent_heading_and_is_silent_while_app_is_visible():
     assert 'payload.agent || payload.title || "Director"' in SW
     assert 'client.visibilityState === "visible"' in SW
     assert "showNotification(title" in SW
-    assert 'const VERSION = "director-v42"' in SW
-    assert 'director.js?v=42' in HTML
-    assert 'director.css?v=42' in HTML
+    assert 'const VERSION = "director-v43"' in SW
+    assert 'director.js?v=43' in HTML
+    assert 'director.css?v=43' in HTML
 
 
 def test_stop_button_clears_stale_working_state_after_server_acknowledges():
@@ -420,7 +433,7 @@ def test_takeover_toolbar_can_request_the_software_keyboard():
     assert "director.keyboard-input" in shell
     assert "director.keyboard-key" in shell
     assert ".takeover-keyboard-input" in CSS
-    assert 'const VERSION = "director-v42"' in SW
+    assert 'const VERSION = "director-v43"' in SW
 
 
 def test_home_voice_change_does_not_restyle_the_chat_microphone():
