@@ -111,6 +111,48 @@ button { border: 0; background: none; cursor: pointer; }
   overflow: hidden;
 }
 
+.launch-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: grid;
+  place-items: center;
+  padding: max(24px, var(--top)) 24px max(24px, var(--bottom));
+  background: var(--canvas);
+  opacity: 1;
+  transition: opacity 160ms ease, transform 220ms var(--ease);
+}
+.launch-screen.is-leaving {
+  opacity: 0;
+  transform: scale(1.015);
+  pointer-events: none;
+}
+.launch-lockup {
+  display: grid;
+  justify-items: center;
+  gap: 18px;
+}
+.launch-pixels.loading-pixels {
+  width: 58px;
+  height: 58px;
+  grid-template-columns: repeat(3, 16px);
+  grid-template-rows: repeat(3, 16px);
+  gap: 5px;
+  --wave: 1.15s;
+}
+.launch-pixels.loading-pixels span {
+  width: 16px;
+  height: 16px;
+  border-radius: 3px;
+}
+.launch-word {
+  font-family: var(--font-brand);
+  font-size: 13px;
+  letter-spacing: .18em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+}
+
 .screen {
   min-height: 0;
   min-width: 0;

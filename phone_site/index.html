@@ -12,13 +12,24 @@
 <link rel="manifest" href="/manifest.webmanifest" />
 <link rel="apple-touch-icon" href="/icons/aios-icon-180.png" />
 <link rel="icon" href="/icons/aios-icon-192.png" />
-<link rel="stylesheet" href="/director.css?v=43" />
-<link rel="stylesheet" href="/code/code.css?v=43" />
-<link rel="stylesheet" href="/code/code-beautiful.css?v=43" />
+<link rel="stylesheet" href="/director.css?v=44" />
+<link rel="stylesheet" href="/code/code.css?v=44" />
+<link rel="stylesheet" href="/code/code-beautiful.css?v=44" />
 </head>
 <body>
 
 <div id="app">
+
+  <section id="screen-launch" class="launch-screen" aria-label="Opening Director">
+    <div class="launch-lockup">
+      <span class="loading-pixels anim-wave launch-pixels" aria-hidden="true">
+        <span></span><span></span><span></span>
+        <span></span><span></span><span></span>
+        <span></span><span></span><span></span>
+      </span>
+      <div class="launch-word">Director</div>
+    </div>
+  </section>
 
   <!-- ---------- pairing ---------- -->
   <section id="screen-pair" class="screen">
@@ -247,7 +258,7 @@
 (function () {
   var host = location.hostname;
   if (host !== "localhost" && host !== "127.0.0.1") return;
-  document.write('<script src="/mock.js?v=43"><\/script>');
+  document.write('<script src="/mock.js?v=44"><\/script>');
 })();
 </script>
 <script>
@@ -263,6 +274,6 @@
   } catch (e) {}
 })();
 </script>
-<script src="/director.js?v=43" type="module"></script>
+<script src="/director.js?v=44" type="module"></script>
 </body>
 </html>

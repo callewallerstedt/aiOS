@@ -8,15 +8,15 @@
    cleanUrls 308s /index.html -> /, and cache.addAll treats that as failure,
    so we cache each file on its own and never fall back a script to HTML. */
 
-const VERSION = "director-v43";
+const VERSION = "director-v44";
 const SHELL = [
   "/",
-  "/director.css?v=43",
-  "/director.js?v=43",
-  "/code/transcript.js?v=43",
+  "/director.css?v=44",
+  "/director.js?v=44",
+  "/code/transcript.js?v=44",
   "/code/markdown.js",
-  "/code/code.css?v=43",
-  "/code/code-beautiful.css?v=43",
+  "/code/code.css?v=44",
+  "/code/code-beautiful.css?v=44",
   "/manifest.webmanifest",
   "/icons/aios-icon-192.png",
   "/icons/aios-icon-512.png",
@@ -92,22 +92,22 @@ self.addEventListener("fetch", (event) => {
 
   const isPage = request.mode === "navigate" || url.pathname === "/" || url.pathname.endsWith(".html");
 
-  event.respondWith((async () => {
-    try {
-      const response = await fetch(request);
-      if (response.ok) {
-        const copy = response.clone();
-        caches.open(VERSION).then((cache) => cache.put(request, copy)).catch(() => {});
-      }
-      return response;
-    } catch {
-      const hit = await caches.match(request);
-      if (hit) return hit;
-      if (isPage) {
-        const page = await caches.match("/");
-        if (page) return page;
-      }
-      return Response.error();
+  const cacheKey = isPage ? "/" : request;
+  const fresh = fetch(request).then(async (response) => {
+    if (response.ok) {
+      const cache = await caches.open(VERSION);
+      await cache.put(cacheKey, response.clone());
     }
-  })());
+    return response;
+  });
+
+  // The installed PWA should paint from its versioned shell immediately.
+  // Refresh the same entry in the background so the next launch is current.
+  event.waitUntil(fresh.then(() => undefined).catch(() => undefined));
+  event.respondWith(
+    caches.match(cacheKey).then((hit) => hit || fresh.catch(async () => {
+      if (isPage) return (await caches.match("/")) || Response.error();
+      return Response.error();
+    }))
+  );
 });

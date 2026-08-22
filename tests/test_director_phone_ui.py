@@ -79,7 +79,7 @@ def test_app_boots_without_the_code_transcript_module():
     outside the phone_site project) and Safari never runs load(), so a paired
     phone sees Connect again with the token still in localStorage."""
     assert 'from "/code/transcript.js"' not in JS
-    assert 'await import("/code/transcript.js?v=43")' in JS
+    assert 'await import("/code/transcript.js?v=44")' in JS
     assert 'localStorage.getItem("aios-director")' in HTML
     assert (ROOT / "phone_site" / "code" / "transcript.js").is_file()
     assert (ROOT / "phone_site" / "code" / "markdown.js").is_file()
@@ -89,7 +89,7 @@ def test_app_boots_without_the_code_transcript_module():
 
 def test_offline_mock_is_localhost_only():
     """The playground mock must not ship to Vercel or run on the live PWA."""
-    assert 'src="/mock.js?v=43"' in HTML
+    assert 'src="/mock.js?v=44"' in HTML
     assert 'host !== "localhost"' in HTML
     assert 'host !== "127.0.0.1"' in HTML
     build = (ROOT / "phone_site" / "scripts" / "build.js").read_text(encoding="utf-8")
@@ -368,13 +368,42 @@ def test_churning_pixels_survive_the_late_code_theme_override():
     assert "body .loading-pixels span { opacity: .72" in reduced
 
 
+def test_startup_animates_then_reveals_cached_or_fresh_chat_list():
+    assert 'id="screen-launch"' in HTML
+    assert 'class="loading-pixels anim-wave launch-pixels"' in HTML
+    assert HTML.count("<span></span>") >= 9
+    assert ".launch-screen.is-leaving" in CSS
+    assert ".launch-pixels.loading-pixels" in CSS
+    storage = _block(JS, "function load()", "function save()")
+    assert "Array.isArray(raw.agents)" in storage
+    save = _block(JS, "function save()", "function applyAppearance")
+    assert "agents," in save
+    load_agents = _block(JS, "async function loadAgents", "async function loadDirectorStatus")
+    assert 'api("/api/agents"' in load_agents
+    assert 'api("/api/state"' not in load_agents
+    boot = _block(JS, "async function boot()", "function wire()")
+    assert "Promise.race([agentsRequest" in boot
+    assert "CACHED_START_GRACE_MS" in boot
+    assert "await finishLaunch()" in boot
+    assert "Opening the phone always lands on the complete chat list" in boot
+    assert "isWide() && state.agentId" in boot
+    assert boot.index("await finishLaunch()") < boot.index("loadDirectorStatus().catch")
+
+
+def test_service_worker_serves_the_cached_shell_before_network_refresh():
+    assert "if (url.pathname.startsWith(\"/api/\")) return;" in SW
+    assert 'const cacheKey = isPage ? "/" : request;' in SW
+    assert "caches.match(cacheKey).then((hit) => hit || fresh" in SW
+    assert "event.waitUntil(fresh" in SW
+
+
 def test_push_uses_agent_heading_and_is_silent_while_app_is_visible():
     assert 'payload.agent || payload.title || "Director"' in SW
     assert 'client.visibilityState === "visible"' in SW
     assert "showNotification(title" in SW
-    assert 'const VERSION = "director-v43"' in SW
-    assert 'director.js?v=43' in HTML
-    assert 'director.css?v=43' in HTML
+    assert 'const VERSION = "director-v44"' in SW
+    assert 'director.js?v=44' in HTML
+    assert 'director.css?v=44' in HTML
 
 
 def test_stop_button_clears_stale_working_state_after_server_acknowledges():
@@ -433,7 +462,7 @@ def test_takeover_toolbar_can_request_the_software_keyboard():
     assert "director.keyboard-input" in shell
     assert "director.keyboard-key" in shell
     assert ".takeover-keyboard-input" in CSS
-    assert 'const VERSION = "director-v43"' in SW
+    assert 'const VERSION = "director-v44"' in SW
 
 
 def test_home_voice_change_does_not_restyle_the_chat_microphone():

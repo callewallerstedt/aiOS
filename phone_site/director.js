@@ -10,6 +10,9 @@
    (aios_ui/web/js/transcript.js), fed by events proxied through Director. */
 
 const STORE_KEY = "aios-director";
+const LAUNCH_MIN_MS = 340;
+const CACHED_START_GRACE_MS = 760;
+const launchStartedAt = performance.now();
 
 const state = {
   url: "",
@@ -63,6 +66,9 @@ function load() {
     state.device = raw.device || "";
     state.agentId = raw.agentId || "";
     state.pinnedAgentId = raw.pinnedAgentId || "agt_director";
+    state.agents = Array.isArray(raw.agents)
+      ? raw.agents.filter((agent) => agent && typeof agent.id === "string")
+      : [];
     if (raw.appearance) applyAppearance(raw.appearance);
   } catch {
     /* first run */
@@ -70,10 +76,25 @@ function load() {
 }
 
 function save() {
+  const agents = state.agents.map((agent) => ({
+    id: agent.id,
+    name: agent.name || "",
+    emoji: agent.emoji || "",
+    avatar: String(agent.avatar || "").length <= 20000 ? (agent.avatar || "") : "",
+    kind: agent.kind || "",
+    subtitle: agent.subtitle || "",
+    members: Array.isArray(agent.members) ? agent.members : [],
+    preview: agent.preview || "",
+    updated_at: agent.updated_at || 0,
+    status: agent.status || "idle",
+    busy: !!agent.busy,
+    routines: Number(agent.routines || 0),
+  }));
   localStorage.setItem(STORE_KEY, JSON.stringify({
     url: state.url, token: state.token, device: state.device, agentId: state.agentId,
     appearance: state.appearance,
     pinnedAgentId: state.pinnedAgentId,
+    agents,
   }));
 }
 
@@ -468,18 +489,24 @@ function apiUrl(path) {
 }
 
 async function api(path, options = {}) {
+  const { timeoutMs = 0, ...requestOptions } = options;
+  const controller = timeoutMs > 0 ? new AbortController() : null;
+  const timeout = controller ? setTimeout(() => controller.abort(), timeoutMs) : 0;
   let response;
   try {
     response = await fetch(apiUrl(path), {
-      ...options,
+      ...requestOptions,
+      ...(controller ? { signal: controller.signal } : {}),
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${state.token}`,
-        ...(options.headers || {}),
+        ...(requestOptions.headers || {}),
       },
     });
   } catch {
     throw new Error("Can't reach Director right now.");
+  } finally {
+    if (timeout) clearTimeout(timeout);
   }
   if (response.status === 401) {
     unpair(true);
@@ -509,6 +536,20 @@ function show(screen) {
   const empty = $("chat-empty");
   if (empty) empty.classList.toggle("hidden", !!state.agentId || code);
   document.body.classList.toggle("has-chat", !!state.agentId);
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function finishLaunch() {
+  const launch = $("screen-launch");
+  if (!launch || launch.classList.contains("hidden")) return;
+  const remaining = LAUNCH_MIN_MS - (performance.now() - launchStartedAt);
+  if (remaining > 0) await delay(remaining);
+  await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  launch.classList.add("is-leaving");
+  setTimeout(() => launch.classList.add("hidden"), 180);
 }
 
 /* ---------------- pairing ---------------- */
@@ -1072,6 +1113,7 @@ function configureCodeJob(wrap, card, fallbackDetail = "") {
   if (!id) return;
   const preview = String(card?.preview || fallbackDetail || "").trim();
   wrap.classList.add("code-job");
+  wrap.dataset.jobKind = "code";
   wrap.dataset.jobId = id;
   if (card?.session_id) wrap.dataset.sessionId = card.session_id;
   wrap.dataset.jobTitle = preview;
@@ -1121,9 +1163,9 @@ function toolCard({ callId, name, args, card, running }) {
   wrap.append(chip, body);
   if (card?.tone) wrap.classList.add(card.tone);
   if (card?.agent_id) wrap.classList.add("agent-link");
-  if (card?.job_id && (card?.job_kind === "operator" || name === "operator")) {
+  if (card?.job_id && card?.job_kind === "operator") {
     configureOperatorJob(wrap, card.job_id);
-  } else if (card?.job_id) {
+  } else if (card?.job_id && card?.job_kind === "code") {
     configureCodeJob(wrap, card, detail);
   }
   if (callId) state.tools.set(callId, wrap);
@@ -1161,9 +1203,9 @@ function finishTool(callId, name, card) {
   chip.querySelector(".meta").textContent = card?.meta || "";
   const body = wrap.querySelector(".tool-body");
   body.textContent = card?.body || "";
-  if (card?.job_id && (card?.job_kind === "operator" || name === "operator")) {
+  if (card?.job_id && card?.job_kind === "operator") {
     configureOperatorJob(wrap, card.job_id);
-  } else if (card?.job_id) {
+  } else if (card?.job_id && card?.job_kind === "code") {
     configureCodeJob(wrap, card);
   }
   if (card?.takeover) {
@@ -1178,6 +1220,7 @@ function configureOperatorJob(wrap, jobId) {
   const id = String(jobId || "");
   if (!id) return;
   wrap.classList.add("operator-job");
+  wrap.dataset.jobKind = "operator";
   wrap.dataset.operatorJobId = id;
   const body = wrap.querySelector(".tool-body");
   body.classList.add("operator-timeline");
@@ -1816,6 +1859,10 @@ function handleEvent(event) {
       addStatus(payload.error || "Something went wrong.", true);
       break;
 
+    case "thread.loop_warning":
+      addStatus(`Loop guard: ${payload.tool || "tool"} repeated the same outcome. Trying a different route.`, true);
+      break;
+
     case "thread.steered":
       addStatus("Sent — they'll pick this up without stopping.");
       break;
@@ -1973,17 +2020,27 @@ function rotateActiveBlobEyes() {
 
 /* ---------------- actions ---------------- */
 
-async function loadAgents() {
-  const data = await api("/api/state");
-  state.agents = data.agents || [];
-  state.machines = data.machines || [];
-  state.wake = data.wake || null;
-  state.pinnedAgentId = data.phone?.pinned_agent_id || state.pinnedAgentId || "agt_director";
+async function loadAgents({ timeoutMs = 0 } = {}) {
+  const data = await api("/api/agents", { timeoutMs });
+  state.agents = [...(data.agents || [])].sort(
+    (left, right) => Number(right.updated_at || 0) - Number(left.updated_at || 0));
   renderAgents();
-  paintWakeButton();
   paintHomeVoice();
   setConnection(state.socket?.readyState === WebSocket.OPEN);
-  prefetchThreads();
+  save();
+  scheduleThreadPrefetch();
+  return data;
+}
+
+async function loadDirectorStatus() {
+  const data = await api("/api/state");
+  state.machines = data.machines || [];
+  state.wake = data.wake || null;
+  state.cursor = Math.max(state.cursor, data.cursor || 0);
+  state.pinnedAgentId = data.phone?.pinned_agent_id || state.pinnedAgentId || "agt_director";
+  paintWakeButton();
+  paintHomeVoice();
+  save();
   return data;
 }
 
@@ -2135,6 +2192,20 @@ function prefetchThreads() {
         at: Date.now(),
       });
     }).catch(() => {});
+  }
+}
+
+let prefetchHandle = 0;
+function scheduleThreadPrefetch() {
+  if (prefetchHandle) return;
+  const run = () => {
+    prefetchHandle = 0;
+    if (!document.hidden) prefetchThreads();
+  };
+  if ("requestIdleCallback" in window) {
+    prefetchHandle = window.requestIdleCallback(run, { timeout: 1800 });
+  } else {
+    prefetchHandle = setTimeout(run, 900);
   }
 }
 
@@ -4684,7 +4755,7 @@ async function openCodeSession(jobId, sessionId = "", title = "", { pushHistory 
   mount.textContent = "";
   let Transcript;
   try {
-    ({ Transcript } = await import("/code/transcript.js?v=43"));
+    ({ Transcript } = await import("/code/transcript.js?v=44"));
   } catch (error) {
     mount.textContent = String(error.message || error);
     show("code");
@@ -4786,18 +4857,23 @@ async function boot() {
   if (!state.token || !state.url) {
     $("pair-url").value = defaultUrl();
     show("pair");
+    await finishLaunch();
     return;
   }
+  const hadCachedAgents = state.agents.length > 0;
+  renderAgents();
   show("agents");
-  try {
-    await loadAgents();
-    history.replaceState({ directorScreen: "agents" }, "");
-    const settings = await api("/api/settings").catch(() => null);
-    if (settings?.settings?.appearance) {
-      applyAppearance(settings.settings.appearance);
-      save();
-    }
-  } catch (error) {
+  connect();
+
+  const agentsRequest = loadAgents({ timeoutMs: 6000 }).then(
+    (data) => ({ data, error: null }),
+    (error) => ({ data: null, error }),
+  );
+  const initial = hadCachedAgents
+    ? await Promise.race([agentsRequest, delay(CACHED_START_GRACE_MS).then(() => null)])
+    : await agentsRequest;
+  if (initial?.error) {
+    const error = initial.error;
     const message = String(error.message || error);
     if (/no longer paired/i.test(message)) {
       show("pair");
@@ -4805,11 +4881,35 @@ async function boot() {
       const box = $("pair-error");
       box.textContent = message;
       box.classList.remove("hidden");
+      await finishLaunch();
       return;
     }
     setConnection(false, true);
   }
-  connect();
+  history.replaceState({ directorScreen: "agents" }, "");
+
+  // Opening the phone always lands on the complete chat list. A notification
+  // deep link still opens its chat, and wide layouts keep their split view.
+  const wanted = new URLSearchParams(location.search).get("agent");
+  const target = wanted && state.agents.some((agent) => agent.id === wanted)
+    ? wanted
+    : (isWide() && state.agentId && state.agents.some((agent) => agent.id === state.agentId)
+      ? state.agentId : "");
+  if (target) await openAgent(target).catch(() => show("agents"));
+  else show("agents");
+
+  await finishLaunch();
+  agentsRequest.then((result) => {
+    if (result?.error) setConnection(false, true);
+  });
+  loadDirectorStatus().catch(() => {});
+  api("/api/settings").then((settings) => {
+    if (settings?.settings?.appearance) {
+      applyAppearance(settings.settings.appearance);
+      save();
+    }
+  }).catch(() => {});
+
   setInterval(() => {
     if (document.hidden || !state.agents.length) return;
     for (const agent of state.agents) paintAgentRow(agent);
@@ -4818,14 +4918,6 @@ async function boot() {
   setInterval(() => {
     if (!document.hidden) refreshPowerStatus();
   }, 10000);
-
-  // Deep link from a notification tap: ?agent=agt_x
-  const wanted = new URLSearchParams(location.search).get("agent");
-  const target = wanted && state.agents.some((agent) => agent.id === wanted)
-    ? wanted : state.agentId;
-  if (target && state.agents.some((agent) => agent.id === target)) {
-    await openAgent(target).catch(() => show("agents"));
-  }
 
   // Already-granted permission is re-subscribed silently; the subscription can
   // be rotated by the browser at any time and a stale one pushes into a void.
