@@ -89,7 +89,7 @@ def test_app_boots_without_the_code_transcript_module():
 
 def test_offline_mock_is_localhost_only():
     """The playground mock must not ship to Vercel or run on the live PWA."""
-    assert 'src="/mock.js?v=44"' in HTML
+    assert 'src="/mock.js?v=46"' in HTML
     assert 'host !== "localhost"' in HTML
     assert 'host !== "127.0.0.1"' in HTML
     build = (ROOT / "phone_site" / "scripts" / "build.js").read_text(encoding="utf-8")
@@ -123,8 +123,12 @@ def test_operator_tool_card_opens_its_own_reasoning_and_screenshot_timeline():
     assert "wrap.dataset.operatorJobId" in tool
     assert "loadOperatorJob" in tool
     finish = _block(JS, "function finishTool", "function configureOperatorJob")
-    assert 'card?.job_kind === "operator" || name === "operator"' in finish
-    assert "/events?since=0" in JS
+    assert 'card?.job_kind === "operator"' in finish
+    assert 'name === "operator"' not in finish
+    assert "events?since=${cursor}&limit=${pageSize}" in JS
+    assert "operatorEventCompare" in JS
+    assert "insertBefore(node, following.node)" in JS
+    assert "OPERATOR_TERMINAL_EVENTS" in JS
     assert "operatorEventNode" in JS
     assert 'event.kind === "operator.screenshot"' in JS
     assert 'event.kind === "operator.step"' in JS
@@ -134,6 +138,11 @@ def test_operator_tool_card_opens_its_own_reasoning_and_screenshot_timeline():
 
 
 def test_live_churning_grid_survives_into_real_thinking_and_history():
+    theme = (ROOT / "phone_site" / "code" / "code-beautiful.css").read_text(
+        encoding="utf-8")
+    assert ":root {" in theme[:500]
+    assert "--bui-ink-3:" in theme[:1000]
+    assert "--bui-accent-ink:" in theme[:1000]
     assert 'head.innerHTML = `${loadingPixels()}<span class="thinking-label">Thinking</span>' in JS
     ensure = _block(JS, "function ensureThinking()", "function settleThinking()")
     assert ensure.index("loadingPixels()") < ensure.index("settleWorking()")
@@ -401,9 +410,9 @@ def test_push_uses_agent_heading_and_is_silent_while_app_is_visible():
     assert 'payload.agent || payload.title || "Director"' in SW
     assert 'client.visibilityState === "visible"' in SW
     assert "showNotification(title" in SW
-    assert 'const VERSION = "director-v44"' in SW
-    assert 'director.js?v=44' in HTML
-    assert 'director.css?v=44' in HTML
+    assert 'const VERSION = "director-v46"' in SW
+    assert 'director.js?v=46' in HTML
+    assert 'director.css?v=46' in HTML
 
 
 def test_stop_button_clears_stale_working_state_after_server_acknowledges():
@@ -462,7 +471,7 @@ def test_takeover_toolbar_can_request_the_software_keyboard():
     assert "director.keyboard-input" in shell
     assert "director.keyboard-key" in shell
     assert ".takeover-keyboard-input" in CSS
-    assert 'const VERSION = "director-v44"' in SW
+    assert 'const VERSION = "director-v46"' in SW
 
 
 def test_home_voice_change_does_not_restyle_the_chat_microphone():

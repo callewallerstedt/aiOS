@@ -39,7 +39,6 @@ const TODO_HEAD_CHECK_ICON = '<svg class="todoHeadCheck" viewBox="0 0 24 24" wid
 const TODO_CHECK_ICON = '<svg class="todoIcon" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M9 12.75 11.25 15 15 9.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" /></svg>';
 const TODO_ARROW_ICON = '<svg class="todoIcon strong" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="m12.75 15 3-3m0 0-3-3m3 3h-7.5M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" /></svg>';
 const TODO_DASHED_ICON = '<svg class="todoIcon" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.8" stroke-dasharray="1.8 3.6" stroke-linecap="round" /></svg>';
-const CODE_FILE_ICON = '<svg class="diffIcon" viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="M17.25 6.75 22.5 12l-5.25 5.25m-10.5 0L1.5 12l5.25-5.25m7.5-3-4.5 16.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>';
 
 const TOOL_ICONS = {
   think: '<path d="M12 2l2.4 7.2L22 12l-7.6 2.8L12 22l-2.4-7.2L2 12l7.6-2.8z" />',
@@ -85,54 +84,54 @@ export function fileDiffSummary(change) {
   };
 }
 
-function normalizeReasoningText(value) {
-  return String(value || "")
-    .replace(/\r\n?/g, "\n")
+export function normalizeReasoningText(value) {
+  const text = String(value || "").replace(/\r\n?/g, "\n");
+  const lines = text.split("\n");
+  let normalized = "";
+  let fenced = false;
+  let trimTransportIndent = false;
+  for (let index = 0; index < lines.length; index += 1) {
+    let line = lines[index];
+    if (trimTransportIndent) line = line.replace(/^[ \t]+/, "");
+    trimTransportIndent = false;
+    normalized += line;
+    if (index === lines.length - 1) break;
+
+    const trimmed = line.trim();
+    const next = lines[index + 1];
+    const nextTrimmed = next.trimStart();
+    const fenceBoundary = trimmed.startsWith("```");
+    if (fenceBoundary) fenced = !fenced;
+    const structuralLine = /^(?:```|#{1,6}\s|[-*+]\s|\d+[.)]\s|>|\|)/.test(nextTrimmed);
+    const hardBreak = /\s{2}$/.test(line) || /^\t|^ {4}/.test(next);
+    const preserve = fenced || fenceBoundary || !trimmed || !nextTrimmed || structuralLine || hardBreak;
+    if (preserve) {
+      normalized += "\n";
+      continue;
+    }
+
+    // Ox-Alpha's transport can put a newline before nearly every token. A
+    // leading space on the next chunk is the provider's word boundary; no
+    // leading space means it is a continuation such as "struct" + "urally".
+    const transportSpace = /^[ \t]/.test(next);
+    const sentenceBoundary = /[.!?:;]$/.test(line.trimEnd());
+    normalized += transportSpace || sentenceBoundary ? " " : "";
+    trimTransportIndent = transportSpace;
+  }
+  return normalized.replace(/[ \t]{2,}/g, " ")
     // Old sessions can contain a provider transport separator between almost
     // every token. Keep normal paragraphs, but turn 3+ blank lines into one
     // space so the archived trace is readable on phone and desktop.
     .replace(/\n(?:[ \t]*\n){2,}[ \t]*/g, " ");
 }
 
-function diffRows(change) {
-  const source = String(change?.diff || "").replace(/\r\n?/g, "\n");
-  const lines = source.split("\n");
-  const rows = [];
-  let oldLine = 1;
-  let newLine = 1;
-  let sawHunk = false;
-  for (const line of lines) {
-    const hunk = line.match(/^@@\s+-(\d+)(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s+@@/);
-    if (hunk) {
-      oldLine = Number(hunk[1]);
-      newLine = Number(hunk[2]);
-      sawHunk = true;
-      continue;
-    }
-    if (/^(?:---|\+\+\+)\s/.test(line) || line === "\\ No newline at end of file") continue;
-    if (!sawHunk && !line) continue;
-    if (line.startsWith("+")) {
-      rows.push({ old: null, cur: newLine++, type: "add", text: line.slice(1) });
-    } else if (line.startsWith("-")) {
-      rows.push({ old: oldLine++, cur: null, type: "del", text: line.slice(1) });
-    } else {
-      rows.push({ old: oldLine++, cur: newLine++, type: "ctx", text: line.startsWith(" ") ? line.slice(1) : line });
-    }
-  }
-  return rows.slice(0, 240);
-}
-
-function fileDiffMarkup(change) {
-  const rows = diffRows(change);
-  const added = rows.filter((row) => row.type === "add").length;
-  const removed = rows.filter((row) => row.type === "del").length;
-  return `<div class="aicss-diff diff" data-reveal="${escapeHtml(change.path)}" title="${escapeHtml(change.path)}">
-    <div class="diffHead">
-      <span class="diffFileWrap">${CODE_FILE_ICON}<span class="diffFile">${escapeHtml(change.name)}</span></span>
-      <span class="diffStat"><span class="add">+${added.toLocaleString()}</span><span class="del">-${removed.toLocaleString()}</span></span>
-    </div>
-    <div class="diffBody">${rows.map((row) => `<div class="diffRow ${row.type}"><span class="ln old">${row.old ?? ""}</span><span class="ln new">${row.cur ?? ""}</span><span class="sign">${row.type === "add" ? "+" : row.type === "del" ? "-" : ""}</span><code>${escapeHtml(row.text)}</code></div>`).join("")}</div>
-  </div>`;
+function fileDiffMarkup(change, className = "tool-run-diff") {
+  const added = Number(change?.add || 0);
+  const removed = Number(change?.del || 0);
+  return `<button type="button" class="${className}" data-reveal="${escapeHtml(change.path)}" title="Open ${escapeHtml(change.path)}">
+    <span class="turn-diff-file">${escapeHtml(change.name)}</span>
+    <span class="add">+${added.toLocaleString()}</span><span class="del">-${removed.toLocaleString()}</span>
+  </button>`;
 }
 
 function updateRollingCount(node, value) {
@@ -298,8 +297,10 @@ export class Transcript {
     this.turnUsage = new Map();
     this.suppressHarnessOutput = false;
     this.thinkingEl = null;
+    this.thinkingRun = null;
     this.thinkingKey = null;
     this.thinkingText = "";
+    this.thinkingEpisodes = new Map();
     this.thinkingStartedAt = 0;
     this.toolRun = null;
     this.questionCards = new Map();
@@ -309,30 +310,8 @@ export class Transcript {
     this.workingTimer = null;
     this.workingStartedAt = 0;
     this.currentTurnStartedAt = 0;
-    this.showThinking = true;
-    this.showReasoning = true;
-    try {
-      this.showThinking = window.localStorage.getItem("aiosShowThinking") !== "0";
-      this.showReasoning = window.localStorage.getItem("aiosShowReasoning") !== "0";
-    } catch (_) { /* storage can be unavailable in a locked-down WebView */ }
-
     this.abort = new AbortController();
-    this.mountControls();
     this.bind();
-  }
-
-  mountControls() {
-    const node = document.createElement("div");
-    node.className = "transcript-controls";
-    node.innerHTML = `
-      <span class="transcript-controls-label">Show</span>
-      <button class="transcript-toggle" type="button" data-transcript-toggle="thinking" aria-pressed="${this.showThinking}">Thinking</button>
-      <button class="transcript-toggle" type="button" data-transcript-toggle="reasoning" aria-pressed="${this.showReasoning}">Reasoning</button>
-    `;
-    this.transcript.prepend(node);
-    this.transcript.classList.toggle("hide-live-thinking", !this.showThinking);
-    this.transcript.classList.toggle("hide-reasoning", !this.showReasoning);
-    this.controlsEl = node;
   }
 
   destroy() {
@@ -353,23 +332,6 @@ export class Transcript {
       target.addEventListener(type, handler, { signal: this.abort.signal, ...extra });
 
     on(this.transcript, "click", (event) => {
-      const displayToggle = event.target.closest("[data-transcript-toggle]");
-      if (displayToggle) {
-        const option = displayToggle.dataset.transcriptToggle;
-        if (option === "thinking") this.showThinking = !this.showThinking;
-        if (option === "reasoning") this.showReasoning = !this.showReasoning;
-        try {
-          window.localStorage.setItem("aiosShowThinking", this.showThinking ? "1" : "0");
-          window.localStorage.setItem("aiosShowReasoning", this.showReasoning ? "1" : "0");
-        } catch (_) { /* keep the in-memory choice */ }
-        this.transcript.classList.toggle("hide-live-thinking", !this.showThinking);
-        this.transcript.classList.toggle("hide-reasoning", !this.showReasoning);
-        this.controlsEl?.querySelector('[data-transcript-toggle="thinking"]')
-          ?.setAttribute("aria-pressed", String(this.showThinking));
-        this.controlsEl?.querySelector('[data-transcript-toggle="reasoning"]')
-          ?.setAttribute("aria-pressed", String(this.showReasoning));
-        return;
-      }
       const fix = event.target.closest("[data-review-fix]");
       if (fix) {
         const cardNode = fix.closest(".tool-card");
@@ -500,7 +462,6 @@ export class Transcript {
     // The jump button is a sibling of the transcript, not a child, so emptying
     // the transcript no longer takes it with it.
     this.transcript.innerHTML = "";
-    this.mountControls();
     this.wroteTop = -1;
     this.wroteHeight = -1;
     this.cards.clear();
@@ -512,8 +473,10 @@ export class Transcript {
     this.turnUsage.clear();
     this.suppressHarnessOutput = false;
     this.thinkingEl = null;
+    this.thinkingRun = null;
     this.thinkingKey = null;
     this.thinkingText = "";
+    this.thinkingEpisodes.clear();
     this.thinkingStartedAt = 0;
     this.toolRun = null;
     this.clearWorking();
@@ -972,10 +935,6 @@ export class Transcript {
       </button>
       <div class="tool-run-expand">
         <div class="tool-run-clip">
-          <section class="tool-run-reasoning" hidden>
-            <div class="tool-run-reasoning-head"><span aria-hidden="true">${SPARK_ICON}</span><span>Reasoning</span><span class="tool-run-reasoning-count"></span></div>
-            <div class="tool-run-reasoning-content"></div>
-          </section>
           <div class="tool-run-rows"></div>
           <div class="tool-run-diffs" hidden></div>
         </div>
@@ -986,6 +945,9 @@ export class Transcript {
       body: node.querySelector(".tool-run-rows"),
       cards: new Set(),
       fileDiffs: new Map(),
+      // Each thinking episode gets its own inline block inside .tool-run-rows,
+      // keyed by activity_id so resumed streams update their own block.
+      thoughts: new Map(),
       reasoningKeys: new Set(),
       reasoningParts: new Map(),
       reasoningActive: false,
@@ -1059,8 +1021,11 @@ export class Transcript {
 
   finishTurnDiffs() {
     if (!this.turnFileDiffs.size) return;
-    // The exact file-diff cards already live in the turn's compact Activity
-    // disclosure. A second summary row after the answer duplicated every file.
+    const rows = [...this.turnFileDiffs.values()];
+    this.addRow("turn-diffs", `
+      <span class="turn-diffs-label">Files changed</span>
+      ${rows.map((change) => fileDiffMarkup(change, "turn-diff")).join("")}
+    `);
     this.turnFileDiffs.clear();
     this.turnDiffParts.clear();
   }
@@ -1221,18 +1186,39 @@ export class Transcript {
   streamThinking(activity, raw = {}) {
     const key = String(activity.activity_id || activityKey(activity));
     this.closeAssistant();
-    const run = this.ensureToolRun();
-    const reasoning = run.node.querySelector(".tool-run-reasoning");
+    // A terminal packet may arrive after another event has closed the visible
+    // tool group. Reuse the group where this episode first appeared, so an
+    // update can never move reasoning past later tool calls.
+    const previousEpisode = this.thinkingEpisodes.get(key);
+    const run = previousEpisode?.run || this.ensureToolRun();
 
     if (this.thinkingKey !== key) {
       this.thinkingKey = key;
-      this.thinkingText = "";
+      // A stage/tool event can end the live indicator before the provider's
+      // terminal thinking event arrives. Resume the already-rendered text for
+      // that activity instead of replacing it with an empty completed event.
+      this.thinkingText = String(run.reasoningParts.get(key) || "");
       this.thinkingStartedAt = Date.now();
       run.reasoningKeys.add(key);
-      run.reasoningParts.set(key, "");
+      if (!run.reasoningParts.has(key)) run.reasoningParts.set(key, "");
+      if (!run.thoughts.has(key)) {
+        // Each reasoning episode is its own block, appended to the tool rows
+        // in arrival order so it sits between the tool calls it preceded.
+        const wrap = document.createElement("section");
+        wrap.className = "tool-run-thought-block";
+        wrap.innerHTML = `
+          <div class="tool-run-reasoning-head"><span aria-hidden="true">${SPARK_ICON}</span><span>Reasoning</span></div>
+          <div class="tool-run-reasoning-content"><div class="tool-run-thought"></div></div>
+        `;
+        run.body.appendChild(wrap);
+        run.thoughts.set(key, wrap);
+        this.thinkingEpisodes.set(key, { run, block: wrap });
+      }
     }
-    if (raw.delta) this.thinkingText += normalizeReasoningText(raw.delta);
-    else if (activity.summary) this.thinkingText = normalizeReasoningText(activity.summary);
+    // Keep the provider stream lossless. Normalization belongs at render time;
+    // doing it after every token made early newline decisions irreversible.
+    if (raw.delta) this.thinkingText += String(raw.delta);
+    else if (activity.summary && !this.thinkingText) this.thinkingText = String(activity.summary);
     run.reasoningParts.set(key, this.thinkingText);
 
     const phase = String(raw.phase || activity.phase || "").toLowerCase();
@@ -1240,27 +1226,28 @@ export class Transcript {
     run.reasoningActive = !done;
     run.reasoningTitle = String(activity.title || "Thinking");
     run.reasoningOrder = ++run.sequence;
-    reasoning.hidden = false;
-    reasoning.classList.toggle("live", !done);
-    reasoning.querySelector(".tool-run-reasoning-count").textContent =
-      `${run.reasoningKeys.size} thought${run.reasoningKeys.size === 1 ? "" : "s"}`;
-    reasoning.querySelector(".tool-run-reasoning-content").innerHTML = [...run.reasoningParts.values()]
-      .map((part) => String(part || "").trim())
-      .filter(Boolean)
-      .map((part) => `<div class="tool-run-thought">${renderMarkdown(part)}</div>`)
-      .join("");
-    this.thinkingEl = reasoning;
+
+    const block = run.thoughts.get(key);
+    if (block) {
+      block.classList.toggle("live", !done);
+      this.thinkingEl = block;
+      this.thinkingRun = run;
+      const text = normalizeReasoningText(this.thinkingText).trim();
+      block.querySelector(".tool-run-thought").innerHTML =
+        text ? renderMarkdown(text) : "";
+    }
     this.updateToolRun(run);
     if (done) this.closeThinking();
   }
 
   closeThinking() {
     if (this.thinkingEl) this.thinkingEl.classList.remove("live");
-    if (this.toolRun) {
-      this.toolRun.reasoningActive = false;
-      this.updateToolRun(this.toolRun);
+    if (this.thinkingRun) {
+      this.thinkingRun.reasoningActive = false;
+      this.updateToolRun(this.thinkingRun);
     }
     this.thinkingEl = null;
+    this.thinkingRun = null;
     this.thinkingKey = null;
     this.thinkingText = "";
     this.thinkingStartedAt = 0;

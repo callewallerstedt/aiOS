@@ -33,6 +33,7 @@ const state = {
   jobs: new Map(),      // job_id -> element
   jobMeta: new Map(),   // job_id -> { session_id, title, ... }
   operatorJobs: new Map(), // job_id -> inline Operator event viewer
+  operatorEventBacklog: new Map(), // events that raced ahead of their tool card
   threads: new Map(),   // agentId -> last thread payload
   openGen: 0,
   shot: { image: "", at: 0 },
@@ -470,7 +471,8 @@ function glyphFor(name) {
     web_fetch: "web", web_search: "search",
     read_file: "read", write_file: "write", list_dir: "ls",
     remember: "remember", recall: "remember", forget: "remember",
-    operator: "operator", operator_screenshot: "screen", operator_takeover: "screen",
+    operator: "operator", operator_say: "operator", operator_stop: "operator",
+    operator_screenshot: "screen", operator_takeover: "screen",
     code_session: "code", code_status: "code", code_configs: "code",
     machines: "machines",
   };
@@ -1143,7 +1145,8 @@ function toolCard({ callId, name, args, card, running }) {
     if (wrap.dataset.operatorJobId) {
       event.preventDefault();
       wrap.classList.toggle("expanded");
-      if (wrap.classList.contains("expanded")) loadOperatorJob(wrap.dataset.operatorJobId);
+      chip.setAttribute("aria-expanded", String(wrap.classList.contains("expanded")));
+      if (wrap.classList.contains("expanded")) loadOperatorJob(wrap.dataset.operatorJobId, wrap);
       return;
     }
     if (card?.agent_id) {
@@ -1163,8 +1166,9 @@ function toolCard({ callId, name, args, card, running }) {
   wrap.append(chip, body);
   if (card?.tone) wrap.classList.add(card.tone);
   if (card?.agent_id) wrap.classList.add("agent-link");
-  if (card?.job_id && card?.job_kind === "operator") {
-    configureOperatorJob(wrap, card.job_id);
+  if (card?.job_kind === "operator") {
+    if (card?.job_id) configureOperatorJob(wrap, card.job_id, card, detail);
+    else decorateOperatorCard(wrap, card, detail);
   } else if (card?.job_id && card?.job_kind === "code") {
     configureCodeJob(wrap, card, detail);
   }
@@ -1203,8 +1207,9 @@ function finishTool(callId, name, card) {
   chip.querySelector(".meta").textContent = card?.meta || "";
   const body = wrap.querySelector(".tool-body");
   body.textContent = card?.body || "";
-  if (card?.job_id && card?.job_kind === "operator") {
-    configureOperatorJob(wrap, card.job_id);
+  if (card?.job_kind === "operator" || wrap.dataset.jobKind === "operator") {
+    if (card?.job_id) configureOperatorJob(wrap, card.job_id, card, card?.preview || "");
+    else decorateOperatorCard(wrap, card, card?.preview || "");
   } else if (card?.job_id && card?.job_kind === "code") {
     configureCodeJob(wrap, card);
   }
@@ -1216,19 +1221,52 @@ function finishTool(callId, name, card) {
   scrollDown();
 }
 
-function configureOperatorJob(wrap, jobId) {
-  const id = String(jobId || "");
-  if (!id) return;
+function operatorSessionLogo() {
+  return `<span class="operator-logo-screen">${svg(ICONS.operator)}<i></i></span>`;
+}
+
+function decorateOperatorCard(wrap, card = {}, fallbackDetail = "") {
   wrap.classList.add("operator-job");
   wrap.dataset.jobKind = "operator";
+  const chip = wrap.querySelector(".tool-chip");
+  const preview = String(card?.preview || fallbackDetail || "").trim();
+  if (chip) {
+    chip.querySelector(".glyph").innerHTML = operatorSessionLogo();
+    chip.querySelector(".name").textContent = "Operator session";
+    chip.querySelector(".detail").textContent = preview;
+    chip.querySelector(".meta").textContent = card?.meta || card?.job_status || "";
+    chip.setAttribute("aria-label", preview
+      ? `View Operator session: ${preview}` : "View Operator session");
+    chip.setAttribute("aria-expanded", String(wrap.classList.contains("expanded")));
+    const chevron = chip.querySelector(".card-chevron");
+    if (chevron) chevron.hidden = !wrap.dataset.operatorJobId;
+  }
+}
+
+function configureOperatorJob(wrap, jobId, card = {}, fallbackDetail = "") {
+  const id = String(jobId || "");
+  if (!id) return;
   wrap.dataset.operatorJobId = id;
+  decorateOperatorCard(wrap, card, fallbackDetail);
+  const chip = wrap.querySelector(".tool-chip");
+  chip?.querySelector(".card-chevron")?.removeAttribute("hidden");
   const body = wrap.querySelector(".tool-body");
   body.classList.add("operator-timeline");
   if (!body.childNodes.length) body.append(el("div", "operator-empty", "Tap to view this run"));
-  const existing = state.operatorJobs.get(id);
-  state.operatorJobs.set(id, existing
-    ? { ...existing, wrap, body }
-    : { wrap, body, seen: new Set(), loaded: false, loading: false });
+  const views = state.operatorJobs.get(id) || [];
+  if (!body.id) body.id = `operator-timeline-${id}-${views.length + 1}`;
+  if (chip) chip.setAttribute("aria-controls", body.id);
+  if (!views.some((view) => view.wrap === wrap)) {
+    const view = {
+      wrap, body, seen: new Set(), events: new Map(),
+      loaded: false, loading: false,
+    };
+    views.push(view);
+    for (const event of state.operatorEventBacklog.get(id) || []) {
+      appendOperatorEvent(view, event);
+    }
+  }
+  state.operatorJobs.set(id, views);
 }
 
 function operatorEventNode(event) {
@@ -1257,6 +1295,9 @@ function operatorEventNode(event) {
   } else if (event.kind === "operator.actions") {
     title = `${label} · Action`;
     text = (payload.performed || []).join("\n") || "Action completed";
+  } else if (event.kind === "operator.note") {
+    title = `${label} · Follow-up received`;
+    text = payload.text || "User follow-up received";
   } else if (event.kind === "operator.progress_review") {
     title = `${label} · Progress review`;
     text = payload.progress
@@ -1282,37 +1323,113 @@ function operatorEventNode(event) {
   return node;
 }
 
-function recordOperatorEvent(event) {
-  const jobId = String(event.payload?.job_id || "");
-  const view = state.operatorJobs.get(jobId);
-  if (!jobId || !view || view.seen.has(event.id)) return;
-  view.seen.add(event.id);
-  view.body.querySelector(".operator-empty")?.remove();
-  const node = operatorEventNode(event);
-  if (node) view.body.append(node);
+function operatorEventKey(event) {
+  if (event?.id !== undefined && event?.id !== null) return `id:${event.id}`;
+  const payload = event?.payload || {};
+  return ["fallback", event?.kind || "", payload.job_id || "",
+    payload.step || payload.steps || "", event?.created_at || ""].join(":");
+}
+
+function operatorEventOrder(event) {
+  const id = Number(event?.id);
+  if (Number.isFinite(id) && id > 0) return id;
+  return Number(event?.created_at || 0) * 1000;
+}
+
+function operatorEventCompare(left, right) {
+  const delta = operatorEventOrder(left) - operatorEventOrder(right);
+  if (delta) return delta;
+  return operatorEventKey(left).localeCompare(operatorEventKey(right));
+}
+
+const OPERATOR_TERMINAL_EVENTS = new Set([
+  "operator.done", "operator.failed", "operator.stuck", "operator.stopped",
+]);
+
+function updateOperatorMeta(view) {
   const meta = view.wrap.querySelector(".tool-chip .meta");
-  if (event.kind === "operator.done") meta.textContent = "done";
-  else if (event.kind === "operator.failed") meta.textContent = "failed";
-  else if (event.kind === "operator.stuck") meta.textContent = "stopped";
+  if (!meta) return;
+  const ordered = [...view.events.values()].map((row) => row.event).sort(operatorEventCompare);
+  const terminal = ordered.filter((event) => OPERATOR_TERMINAL_EVENTS.has(event.kind)).pop();
+  const progress = ordered.filter((event) => ["operator.note", "operator.step"]
+    .includes(event.kind)).pop();
+  const event = terminal || progress;
+  if (!event) return;
+  if (event.kind === "operator.done") {
+    meta.textContent = "done";
+    view.wrap.classList.add("ok");
+    view.wrap.classList.remove("danger");
+  } else if (event.kind === "operator.failed") {
+    meta.textContent = "failed";
+    view.wrap.classList.add("danger");
+    view.wrap.classList.remove("ok");
+  } else if (["operator.stuck", "operator.stopped"].includes(event.kind)) {
+    meta.textContent = "stopped";
+    view.wrap.classList.add("danger");
+    view.wrap.classList.remove("ok");
+  }
+  else if (event.kind === "operator.note") meta.textContent = "follow-up received";
   else if (event.kind === "operator.step") meta.textContent = `step ${event.payload?.step || ""}`.trim();
 }
 
-async function loadOperatorJob(jobId) {
-  const view = state.operatorJobs.get(String(jobId || ""));
+function appendOperatorEvent(view, event) {
+  const key = operatorEventKey(event);
+  if (view.seen.has(key)) return;
+  view.seen.add(key);
+  const node = operatorEventNode(event);
+  view.events.set(key, { event, node });
+  if (node) {
+    view.body.querySelector(".operator-empty")?.remove();
+    const following = [...view.events.values()]
+      .filter((row) => row.node && operatorEventCompare(row.event, event) > 0)
+      .sort((left, right) => operatorEventCompare(left.event, right.event))[0];
+    if (following?.node?.parentNode === view.body) view.body.insertBefore(node, following.node);
+    else view.body.append(node);
+  }
+  updateOperatorMeta(view);
+}
+
+function recordOperatorEvent(event) {
+  const jobId = String(event.payload?.job_id || "");
+  const views = state.operatorJobs.get(jobId) || [];
+  if (!jobId) return;
+  if (!views.length) {
+    const queued = state.operatorEventBacklog.get(jobId) || [];
+    queued.push(event);
+    state.operatorEventBacklog.set(jobId, queued.slice(-40));
+    return;
+  }
+  for (const view of views) appendOperatorEvent(view, event);
+}
+
+async function loadOperatorJob(jobId, wrap = null) {
+  const views = state.operatorJobs.get(String(jobId || "")) || [];
+  const view = views.find((candidate) => !wrap || candidate.wrap === wrap);
   if (!view || view.loaded || view.loading) return;
   view.loading = true;
   const empty = view.body.querySelector(".operator-empty");
   if (empty) empty.textContent = "Loading run…";
   try {
-    const data = await api(`/api/jobs/${encodeURIComponent(jobId)}/events?since=0`);
-    for (const event of data.events || []) recordOperatorEvent(event);
+    const pageSize = 80;
+    let cursor = 0;
+    let received = 0;
+    while (true) {
+      const data = await api(`/api/jobs/${encodeURIComponent(jobId)}/events?since=${cursor}&limit=${pageSize}`);
+      const events = data.events || [];
+      for (const event of events) appendOperatorEvent(view, event);
+      received += events.length;
+      const next = Number(data.cursor || cursor);
+      if (!events.length || next <= cursor || events.length < Number(data.limit || pageSize)) break;
+      cursor = next;
+    }
     view.loaded = true;
-    if (!(data.events || []).length) {
+    if (!received && !view.events.size) {
       view.body.querySelector(".operator-empty")?.remove();
       view.body.append(el("div", "operator-empty", "No Operator events were recorded."));
     }
   } catch (error) {
-    if (empty) empty.textContent = String(error.message || error);
+    view.body.querySelector(".operator-empty")?.remove();
+    view.body.append(el("div", "operator-empty", String(error.message || error)));
   } finally {
     view.loading = false;
   }
@@ -1599,6 +1716,7 @@ function renderMessages(messages, thread = state.currentThread) {
   state.jobs.clear();
   state.jobMeta.clear();
   state.operatorJobs.clear();
+  state.operatorEventBacklog.clear();
   state.streaming = null;
   state.thinking = null;
   state.reasoningRendered = false;
@@ -1742,7 +1860,8 @@ function handleEvent(event) {
     case "tool.start":
       if (payload.name === "start_work" || payload.name === "react") break;
       settleThinking();
-      toolCard({ callId: payload.call_id, name: payload.name, args: payload.arguments, running: true });
+      toolCard({ callId: payload.call_id, name: payload.name, args: payload.arguments,
+                 card: payload.card, running: true });
       break;
 
     case "tool.done":
@@ -1794,6 +1913,7 @@ function handleEvent(event) {
       break;
 
     case "operator.started":
+    case "operator.note":
     case "operator.step":
     case "operator.actions":
     case "operator.progress_review":
@@ -1845,6 +1965,25 @@ function handleEvent(event) {
         const meta = state.jobMeta.get(payload.id) || {};
         meta.session_id = payload.session_id;
         state.jobMeta.set(payload.id, meta);
+      }
+      if (payload.kind === "operator" && payload.id) {
+        const views = state.operatorJobs.get(String(payload.id)) || [];
+        const hasTerminal = views.some((view) => [...view.events.values()]
+          .some((row) => OPERATOR_TERMINAL_EVENTS.has(row.event.kind)));
+        if (!hasTerminal) {
+          const kind = payload.status === "done" ? "operator.done"
+            : payload.status === "fail" ? "operator.failed" : "operator.stopped";
+          recordOperatorEvent({
+            id: `job-finished-${event.id || payload.id}`, kind,
+            created_at: event.created_at,
+            payload: {
+              job_id: payload.id,
+              summary: payload.summary || "",
+              error: payload.summary || "",
+              reason: payload.summary || "Stopped",
+            },
+          });
+        }
       }
       break;
     }
@@ -3091,6 +3230,81 @@ async function openSettings() {
   const openScreen = el("button", "btn", "Open the screen");
   openScreen.addEventListener("click", () => { dismiss(); openTakeover(op.takeover_path); });
   operator.append(openScreen);
+
+  // Operator model — what the Linux operator agent uses per step. It reads
+  // settings.operator.{backend,model,reasoning} on every run, so a PATCH here
+  // applies from the next task without touching the coordinator default.
+  const opCfg = data.settings.operator || {};
+  const opModelField = el("div", "field");
+  opModelField.append(el("label", null, "Operator model"));
+  const opSelect = el("select");
+  for (const model of data.models.codex_models || []) {
+    const option = document.createElement("option");
+    option.value = `codex:${model.id}`;
+    option.textContent = `${model.label} (Codex)`;
+    opSelect.append(option);
+  }
+  for (const model of data.models.openrouter_models || []) {
+    const option = document.createElement("option");
+    option.value = `openrouter:${model.id}`;
+    option.textContent = `${model.label} (OpenRouter)`;
+    opSelect.append(option);
+  }
+  const opCustom = document.createElement("option");
+  opCustom.value = "openrouter:";
+  opCustom.textContent = "OpenRouter model…";
+  opSelect.append(opCustom);
+  const opBackend = opCfg.backend || "codex";
+  const opModel = opCfg.model || "";
+  const opChoice = `${opBackend}:${opModel}`;
+  opSelect.value = [...opSelect.options].some((option) => option.value === opChoice)
+    ? opChoice : (opBackend === "openrouter" ? "openrouter:" : opChoice);
+  opModelField.append(opSelect);
+  operator.append(opModelField);
+
+  const opOrField = el("div", "field");
+  opOrField.append(el("label", null, "OpenRouter model id (when chosen above)"));
+  const opOrInput = el("input");
+  opOrInput.placeholder = "anthropic/claude-sonnet-4.5";
+  if (opBackend === "openrouter"
+      && !(data.models.openrouter_models || []).some((row) => row.id === opModel)) {
+    opOrInput.value = opModel;
+  }
+  opOrField.append(opOrInput);
+  operator.append(opOrField);
+
+  const opReasoningField = el("div", "field");
+  opReasoningField.append(el("label", null, "Operator reasoning"));
+  const opReasoning = el("select");
+  for (const level of ["none", "low", "medium", "high"]) {
+    const option = document.createElement("option");
+    option.value = level; option.textContent = level;
+    opReasoning.append(option);
+  }
+  opReasoning.value = opCfg.reasoning || "medium";
+  opReasoningField.append(opReasoning);
+  operator.append(opReasoningField);
+
+  const saveOperator = el("button", "btn primary", "Save operator model");
+  saveOperator.addEventListener("click", async () => {
+    const separator = opSelect.value.indexOf(":");
+    const backend = opSelect.value.slice(0, separator);
+    const model = opSelect.value.slice(separator + 1);
+    const patch = {
+      operator: {
+        backend,
+        model: backend === "openrouter" ? (model || opOrInput.value.trim()) : model,
+        reasoning: opReasoning.value,
+      },
+    };
+    try {
+      await api("/api/settings", { method: "PATCH", body: JSON.stringify(patch) });
+      saveOperator.textContent = "Saved";
+    } catch (error) {
+      saveOperator.textContent = String(error.message || error);
+    }
+  });
+  operator.append(saveOperator);
   body.append(operator);
 
   // routines across every agent

@@ -99,6 +99,12 @@ def test_real_desktop_units_attach_to_xorg_and_retire_xvfb():
     assert "Environment=DISPLAY=:0" in chrome
     assert "disable --now aios-director-xvfb.service aios-director-wm.service" in install
     assert "--mode 1280x720 --scale 1x1" in desktop
+    assert "DBUS_SESSION_BUS_ADDRESS" in desktop
+    assert "org.gnome.desktop.session idle-delay 0" in desktop
+    assert "org.gnome.desktop.screensaver lock-enabled false" in desktop
+    assert "org.gnome.desktop.screensaver idle-activation-enabled false" in desktop
+    assert "org.gnome.settings-daemon.plugins.power sleep-inactive-ac-type 'nothing'" in desktop
+    assert "org.gnome.ScreenSaver.SetActive false" in desktop
     assert "aios-director-real-desktop.service" in install
 
 

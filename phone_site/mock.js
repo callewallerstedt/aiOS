@@ -96,6 +96,14 @@
     { ts: now() - 60, kind: "assistant", role: "assistant", text: "The phone stream is compact and the controls now reflect their state." },
   ];
 
+  const operatorEvents = [
+    { id: 51, kind: "operator.started", payload: { job_id: "job_operator_demo", task: "Check the signed-in music dashboard" } },
+    { id: 52, kind: "operator.note", payload: { job_id: "job_operator_demo", step: 2, text: "Use the email login, not Google." } },
+    { id: 53, kind: "operator.step", payload: { job_id: "job_operator_demo", step: 3, thought: "The saved-login popup did not take focus; targeting its exact window." } },
+    { id: 54, kind: "operator.actions", payload: { job_id: "job_operator_demo", step: 3, performed: ["issued click at (612,438)"] } },
+    { id: 55, kind: "operator.stuck", payload: { job_id: "job_operator_demo", steps: 5, issue: "The login views repeated without a verified postcondition, so the run paused." } },
+  ];
+
   function msg(threadId, role, content, meta, ageSec, sequence) {
     return {
       id: nid("msg"), thread_id: threadId, role, content,
@@ -131,10 +139,20 @@
         }, 76, 6),
         msg("thr_director", "tool_result", "ok", {
           call_id: "c2", name: "code_session",
-          card: { title: "code", preview: "Polish the Director phone stream", meta: "calle-windows", tone: "accent", job_id: "job_phone_ui", session_id: "session_phone_ui" },
+          card: { title: "code", preview: "Polish the Director phone stream", meta: "calle-windows", tone: "accent", job_id: "job_phone_ui", session_id: "session_phone_ui", job_kind: "code" },
           output: "CODE session running.",
         }, 74, 7),
         msg("thr_director", "assistant", "I started the focused aiOS CODE session.", {}, 72, 8),
+        msg("thr_director", "user", "Check the signed-in music dashboard.", {}, 64, 9),
+        msg("thr_director", "tool_call", "", {
+          call_id: "c3", name: "operator", arguments: JSON.stringify({ task: "Check the signed-in music dashboard" }),
+        }, 63, 10),
+        msg("thr_director", "tool_result", "ok", {
+          call_id: "c3", name: "operator",
+          card: { title: "operator", preview: "Check the signed-in music dashboard", meta: "running", tone: "accent", job_id: "job_operator_demo", job_kind: "operator" },
+          output: "Operator session running.",
+        }, 62, 11),
+        msg("thr_director", "assistant", "The Operator session is running on its persistent computer.", {}, 61, 12),
       ],
       working: [], questions: [],
     },
@@ -505,6 +523,10 @@
         ok: true, job_id: codeEventJob[1], session_id: "session_phone_ui",
         reset: true, events: codeEvents, size: codeEvents.length,
       });
+    }
+    const operatorEventJob = path.match(/^\/api\/jobs\/([^/]+)\/events$/);
+    if (operatorEventJob) {
+      return json({ ok: true, job_id: operatorEventJob[1], events: operatorEvents });
     }
     if (path.startsWith("/api/jobs/")) return json({ ok: true, job: { id: "job_x", status: "done" } });
     if (path.startsWith("/api/avatar/")) return json({ ok: false, error: "offline — no image gen" }, 400);

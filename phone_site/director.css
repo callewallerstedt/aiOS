@@ -1042,6 +1042,21 @@ button { border: 0; background: none; cursor: pointer; }
    does not define, leaving the cells transparent. The extra body specificity
    keeps the actual Director glyph painted without changing CODE itself. */
 body .loading-pixels span { background: var(--accent); }
+/* Same load-order problem for the shimmering labels: code-beautiful.css's
+   .thinking.live .thinking-label / .working-label gradients use --bui-ink-3 /
+   --bui-accent-ink, which only exist inside .code-detail. Here they are
+   invalid at computed-value time, so the gradient drops out while the sheet's
+   colour: transparent stays — the "Thinking" text renders invisible next to a
+   fully visible 3x3 grid. Re-assert the gradient with Director's own tokens at
+   higher specificity so the label paints on this page too. */
+body .thinking.live .thinking-label,
+body .working-sentinel .working-label {
+  background-image: linear-gradient(90deg, var(--ink-3) 35%, var(--accent-ink) 50%, var(--ink-3) 65%);
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
 @keyframes pixel-on {
   0%, 100% { opacity: .15; transform: scale(.85); }
   45% { opacity: .8; transform: scale(1); }
@@ -1205,7 +1220,124 @@ body .loading-pixels span { background: var(--accent); }
   overflow-x: hidden;
 }
 .tool-card.expanded .tool-body { display: block; animation: fade-in 180ms ease both; }
-.tool-card.operator-job .tool-chip { cursor: pointer; }
+#screen-chat .tool-card.operator-job {
+  border: 1px solid color-mix(in srgb, var(--green) 48%, var(--line));
+  border-radius: 10px;
+  background:
+    linear-gradient(112deg, color-mix(in srgb, var(--green) 10%, transparent), transparent 58%),
+    var(--surface);
+  box-shadow: 0 4px 18px color-mix(in srgb, var(--green) 10%, transparent);
+  transition: border-color 160ms ease, background 160ms ease, box-shadow 160ms ease;
+}
+.tool-card.operator-job .tool-chip {
+  min-height: 52px;
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr) auto 12px;
+  grid-template-rows: auto auto;
+  column-gap: 9px;
+  row-gap: 1px;
+  padding: 7px 9px;
+  cursor: pointer;
+}
+.tool-card.operator-job .glyph {
+  grid-column: 1;
+  grid-row: 1 / 3;
+  width: 26px;
+  height: 26px;
+  color: var(--green);
+  animation: none;
+}
+.tool-card.operator-job .name {
+  grid-column: 2;
+  grid-row: 1;
+  max-width: none;
+  color: var(--ink);
+  font-size: 12.5px;
+  font-weight: 650;
+}
+.tool-card.operator-job .detail {
+  grid-column: 2;
+  grid-row: 2;
+  height: auto;
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  color: var(--ink-2);
+  font: 11px/1.35 var(--font);
+}
+.tool-card.operator-job .meta {
+  grid-column: 3;
+  grid-row: 1 / 3;
+  align-self: center;
+  max-width: 92px;
+  padding: 3px 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--green) 12%, var(--inset));
+  color: color-mix(in srgb, var(--green) 78%, var(--ink));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--green) 28%, var(--line));
+  font-size: 10px;
+}
+.tool-card.operator-job .card-chevron {
+  grid-column: 4;
+  grid-row: 1 / 3;
+  align-self: center;
+}
+#screen-chat .tool-card.operator-job:active,
+#screen-chat .tool-card.operator-job.expanded {
+  border-color: color-mix(in srgb, var(--green) 72%, var(--line));
+  background: color-mix(in srgb, var(--green) 11%, var(--surface));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--green) 18%, transparent),
+              0 6px 22px color-mix(in srgb, var(--green) 12%, transparent);
+}
+.operator-logo-screen {
+  position: relative;
+  width: 23px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  border: 1.5px solid currentColor;
+  border-radius: 4px;
+  overflow: visible;
+}
+.operator-logo-screen svg { width: 13px !important; height: 13px !important; }
+.operator-logo-screen::after {
+  content: "";
+  position: absolute;
+  left: 2px;
+  right: 2px;
+  top: 3px;
+  height: 1px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--green) 88%, white);
+  box-shadow: 0 0 7px color-mix(in srgb, var(--green) 80%, transparent);
+  animation: operator-scan 1.7s var(--ease) infinite;
+}
+.operator-logo-screen i {
+  position: absolute;
+  left: 8px;
+  bottom: -4px;
+  width: 7px;
+  height: 3px;
+  border-bottom: 1.5px solid currentColor;
+  border-left: 1.5px solid currentColor;
+  border-right: 1.5px solid currentColor;
+}
+.tool-card.operator-job.danger { border-color: color-mix(in srgb, var(--red) 62%, var(--line)); }
+.tool-card.operator-job.danger .glyph,
+.tool-card.operator-job.danger .meta { color: var(--red); }
+.tool-card.operator-job.danger .meta {
+  background: color-mix(in srgb, var(--red) 12%, var(--inset));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--red) 28%, var(--line));
+}
+@keyframes operator-scan {
+  0%, 12% { transform: translateY(0); opacity: .45; }
+  55% { transform: translateY(9px); opacity: 1; }
+  78%, 100% { transform: translateY(9px); opacity: .25; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .operator-logo-screen::after { animation: none; transform: translateY(5px); }
+}
 .operator-timeline {
   display: none;
   margin-left: 8px;
