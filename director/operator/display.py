@@ -171,6 +171,14 @@ async def ensure_running(settings: dict[str, Any] | None = None, *,
         states = {"xvfb": False, "wm": False,
                   "vnc": await unit_active(UNITS["vnc"]), "chrome": False}
         desktop_up = await display_alive(settings)
+        if with_chrome and desktop_up:
+            # GNOME/Mutter blanks and locks the seat when it decides the user
+            # is idle; every screenshot is then just the black lock screen.
+            # An operator run is about to drive the physical seat, so wake the
+            # display and deactivate any running screensaver first. Best
+            # effort only — a missing tool must not fail the run.
+            await _run(["xset", "s", "reset"], timeout=5, env=display_env(settings))
+            await _run(["xdg-screensaver", "reset"], timeout=5, env=display_env(settings))
         if desktop_up and not states["vnc"]:
             await _run(["systemctl", "--user", "start", UNITS["vnc"]], timeout=25)
             states["vnc"] = await unit_active(UNITS["vnc"])

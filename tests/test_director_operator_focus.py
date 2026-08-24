@@ -21,12 +21,17 @@ class FakeXdotool:
         self.activation_no_effect = activation_no_effect
         self.focus_fails = focus_fails
         self.active_api_fails = active_api_fails
+        self.x = 10
+        self.y = 20
         self.calls = []
 
     async def __call__(self, *args, settings=None):
         self.calls.append(args)
         if args[:2] == ("getmouselocation", "--shell"):
-            return 0, f"X=10\nY=20\nWINDOW={self.pointer}"
+            return 0, f"X={self.x}\nY={self.y}\nWINDOW={self.pointer}"
+        if args and args[0] == "mousemove":
+            self.x, self.y = int(args[1]), int(args[2])
+            return 0, ""
         if args == ("getactivewindow",):
             if self.active_api_fails:
                 return 1, "_NET_ACTIVE_WINDOW unavailable"
@@ -167,7 +172,8 @@ def test_kernel_keyboard_chords_hold_modifiers_until_the_key_is_released():
 
 def test_operator_loop_has_a_bounded_unchanged_action_budget():
     source = inspect.getsource(loop.run_task)
-    assert "MAX_REPEATED_NO_EFFECT_ROUNDS" in source
+    assert "MAX_NO_POSTCONDITION_ACTIONS" in source
+    assert "MAX_CYCLE_STRIKES" in source
     assert "MAX_DISTINCT_ACTIONS_ON_SCREEN" in source
     assert "actions_on_screen" in source
     assert "operator.stuck" in source

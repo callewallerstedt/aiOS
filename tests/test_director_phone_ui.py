@@ -90,7 +90,7 @@ def test_app_boots_without_the_code_transcript_module():
 
 def test_offline_mock_is_localhost_only():
     """The playground mock must not ship to Vercel or run on the live PWA."""
-    assert 'src="/mock.js?v=46"' in HTML
+    assert 'src="/mock.js?v=47"' in HTML
     assert 'host !== "localhost"' in HTML
     assert 'host !== "127.0.0.1"' in HTML
     build = (ROOT / "phone_site" / "scripts" / "build.js").read_text(encoding="utf-8")
@@ -135,6 +135,9 @@ def test_operator_tool_card_opens_its_own_reasoning_and_screenshot_timeline():
     assert 'event.kind === "operator.step"' in JS
     assert 'event.kind === "operator.actions"' in JS
     assert ".operator-frame" in CSS
+    assert ".operator-click-marker" in CSS
+    assert 'payload.phase === "action_target"' in JS
+    assert "payload.marker.x" in JS
     assert ".operator-event-text" in CSS
 
 
@@ -411,9 +414,9 @@ def test_push_uses_agent_heading_and_is_silent_while_app_is_visible():
     assert 'payload.agent || payload.title || "Director"' in SW
     assert 'client.visibilityState === "visible"' in SW
     assert "showNotification(title" in SW
-    assert 'const VERSION = "director-v46"' in SW
-    assert 'director.js?v=46' in HTML
-    assert 'director.css?v=46' in HTML
+    assert 'const VERSION = "director-v47"' in SW
+    assert 'director.js?v=47' in HTML
+    assert 'director.css?v=47' in HTML
 
 
 def test_stop_button_clears_stale_working_state_after_server_acknowledges():
@@ -472,7 +475,7 @@ def test_takeover_toolbar_can_request_the_software_keyboard():
     assert "director.keyboard-input" in shell
     assert "director.keyboard-key" in shell
     assert ".takeover-keyboard-input" in CSS
-    assert 'const VERSION = "director-v46"' in SW
+    assert 'const VERSION = "director-v47"' in SW
 
 
 def test_home_voice_change_does_not_restyle_the_chat_microphone():

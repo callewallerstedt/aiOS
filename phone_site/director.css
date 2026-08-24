@@ -1379,10 +1379,25 @@ body .working-sentinel .working-label {
   background: #0d0e10;
   box-shadow: var(--shadow-hairline);
 }
+.operator-image-stage {
+  position: relative;
+}
 .operator-frame img {
   display: block;
   width: 100%;
   height: auto;
+}
+.operator-click-marker {
+  position: absolute;
+  z-index: 2;
+  width: 11px;
+  height: 11px;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  background: #ff3b30;
+  box-shadow: 0 0 0 3px rgb(255 59 48 / 32%), 0 1px 4px rgb(0 0 0 / 60%);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
 }
 .operator-frame figcaption {
   padding: 5px 8px;

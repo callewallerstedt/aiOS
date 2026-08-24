@@ -99,9 +99,10 @@
   const operatorEvents = [
     { id: 51, kind: "operator.started", payload: { job_id: "job_operator_demo", task: "Check the signed-in music dashboard" } },
     { id: 52, kind: "operator.note", payload: { job_id: "job_operator_demo", step: 2, text: "Use the email login, not Google." } },
-    { id: 53, kind: "operator.step", payload: { job_id: "job_operator_demo", step: 3, thought: "The saved-login popup did not take focus; targeting its exact window." } },
-    { id: 54, kind: "operator.actions", payload: { job_id: "job_operator_demo", step: 3, performed: ["issued click at (612,438)"] } },
-    { id: 55, kind: "operator.stuck", payload: { job_id: "job_operator_demo", steps: 5, issue: "The login views repeated without a verified postcondition, so the run paused." } },
+    { id: 53, kind: "operator.step", payload: { job_id: "job_operator_demo", step: 3, observation: "The saved-login popup and its Continue button are visible.", thought: "I will click Continue and expect the dashboard to replace the popup." } },
+    { id: 54, kind: "operator.screenshot", payload: { job_id: "job_operator_demo", step: 3, image: "/icons/aios-icon-512.png", width: 512, height: 512, phase: "action_target", marker: { x: 312, y: 238, kind: "click", button: "left", clicks: 1 } } },
+    { id: 55, kind: "operator.actions", payload: { job_id: "job_operator_demo", step: 3, performed: ["issued click at (312,238)"], settle_seconds: 1 } },
+    { id: 56, kind: "operator.stuck", payload: { job_id: "job_operator_demo", steps: 5, issue: "The login views repeated without a verified postcondition, so the run paused." } },
   ];
 
   function msg(threadId, role, content, meta, ageSec, sequence) {

@@ -39,7 +39,7 @@ def test_a_remembered_lesson_is_stored_in_the_operator_scope(director):
     said = asyncio.run(loop.execute(
         {"type": "remember", "key": "spotify-artist-switcher",
          "value": "The artist switcher is behind the avatar, top right."}, {}))
-    assert "spotify-artist-switcher" in said
+    assert "spotify-artist-switcher" in said.description
     rows = director.list_memory(scope=loop.MEMORY_SCOPE)
     assert rows and rows[0]["value"].startswith("The artist switcher")
 
@@ -58,7 +58,8 @@ def test_a_half_written_lesson_is_refused(director):
     from director.operator import loop
 
     said = asyncio.run(loop.execute({"type": "remember", "key": "k", "value": ""}, {}))
-    assert "needs both" in said
+    assert said.ok is False
+    assert "missing a key or value" in said.description
     assert director.list_memory(scope=loop.MEMORY_SCOPE) == []
 
 

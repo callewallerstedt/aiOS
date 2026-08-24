@@ -1275,12 +1275,25 @@ function operatorEventNode(event) {
   const label = step ? `Step ${step}` : "Operator";
   if (event.kind === "operator.screenshot" && payload.image) {
     const node = el("figure", "operator-frame");
+    const stage = el("div", "operator-image-stage");
     const image = document.createElement("img");
     image.src = payload.image;
     image.alt = `${label} screenshot`;
     image.loading = "lazy";
-    node.append(image, el("figcaption", null,
-      `${label} · ${payload.width || "?"}×${payload.height || "?"}`));
+    stage.append(image);
+    if (payload.marker && Number(payload.width) > 0 && Number(payload.height) > 0) {
+      const marker = el("span", "operator-click-marker");
+      const markerX = Math.max(0, Math.min(Number(payload.marker.x) || 0, Number(payload.width)));
+      const markerY = Math.max(0, Math.min(Number(payload.marker.y) || 0, Number(payload.height)));
+      marker.style.left = `${(markerX / Number(payload.width)) * 100}%`;
+      marker.style.top = `${(markerY / Number(payload.height)) * 100}%`;
+      marker.title = `${payload.marker.kind === "type-focus" ? "Focused" : "Clicked"} at ${markerX}, ${markerY}`;
+      marker.setAttribute("aria-label", marker.title);
+      stage.append(marker);
+    }
+    const targetLabel = payload.phase === "action_target" ? " · click target" : "";
+    node.append(stage, el("figcaption", null,
+      `${label}${targetLabel} · ${payload.width || "?"}×${payload.height || "?"}`));
     return node;
   }
   const node = el("div", `operator-event ${event.kind.replaceAll(".", "-")}`);
@@ -1291,7 +1304,8 @@ function operatorEventNode(event) {
     text = payload.task || "Operator started";
   } else if (event.kind === "operator.step") {
     title = `${label} · Thinking`;
-    text = payload.thought || payload.message || payload.native_tool || "Choosing the next action";
+    text = [payload.observation && `Saw: ${payload.observation}`, payload.thought]
+      .filter(Boolean).join("\n") || payload.message || payload.native_tool || "Choosing the next action";
   } else if (event.kind === "operator.actions") {
     title = `${label} · Action`;
     text = (payload.performed || []).join("\n") || "Action completed";

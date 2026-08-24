@@ -12,16 +12,20 @@ real Ubuntu GNOME desktop (Xorg) with a real mouse and keyboard.
 Each step you get:
   - the TASK you were dispatched with
   - the current SCREENSHOT of the whole screen
-  - a short HISTORY of what you already thought and did
+  - a short HISTORY plus persistent visual facts and an action trace
 
 Reason about the screenshot, then call exactly one supplied tool. Use the mouse
 and keyboard tools for visible interaction. After each action you receive a new
 screenshot. Call `finish` only when the task is done, blocked, or needs Calle.
 
-Every action tool has a `thought` field. Put one concise plain-language sentence
-there saying what is visibly true, what you are targeting, and what should
-change. This is shown live to Calle. Do not put Markdown or generic labels such
-as planning, analyzing, or implementing in that field.
+Every action tool has `observation` and `thought` fields. In `observation`,
+literally record the goal-relevant evidence visible in the screenshot now:
+exact text, codes, numbers, status, selected tab, and scrollbar position. Do
+not describe what you expected or what might be off-screen. In `thought`, put
+one concise plain-language sentence saying what you are targeting and what
+should change. Both are shown live to Calle and retained as run memory. Do not
+put Markdown or generic labels such as planning, analyzing, or implementing in
+either field.
 
 Coordinates are screen pixels, top-left is (0,0). The user message states the
 exact width and height; every x,y you emit must be inside that rectangle.
@@ -36,6 +40,19 @@ Before every action, in your reasoning, settle three things:
    is a click on something else, and you will not notice until two steps later.
 3. **How will I know it worked?** Say what the next screenshot should show. On
    the next step, check that against what you actually got, and say so.
+
+First scan the whole current viewport, top to bottom, and compare every visible
+goal-relevant value with the task. If the requested code, number, text, result,
+or success state is already visible, use it immediately; do not scroll away to
+look for the same thing somewhere else. The screenshot outranks your guess
+about page layout. Preserve useful facts in `observation` so later steps do not
+forget what was already seen.
+
+Treat the compact action trace as your route memory. Before scrolling, identify
+the visible scrollbar position and the evidence that the target is above or
+below. Do not reverse direction or revisit a screen just because the target was
+missed; first reread the viewport and trace, then choose a smaller correction or
+a genuinely different method. Repeated down/up scrolling is not exploration.
 
 Clicking to see what happens is how runs get lost. If you cannot name the
 target, look first: scroll, wait for the page to settle, or read the window
@@ -97,13 +114,17 @@ def _tool(name: str, description: str, properties: dict, required: list[str],
     needed = list(required)
     if visible_thought:
         props = {
+            "observation": {
+                "type": "string",
+                "description": "Literal goal-relevant evidence visible now, including exact text, codes, numbers, status, and scrollbar position. Never infer off-screen content.",
+            },
             "thought": {
                 "type": "string",
-                "description": "One concise plain sentence: visible state, target, and expected result. No Markdown or generic planning label.",
+                "description": "One concise plain sentence: target and expected visible result. No Markdown or generic planning label.",
             },
             **props,
         }
-        needed = ["thought", *needed]
+        needed = ["observation", "thought", *needed]
     return {"name": name, "description": description,
             "parameters": {"type": "object", "properties": props,
                            "required": needed}}
@@ -205,7 +226,9 @@ def task_message(task: str, width: int, height: int, history: str,
                  windows: list[str] | None = None, feedback: str = "",
                  notes: list[str] | None = None, step: int = 0,
                  background: str = "",
-                 controls: list[dict] | None = None) -> str:
+                 controls: list[dict] | None = None,
+                 observations: list[str] | None = None,
+                 action_trace: list[str] | None = None) -> str:
     lines = [f"TASK: {task}", "", f"SCREEN: {width}x{height} pixels."]
     if step:
         lines.append(f"STEP: {step}")
@@ -231,6 +254,12 @@ def task_message(task: str, width: int, height: int, history: str,
                 f'- {role} {name!r}: center=({center_x},{center_y}), bounds=({x},{y},{control_width},{control_height}){focused}')
     if history:
         lines += ["", "HISTORY:", history]
+    if observations:
+        lines += ["", "GOAL-RELEVANT FACTS YOU ALREADY SAW (run memory, not a claim about the current screen):"]
+        lines += [f"- {item}" for item in observations[-12:]]
+    if action_trace:
+        lines += ["", "COMPACT ACTION TRACE (do not repeat or reverse blindly):"]
+        lines += [f"- {item}" for item in action_trace[-24:]]
     if feedback:
         lines += ["", "ACTION FEEDBACK:", feedback]
     if notes:
@@ -238,8 +267,9 @@ def task_message(task: str, width: int, height: int, history: str,
         # instruction rather than context.
         lines += ["", "CALLE JUST SAID — this updates your task, follow it now:"]
         lines += [f"- {note}" for note in notes[-5:]]
-    lines += ["", "State where you are, what you are aiming at, and what the next "
-                  "screenshot should show. Then call exactly one action tool."]
+    lines += ["", "Scan the whole viewport first. Record literal visible evidence in "
+                  "observation, then state your target and expected next screen in "
+                  "thought. Call exactly one action tool."]
     return "\n".join(lines)
 
 

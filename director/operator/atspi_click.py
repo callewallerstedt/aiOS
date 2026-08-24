@@ -7,6 +7,7 @@ This helper runs under the system Python because Ubuntu packages pyatspi there.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from typing import Any
@@ -40,8 +41,14 @@ def _action(node: Any) -> tuple[Any, int, str] | None:
         choices.append((index, name))
     if not choices:
         return None
-    preferred = ("click", "press", "activate", "open", "jump")
-    choices.sort(key=lambda row: (row[1] not in preferred, row[0]))
+    preferred = ("click", "press", "activate", "open", "jump", "toggle", "check", "select")
+    choices = [row for row in choices
+               if any(word in row[1] for word in preferred)]
+    if not choices:
+        return None
+    choices.sort(key=lambda row: (next(
+        (rank for rank, word in enumerate(preferred) if word in row[1]),
+        len(preferred)), row[0]))
     index, name = choices[0]
     return actions, index, name or "default"
 
@@ -56,7 +63,7 @@ def _focus(node: Any, pyatspi: Any) -> bool:
 
 
 def _deepest_action(node: Any, x: int, y: int, coords: int, pyatspi: Any,
-                    depth: int = 0, inside_dialog: bool = False
+                     depth: int = 0, inside_dialog: bool = False
                     ) -> tuple[str, Any, Any, int, str] | tuple[str, Any] | None:
     if depth and not _contains(node, x, y, coords):
         return None
@@ -75,16 +82,22 @@ def _deepest_action(node: Any, x: int, y: int, coords: int, pyatspi: Any,
             child, x, y, coords, pyatspi, depth + 1, inside_dialog)
         if found:
             return found
-    # Normal application windows keep the existing coordinate mouse path.
-    # Accessibility is the reliable fallback specifically while a desktop
-    # dialog owns the foreground input grab.
-    if not inside_dialog:
-        return None
-    action = _action(node)
-    if action:
-        return "action", node, *action
-    if _focus(node, pyatspi):
-        return "focus", node
+    interactive_roles = {
+        pyatspi.ROLE_CHECK_BOX, pyatspi.ROLE_COMBO_BOX,
+        pyatspi.ROLE_LINK, pyatspi.ROLE_LIST_BOX,
+        pyatspi.ROLE_MENU_ITEM, pyatspi.ROLE_PAGE_TAB,
+        pyatspi.ROLE_PUSH_BUTTON, pyatspi.ROLE_RADIO_BUTTON,
+        pyatspi.ROLE_SLIDER, pyatspi.ROLE_SPIN_BUTTON,
+        pyatspi.ROLE_TOGGLE_BUTTON,
+    }
+    try:
+        role = node.getRole()
+    except Exception:
+        role = None
+    if role in interactive_roles:
+        action = _action(node)
+        if action:
+            return "action", node, *action
     return None
 
 
@@ -135,7 +148,7 @@ def inspect_controls(title: str = "", limit: int = 60) -> dict[str, Any]:
         pyatspi.ROLE_SPIN_BUTTON, pyatspi.ROLE_TOGGLE_BUTTON,
     }
 
-    def visit(node: Any, depth: int = 0) -> None:
+    def visit(node: Any, depth: int = 0, path: tuple[int, ...] = ()) -> None:
         if len(controls) >= max(1, int(limit)) or depth > 24:
             return
         try:
@@ -150,19 +163,43 @@ def inspect_controls(title: str = "", limit: int = 60) -> dict[str, Any]:
             bounds = None
         if (showing and visible and role in interactive_roles and bounds
                 and bounds.width > 1 and bounds.height > 1):
-            controls.append({
-                "role": str(node.getRoleName() or "control"),
-                "name": _label(node)[:160],
+            label = _label(node)[:160]
+            role_name = str(node.getRoleName() or "control")
+            identity = "|".join([
+                role_name, label, ".".join(str(value) for value in path),
+                str(int(bounds.x)), str(int(bounds.y)),
+                str(int(bounds.width)), str(int(bounds.height)),
+            ])
+
+            def has_state(name: str) -> bool:
+                value = getattr(pyatspi, name, None)
+                return bool(value is not None and state.contains(value))
+
+            row = {
+                "id": hashlib.sha256(identity.encode("utf-8", "replace")).hexdigest()[:12],
+                "role": role_name,
+                "name": label,
                 "x": int(bounds.x), "y": int(bounds.y),
                 "width": int(bounds.width), "height": int(bounds.height),
-                "focused": bool(state.contains(pyatspi.STATE_FOCUSED)),
-            })
+                "focused": has_state("STATE_FOCUSED"),
+                "checked": has_state("STATE_CHECKED"),
+                "selected": has_state("STATE_SELECTED"),
+                "expanded": has_state("STATE_EXPANDED"),
+                "pressed": has_state("STATE_PRESSED"),
+                "enabled": has_state("STATE_ENABLED"),
+            }
+            if role in {pyatspi.ROLE_ENTRY, pyatspi.ROLE_PASSWORD_TEXT}:
+                try:
+                    row["text_length"] = int(node.queryText().characterCount)
+                except Exception:
+                    row["text_length"] = None
+            controls.append(row)
         try:
             children = list(node)
         except Exception:
             children = []
-        for child in children:
-            visit(child, depth + 1)
+        for index, child in enumerate(children):
+            visit(child, depth + 1, (*path, index))
             if len(controls) >= max(1, int(limit)):
                 break
 
@@ -182,8 +219,6 @@ def click_at(x: int, y: int, title: str = "") -> dict[str, Any]:
         if not found:
             continue
         kind, node, *details = found
-        if kind == "focus":
-            return {"handled": True, "target": _label(node) or "control", "action": "focus"}
         actions, index, action_name = details
         try:
             handled = bool(actions.doAction(index))

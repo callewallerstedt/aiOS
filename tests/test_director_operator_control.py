@@ -16,8 +16,10 @@ class FakeHub:
         self.notes = {}
         self.started = []
 
-    def live_jobs(self, kind=""):
-        return [j for j in self._live if not kind or j.get("kind") == kind]
+    def live_jobs(self, kind="", *, thread_id=""):
+        return [j for j in self._live
+                if (not kind or j.get("kind") == kind)
+                and (not thread_id or j.get("thread_id") == thread_id)]
 
     def note_job(self, job_id, text):
         if job_id not in {j["id"] for j in self._live}:
@@ -72,11 +74,11 @@ def director(tmp_path, monkeypatch):
 def test_a_second_operator_run_is_refused_while_one_is_going(director):
     from director.tools import operator
 
-    hub = FakeHub(live=[{"id": "job_1", "kind": "operator",
+    hub = FakeHub(live=[{"id": "job_1", "kind": "operator", "thread_id": "thr_x",
                          "request": {"task": "log in to Spotify"}}])
     result = asyncio.run(operator.operator(_ctx(hub), task="check the artist page"))
     assert result.error
-    assert "already running job job_1" in result.error
+    assert "job job_1 is already running" in result.error
     assert "operator_say" in result.error
     assert not hub.started, "nothing should have been dispatched"
 
@@ -84,7 +86,7 @@ def test_a_second_operator_run_is_refused_while_one_is_going(director):
 def test_the_refusal_names_what_is_running(director):
     from director.tools import operator
 
-    hub = FakeHub(live=[{"id": "job_1", "kind": "operator",
+    hub = FakeHub(live=[{"id": "job_1", "kind": "operator", "thread_id": "thr_x",
                          "request": {"task": "log in to Spotify"}}])
     result = asyncio.run(operator.operator(_ctx(hub), task="something else"))
     assert "log in to Spotify" in result.error
@@ -114,7 +116,7 @@ def test_the_first_run_starts_normally(director):
 def test_a_follow_up_reaches_the_running_run(director):
     from director.tools import operator
 
-    hub = FakeHub(live=[{"id": "job_1", "kind": "operator", "request": {"task": "t"}}])
+    hub = FakeHub(live=[{"id": "job_1", "kind": "operator", "thread_id": "thr_x", "request": {"task": "t"}}])
     result = asyncio.run(operator.operator_say(_ctx(hub), text="use the WALLERSTEDT artist"))
     assert not result.error
     assert hub.notes["job_1"] == ["use the WALLERSTEDT artist"]
@@ -123,7 +125,7 @@ def test_a_follow_up_reaches_the_running_run(director):
 def test_a_follow_up_finds_the_run_without_being_given_an_id(director):
     from director.tools import operator
 
-    hub = FakeHub(live=[{"id": "job_9", "kind": "operator", "request": {"task": "t"}}])
+    hub = FakeHub(live=[{"id": "job_9", "kind": "operator", "thread_id": "thr_x", "request": {"task": "t"}}])
     asyncio.run(operator.operator_say(_ctx(hub), text="scroll down first"))
     assert hub.notes["job_9"] == ["scroll down first"]
 
@@ -138,7 +140,7 @@ def test_a_follow_up_with_nothing_running_says_so(director):
 def test_an_empty_follow_up_is_refused(director):
     from director.tools import operator
 
-    hub = FakeHub(live=[{"id": "job_1", "kind": "operator", "request": {"task": "t"}}])
+    hub = FakeHub(live=[{"id": "job_1", "kind": "operator", "thread_id": "thr_x", "request": {"task": "t"}}])
     result = asyncio.run(operator.operator_say(_ctx(hub), text="   "))
     assert result.error
 
@@ -146,7 +148,7 @@ def test_an_empty_follow_up_is_refused(director):
 def test_operator_stop_cancels_the_live_job_instead_of_steering_it(director):
     from director.tools import operator
 
-    hub = FakeHub(live=[{"id": "job_1", "kind": "operator",
+    hub = FakeHub(live=[{"id": "job_1", "kind": "operator", "thread_id": "thr_x",
                          "request": {"task": "browse"}}])
     result = asyncio.run(operator.operator_stop(_ctx(hub)))
 
@@ -256,18 +258,37 @@ def test_action_tools_require_visible_plain_language_thoughts():
     for action_tool in prompts.ACTION_TOOLS:
         required = action_tool["parameters"]["required"]
         assert "thought" in required
+        assert "observation" in required
     typing = next(tool for tool in prompts.ACTION_TOOLS if tool["name"] == "type_text")
-    assert {"thought", "x", "y", "text"} <= set(typing["parameters"]["required"])
+    assert {"observation", "thought", "x", "y", "text"} <= set(typing["parameters"]["required"])
 
     decision = loop.tool_decision({
         "reasoning": "**Planning generic input**",
         "tool_calls": [{
             "name": "type_text",
-            "arguments": '{"thought":"The search field is visible; I will focus it and enter the query.","x":30,"y":40,"text":"query"}',
+            "arguments": '{"observation":"The Search field is empty and visible.","thought":"I will focus it and enter the query.","x":30,"y":40,"text":"query"}',
         }],
     })
-    assert decision["thought"].startswith("The search field is visible")
+    assert decision["observation"] == "The Search field is empty and visible."
+    assert decision["thought"].startswith("I will focus it")
     assert "thought" not in decision["actions"][0]
+    assert "observation" not in decision["actions"][0]
+
+
+def test_prompt_preserves_visual_facts_and_the_longer_action_route():
+    from director.operator import prompts
+
+    message = prompts.task_message(
+        "read the code", 1280, 720, "recent history",
+        observations=["The subject line visibly says 660895."],
+        action_trace=["step 2, screen 4: issued scroll 12"],
+    )
+
+    assert "GOAL-RELEVANT FACTS YOU ALREADY SAW" in message
+    assert "The subject line visibly says 660895" in message
+    assert "COMPACT ACTION TRACE" in message
+    assert "issued scroll 12" in message
+    assert "Scan the whole viewport first" in message
 
 
 def test_stop_is_a_terminal_operator_status():

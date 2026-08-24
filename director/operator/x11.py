@@ -13,6 +13,7 @@ import io
 import json
 import os
 import pathlib
+import re
 import shutil
 import sys
 import time
@@ -42,6 +43,9 @@ for _n in range(1, 25):
 
 BUTTONS = {"left": 1, "middle": 2, "right": 3}
 KEYBOARD_SOCKET = pathlib.Path("/run/aios-director/keyboard.sock")
+CLIPBOARD_REQUEST_TIMEOUT = 2.0
+CLIPBOARD_OWNER_QUIET_PERIOD = 0.08
+CLIPBOARD_OWNER_SETTLE_TIMEOUT = 0.5
 
 # Linux input-event codes used by the kernel virtual keyboard. Unlike XTest,
 # these arrive as real keyboard-device events and are accepted by Chromium.
@@ -186,6 +190,35 @@ async def type_text(text: str, settings: dict[str, Any] | None = None,
             "xclip", "-selection", "clipboard", "-in", "-quiet",
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT, env=display_mod.display_env(settings))
+        request_number = -1
+        request_changed = asyncio.Event()
+        owner_ready = asyncio.Event()
+        reader_done = asyncio.Event()
+
+        async def observe_requests() -> None:
+            """Track completed X11 selection transfers without reading the text."""
+            nonlocal request_number
+            try:
+                assert proc.stdout is not None
+                while True:
+                    line = await proc.stdout.readline()
+                    if not line:
+                        break
+                    match = re.search(
+                        rb"Waiting for selection request number\s+(\d+)", line)
+                    if not match:
+                        continue
+                    # xclip prints the request it is about to wait for, so N-1
+                    # transfers have completed when this line is emitted.
+                    completed = max(0, int(match.group(1)) - 1)
+                    if completed > request_number:
+                        request_number = completed
+                        request_changed.set()
+                    owner_ready.set()
+            finally:
+                reader_done.set()
+
+        observer = asyncio.create_task(observe_requests())
         try:
             assert proc.stdin is not None
             proc.stdin.write(text.encode("utf-8"))
@@ -194,12 +227,47 @@ async def type_text(text: str, settings: dict[str, Any] | None = None,
             # The persistent uinput keyboard makes this a real Ctrl+V rather
             # than the XTest event Chromium rejected. Clipboard transfer keeps
             # Unicode and punctuation independent of the Swedish key layout.
-            await asyncio.sleep(0.08)
+            try:
+                await asyncio.wait_for(
+                    owner_ready.wait(), timeout=CLIPBOARD_REQUEST_TIMEOUT)
+            except asyncio.TimeoutError as exc:
+                raise RuntimeError("xclip did not take clipboard ownership") from exc
+
+            # GNOME's clipboard manager immediately reads each new selection.
+            # Let those protocol requests finish and establish a baseline; they
+            # are not evidence that the focused field accepted Ctrl+V.
+            settle_deadline = time.monotonic() + CLIPBOARD_OWNER_SETTLE_TIMEOUT
+            while time.monotonic() < settle_deadline:
+                request_changed.clear()
+                remaining = settle_deadline - time.monotonic()
+                try:
+                    await asyncio.wait_for(
+                        request_changed.wait(),
+                        timeout=min(CLIPBOARD_OWNER_QUIET_PERIOD, remaining))
+                except asyncio.TimeoutError:
+                    break
+            baseline = request_number
             await hotkey(["ctrl", "v"], settings)
-            # Keep ownership through the request. Clipboard managers may read
-            # the selection before the target, so a one-request xclip process
-            # can disappear before Chromium asks for the text.
-            await asyncio.sleep(0.15)
+
+            # Keep ownership until xclip reports a *new, completed* selection
+            # transfer after the real key chord. This follows the X11 protocol
+            # instead of guessing how long Chromium or a native app needs.
+            deadline = time.monotonic() + CLIPBOARD_REQUEST_TIMEOUT
+            while request_number <= baseline:
+                if proc.returncode is not None or reader_done.is_set():
+                    raise RuntimeError("xclip lost clipboard ownership before paste")
+                request_changed.clear()
+                if request_number > baseline:
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RuntimeError(
+                        "the focused control did not request the clipboard paste")
+                try:
+                    await asyncio.wait_for(request_changed.wait(), timeout=remaining)
+                except asyncio.TimeoutError as exc:
+                    raise RuntimeError(
+                        "the focused control did not request the clipboard paste") from exc
             return
         finally:
             if proc.returncode is None:
@@ -209,6 +277,20 @@ async def type_text(text: str, settings: dict[str, Any] | None = None,
                 except asyncio.TimeoutError:
                     proc.kill()
                     await proc.wait()
+            if not observer.done():
+                try:
+                    await asyncio.wait_for(observer, timeout=1.0)
+                except asyncio.TimeoutError:
+                    observer.cancel()
+            if observer.done() and not observer.cancelled():
+                try:
+                    observer.result()
+                except Exception:
+                    pass
+    if _uinput_required(settings):
+        raise RuntimeError(
+            "clipboard input is unavailable and the real desktop must not fall back "
+            "to synthetic XTest typing")
     await _checked_xdotool(
         "type", "--clearmodifiers", "--delay", "12", text, settings=settings)
 
@@ -217,6 +299,8 @@ async def press(key: str, presses: int = 1, settings: dict[str, Any] | None = No
     await focus_pointer_window(settings)
     if await _kernel_keys([key], max(1, int(presses or 1)), settings):
         return
+    if _uinput_required(settings):
+        raise RuntimeError("kernel keyboard service is unavailable on the real desktop")
     sym = keysym(key)
     for _ in range(max(1, int(presses or 1))):
         await _checked_xdotool("key", "--clearmodifiers", sym, settings=settings)
@@ -228,6 +312,8 @@ async def hotkey(keys: list[str], settings: dict[str, Any] | None = None) -> Non
         await focus_pointer_window(settings)
         if await _kernel_keys(keys, 1, settings):
             return
+        if _uinput_required(settings):
+            raise RuntimeError("kernel keyboard service is unavailable on the real desktop")
         await _checked_xdotool("key", "--clearmodifiers", combo, settings=settings)
 
 
@@ -256,6 +342,11 @@ async def _kernel_keys(keys: list[str], presses: int,
     """Send keys through the persistent local uinput service when available."""
     del settings
     events = kernel_key_events(keys, presses)
+    return await _kernel_events(events)
+
+
+async def _kernel_events(events: list[list[int]]) -> bool:
+    """Send already-built transitions through the persistent keyboard service."""
     if os.name == "nt" or not events or not KEYBOARD_SOCKET.exists():
         return False
     try:
@@ -278,20 +369,48 @@ async def _kernel_keys(keys: list[str], presses: int,
     return True
 
 
+def _uinput_required(settings: dict[str, Any] | None = None) -> bool:
+    """The real Linux desktop must use input accepted as a physical keyboard."""
+    return os.name != "nt" and display_mod.real_desktop(settings)
+
+
 async def move(x: int, y: int, settings: dict[str, Any] | None = None) -> None:
-    await xdotool("mousemove", int(x), int(y), settings=settings)
+    wanted_x, wanted_y = int(x), int(y)
+    await _checked_xdotool("mousemove", wanted_x, wanted_y, settings=settings)
+    actual_x, actual_y, _window = await pointer_location(settings)
+    if actual_x is None or actual_y is None:
+        raise RuntimeError("could not verify the pointer position after moving it")
+    if abs(actual_x - wanted_x) > 2 or abs(actual_y - wanted_y) > 2:
+        raise RuntimeError(
+            f"pointer move landed at ({actual_x},{actual_y}), not ({wanted_x},{wanted_y})")
+
+
+async def pointer_location(settings: dict[str, Any] | None = None
+                           ) -> tuple[int | None, int | None, str]:
+    """Return the server-observed pointer position and containing window."""
+    code, out = await xdotool("getmouselocation", "--shell", settings=settings)
+    if code != 0:
+        return None, None, ""
+    values: dict[str, str] = {}
+    for line in out.splitlines():
+        key, separator, value = line.partition("=")
+        if separator:
+            values[key.strip()] = value.strip()
+    try:
+        x = int(values["X"])
+        y = int(values["Y"])
+    except (KeyError, TypeError, ValueError):
+        x = y = None
+    window = values.get("WINDOW", "")
+    if not window.isdigit() or int(window) <= 0:
+        window = ""
+    return x, y, window
 
 
 async def pointer_window(settings: dict[str, Any] | None = None) -> str:
     """Return the X11 window currently under the pointer, when available."""
-    code, out = await xdotool("getmouselocation", "--shell", settings=settings)
-    if code != 0:
-        return ""
-    for line in out.splitlines():
-        key, separator, value = line.partition("=")
-        if separator and key.strip() == "WINDOW" and value.strip().isdigit():
-            return value.strip()
-    return ""
+    _x, _y, window = await pointer_location(settings)
+    return window
 
 
 async def active_window(settings: dict[str, Any] | None = None) -> str:
@@ -305,10 +424,58 @@ async def active_window(settings: dict[str, Any] | None = None) -> str:
     return out.strip() if code == 0 and out.strip().isdigit() else ""
 
 
+async def window_pid(window: str, settings: dict[str, Any] | None = None) -> str:
+    if not window:
+        return ""
+    code, out = await xdotool("getwindowpid", window, settings=settings)
+    return out.strip() if code == 0 and out.strip().isdigit() else ""
+
+
+async def transient_parent(window: str, settings: dict[str, Any] | None = None) -> str:
+    """Return WM_TRANSIENT_FOR, used by browser/native popup surfaces."""
+    if not window:
+        return ""
+    code, out = await run(
+        ["xprop", "-id", window, "WM_TRANSIENT_FOR"], settings, timeout=3.0)
+    if code != 0:
+        return ""
+    match = re.search(r"window id # (0x[0-9a-fA-F]+|\d+)", out)
+    if not match:
+        return ""
+    try:
+        return str(int(match.group(1), 0))
+    except ValueError:
+        return ""
+
+
+async def same_application_window(left: str, right: str,
+                                  settings: dict[str, Any] | None = None) -> bool:
+    """Prove a popup/parent relationship; a shared PID is not input focus."""
+    if not left or not right:
+        return False
+    if left == right:
+        return True
+    for start, wanted in ((left, right), (right, left)):
+        current = start
+        seen: set[str] = set()
+        for _ in range(6):
+            parent = await transient_parent(current, settings)
+            if not parent or parent in seen:
+                break
+            if parent == wanted:
+                return True
+            seen.add(parent)
+            current = parent
+    return False
+
+
 async def focus_pointer_window(settings: dict[str, Any] | None = None) -> str:
     """Make mouse and keyboard actions target the same visible window."""
     window = await pointer_window(settings)
-    if not window or await active_window(settings) == window:
+    if not window:
+        raise RuntimeError("could not identify the window under the pointer")
+    focused = await active_window(settings)
+    if focused == window:
         return window
     errors = []
     for method in ("windowactivate", "windowfocus"):
@@ -377,11 +544,21 @@ async def _checked_xdotool(*args: str, settings: dict[str, Any] | None = None) -
 
 
 async def click(x: int | None, y: int | None, button: str = "left", clicks: int = 1,
-                settings: dict[str, Any] | None = None) -> None:
+                settings: dict[str, Any] | None = None) -> dict[str, Any]:
     if x is not None and y is not None:
         await move(x, y, settings)
     button_code = str(BUTTONS.get(str(button or "left").lower(), 1))
-    window = await focus_pointer_window(settings)
+    window = await pointer_window(settings)
+    if not window:
+        raise RuntimeError("could not identify the window under the pointer")
+    # Normal windows should be focused, but browser/native popup surfaces may
+    # deliberately reject activation. The final click is addressed to the
+    # exact pointer XID, so a failed focus attempt is not silently redirected
+    # to some other Chrome window.
+    try:
+        await focus_pointer_window(settings)
+    except RuntimeError:
+        pass
     if (x is not None and y is not None and button_code == "1"
             and int(clicks or 1) == 1):
         title = await window_name(window, settings)
@@ -389,7 +566,7 @@ async def click(x: int | None, y: int | None, button: str = "left", clicks: int 
         if title:
             result = await accessible_click(int(x), int(y), title, settings)
         if result.get("handled"):
-            return
+            return {**result, "semantic": True, "window": window}
     args = ["click"]
     # On the real GNOME desktop, XTEST can move the pointer correctly while a
     # bare click never reaches Chrome. Addressing the window under the pointer
@@ -399,34 +576,55 @@ async def click(x: int | None, y: int | None, button: str = "left", clicks: int 
         args += ["--window", window]
     args += ["--repeat", str(max(1, int(clicks or 1))), "--delay", "80", button_code]
     await _checked_xdotool(*args, settings=settings)
+    return {"handled": True, "semantic": False, "window": window}
 
 
 async def mouse_down(x: int | None, y: int | None, button: str = "left",
-                     settings: dict[str, Any] | None = None) -> None:
+                     settings: dict[str, Any] | None = None) -> str:
     if x is not None and y is not None:
         await move(x, y, settings)
-    await focus_pointer_window(settings)
+    window = await pointer_window(settings)
+    if not window:
+        raise RuntimeError("could not identify the window under the pointer")
+    try:
+        await focus_pointer_window(settings)
+    except RuntimeError:
+        pass
     await _checked_xdotool(
-        "mousedown", str(BUTTONS.get(str(button or "left").lower(), 1)), settings=settings)
+        "mousedown", "--window", window,
+        str(BUTTONS.get(str(button or "left").lower(), 1)), settings=settings)
+    return window
 
 
 async def mouse_up(x: int | None, y: int | None, button: str = "left",
-                   settings: dict[str, Any] | None = None) -> None:
+                   settings: dict[str, Any] | None = None, *,
+                   target_window: str = "") -> None:
     if x is not None and y is not None:
         await move(x, y, settings)
-    await xdotool("mouseup", BUTTONS.get(str(button or "left").lower(), 1), settings=settings)
+    window = str(target_window or await pointer_window(settings))
+    if not window:
+        raise RuntimeError("could not identify the window under the pointer")
+    await _checked_xdotool(
+        "mouseup", "--window", window,
+        str(BUTTONS.get(str(button or "left").lower(), 1)), settings=settings)
 
 
 async def drag(start: tuple[int, int], end: tuple[int, int], button: str = "left",
                steps: int = 18, settings: dict[str, Any] | None = None) -> None:
-    await mouse_down(start[0], start[1], button, settings)
-    x0, y0 = start
-    x1, y1 = end
-    for i in range(1, max(2, int(steps)) + 1):
-        ratio = i / float(steps)
-        await move(int(x0 + (x1 - x0) * ratio), int(y0 + (y1 - y0) * ratio), settings)
-        await asyncio.sleep(0.012)
-    await mouse_up(x1, y1, button, settings)
+    window = await mouse_down(start[0], start[1], button, settings)
+    try:
+        x0, y0 = start
+        x1, y1 = end
+        count = max(2, int(steps))
+        for i in range(1, count + 1):
+            ratio = i / float(count)
+            await move(int(x0 + (x1 - x0) * ratio), int(y0 + (y1 - y0) * ratio), settings)
+            await asyncio.sleep(0.012)
+    finally:
+        # Release wherever the last verified move landed. Retrying the failed
+        # destination move here could raise before button-up and leave a drag
+        # latched until outer cleanup.
+        await mouse_up(None, None, button, settings, target_window=window)
 
 
 async def stroke(points: list[list[int]], button: str = "left", step_delay: float = 0.02,
@@ -434,12 +632,13 @@ async def stroke(points: list[list[int]], button: str = "left", step_delay: floa
     """One continuous press-glide-release through every point."""
     if len(points) < 2:
         return
-    await mouse_down(int(points[0][0]), int(points[0][1]), button, settings)
-    for point in points[1:]:
-        await move(int(point[0]), int(point[1]), settings)
-        await asyncio.sleep(max(0.0, float(step_delay)))
-    last = points[-1]
-    await mouse_up(int(last[0]), int(last[1]), button, settings)
+    window = await mouse_down(int(points[0][0]), int(points[0][1]), button, settings)
+    try:
+        for point in points[1:]:
+            await move(int(point[0]), int(point[1]), settings)
+            await asyncio.sleep(max(0.0, float(step_delay)))
+    finally:
+        await mouse_up(None, None, button, settings, target_window=window)
 
 
 async def scroll(x: int | None, y: int | None, dy: int = 3,
@@ -448,7 +647,13 @@ async def scroll(x: int | None, y: int | None, dy: int = 3,
         await move(x, y, settings)
     amount = int(dy)
     button = "5" if amount > 0 else "4"       # 4 = wheel up, 5 = wheel down
-    window = await focus_pointer_window(settings)
+    window = await pointer_window(settings)
+    if not window:
+        raise RuntimeError("could not identify the window under the pointer")
+    try:
+        await focus_pointer_window(settings)
+    except RuntimeError:
+        pass
     args = ["click"]
     if window:
         args += ["--window", window]
@@ -458,15 +663,46 @@ async def scroll(x: int | None, y: int | None, dy: int = 3,
 
 async def key_down(key: str, settings: dict[str, Any] | None = None) -> None:
     await focus_pointer_window(settings)
+    code = linux_keycode(key)
+    if code is not None and await _kernel_events([[code, 1]]):
+        return
+    if _uinput_required(settings):
+        raise RuntimeError("kernel keyboard service is unavailable on the real desktop")
     await _checked_xdotool("keydown", keysym(key), settings=settings)
 
 
 async def key_up(key: str = "", settings: dict[str, Any] | None = None) -> None:
     await focus_pointer_window(settings)
     if key:
+        code = linux_keycode(key)
+        if code is not None and await _kernel_events([[code, 0]]):
+            return
+        if _uinput_required(settings):
+            raise RuntimeError("kernel keyboard service is unavailable on the real desktop")
         await _checked_xdotool("keyup", keysym(key), settings=settings)
     else:
-        await _checked_xdotool("keyup", "--clearmodifiers", "shift", settings=settings)
+        await release_all(settings)
+
+
+async def release_all(settings: dict[str, Any] | None = None) -> None:
+    """Best-effort safety cleanup for cancellation and partially failed gestures."""
+    modifier_codes = [code for code in (
+        linux_keycode("ctrl"), linux_keycode("shift"),
+        linux_keycode("alt"), linux_keycode("super")) if code is not None]
+    try:
+        await _kernel_events([[int(code), 0] for code in modifier_codes])
+    except Exception:
+        pass
+    for sym in ("ctrl", "shift", "alt", "super"):
+        try:
+            await xdotool("keyup", sym, settings=settings)
+        except Exception:
+            pass
+    for button in ("1", "2", "3"):
+        try:
+            await xdotool("mouseup", button, settings=settings)
+        except Exception:
+            pass
 
 
 async def active_window_title(settings: dict[str, Any] | None = None) -> str:
