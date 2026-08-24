@@ -30,6 +30,28 @@ xrandr --output "$output" --mode 1280x720 --scale 1x1 --primary
 xset s off
 xset -dpms
 
+# Turn off the physical panel backlight without changing the desktop pixels.
+# Operator screenshots capture the framebuffer before this hardware control,
+# so the remote view remains fully visible. Apply every exposed backlight so
+# the behavior is portable across laptop GPU drivers; set the environment
+# override to a higher integer when local panel visibility is wanted again.
+backlight_level="${AIOS_OPERATOR_BACKLIGHT_LEVEL:-0}"
+if [[ "$backlight_level" =~ ^[0-9]+$ ]]; then
+  for brightness in /sys/class/backlight/*/brightness; do
+    [ -e "$brightness" ] || continue
+    max_brightness="$(cat "${brightness%/brightness}/max_brightness" 2>/dev/null || true)"
+    level="$backlight_level"
+    if [[ "$max_brightness" =~ ^[0-9]+$ ]] && (( level > max_brightness )); then
+      level="$max_brightness"
+    fi
+    if [ -w "$brightness" ]; then
+      printf '%s\n' "$level" > "$brightness"
+    elif command -v sudo >/dev/null 2>&1; then
+      printf '%s\n' "$level" | sudo -n tee "$brightness" >/dev/null || true
+    fi
+  done
+fi
+
 # GNOME/Mutter blanks and locks the seat on idle, which the operator then
 # screenshots as a black "Mutter guard" screen. xset above does not stop
 # gnome-settings-daemon, so turn off idle blanking, the lock screen and

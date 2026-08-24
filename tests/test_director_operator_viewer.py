@@ -99,6 +99,9 @@ def test_real_desktop_units_attach_to_xorg_and_retire_xvfb():
     assert "Environment=DISPLAY=:0" in chrome
     assert "disable --now aios-director-xvfb.service aios-director-wm.service" in install
     assert "--mode 1280x720 --scale 1x1" in desktop
+    assert "AIOS_OPERATOR_BACKLIGHT_LEVEL:-0" in desktop
+    assert "/sys/class/backlight/*/brightness" in desktop
+    assert 'sudo -n tee "$brightness"' in desktop
     assert "DBUS_SESSION_BUS_ADDRESS" in desktop
     assert "org.gnome.desktop.session idle-delay 0" in desktop
     assert "org.gnome.desktop.screensaver lock-enabled false" in desktop
