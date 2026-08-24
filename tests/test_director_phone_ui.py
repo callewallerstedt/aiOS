@@ -84,6 +84,7 @@ def test_app_boots_without_the_code_transcript_module():
     assert (ROOT / "phone_site" / "code" / "transcript.js").is_file()
     assert (ROOT / "phone_site" / "code" / "markdown.js").is_file()
     build = (ROOT / "phone_site" / "scripts" / "build.js").read_text(encoding="utf-8")
+    assert "fs.existsSync(localPath) ? localPath : aiosPath" in build
     assert "localCode" in build
 
 

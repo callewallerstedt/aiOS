@@ -24,9 +24,10 @@ for (const name of [
   fs.copyFileSync(path.join(root, name), path.join(publicDir, name));
 }
 
-// CODE transcript renderer. Prefer the live aiOS copy when this checkout
-// has it; otherwise use the vendored files in ./code so a Vercel build
-// (which only sees phone_site/) still ships them.
+// CODE transcript renderer. The phone vendored copy is authoritative for a
+// phone release: choosing a parent checkout first made local/Vercel builds
+// silently publish different assets from the same commit. Keep the aiOS copy
+// only as a fallback for an incomplete source package.
 const codePublic = path.join(publicDir, 'code');
 fs.mkdirSync(codePublic, { recursive: true });
 const aiosWeb = path.resolve(root, '..', 'aios_ui', 'web');
@@ -39,7 +40,7 @@ for (const [from, to] of [
 ]) {
   const aiosPath = path.join(aiosWeb, from);
   const localPath = path.join(localCode, to);
-  const src = fs.existsSync(aiosPath) ? aiosPath : localPath;
+  const src = fs.existsSync(localPath) ? localPath : aiosPath;
   if (!fs.existsSync(src)) {
     throw new Error(`missing CODE asset ${to} (looked in ${aiosPath} and ${localPath})`);
   }
