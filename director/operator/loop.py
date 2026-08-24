@@ -127,7 +127,8 @@ def recurring_state_cycle(states: list[int], *, max_period: int = MAX_STATE_CYCL
             cycle = tuple(states[-period:])
             # The same loop is observed at a different phase on each step:
             # A-B and B-A are one cycle, not two approaches. Canonicalizing
-            # rotations is what makes the real Spotify A<->B failure stop.
+            # rotations makes the same navigation loop stop regardless of
+            # which page or phase first exposed it.
             rotations = [cycle[index:] + cycle[:index]
                          for index in range(len(cycle))]
             return min(rotations)
