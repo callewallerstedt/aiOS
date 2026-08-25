@@ -1,0 +1,170 @@
+/* Same chrome language as the main shell: panel, brand, surface cards. */
+
+html, body.qt-body {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--panel);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: calc(var(--font-size) * 1.3);
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  cursor: default;
+}
+
+.qt-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--panel);
+  overflow: hidden;
+}
+
+.qt-header {
+  flex: 0 0 48px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px 0;
+}
+
+.qt-brand {
+  font-family: var(--font-brand);
+  font-size: 15px;
+  letter-spacing: 0.02em;
+}
+
+.qt-subtitle {
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.qt-body-inner {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 10px 14px 14px;
+}
+
+.qt-grid {
+  flex: 1 1 auto;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  grid-template-rows: repeat(3, 1fr);
+  gap: 8px;
+  min-height: 0;
+  padding: 10px;
+  background: var(--surface);
+  border-radius: calc(var(--global-radius) * 1.4);
+}
+
+.qt-cell {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-width: 0;
+  min-height: 0;
+  padding: 8px 6px;
+  border-radius: calc(var(--global-radius) * 0.9);
+  background: var(--panel2);
+  border: 1px solid var(--border-soft);
+  color: var(--muted);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  transition:
+    color var(--fast) var(--ease),
+    background var(--fast) var(--ease),
+    border-color var(--fast) var(--ease),
+    transform var(--fast) var(--ease);
+  -webkit-app-region: no-drag;
+}
+
+.qt-cell:hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--panel2) 76%, var(--accent));
+}
+
+.qt-cell:active,
+.qt-cell.is-pressed {
+  transform: scale(0.96);
+  color: var(--text);
+  background: color-mix(in srgb, var(--panel2) 70%, var(--accent));
+}
+
+.qt-cell .glyph {
+  font-size: 16px;
+  line-height: 1;
+  color: var(--accent);
+}
+
+.qt-cell .label {
+  font-size: 10px;
+  line-height: 1.15;
+  text-align: center;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.qt-cell.is-primary {
+  color: #fff;
+  background: var(--accent);
+  border-color: transparent;
+}
+
+.qt-cell.is-primary .glyph,
+.qt-cell.is-primary .label {
+  color: #fff;
+}
+
+.qt-cell.is-primary:hover {
+  background: color-mix(in srgb, var(--accent) 86%, white);
+}
+
+.qt-cell.is-close {
+  background: transparent;
+  border-color: var(--border-soft);
+  color: var(--muted);
+}
+
+.qt-cell.is-close .glyph {
+  color: var(--muted);
+  font-size: 20px;
+  font-weight: 500;
+}
+
+.qt-cell.is-close:hover {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 12%, var(--panel2));
+  border-color: color-mix(in srgb, var(--danger) 35%, transparent);
+}
+
+.qt-cell.is-close:hover .glyph {
+  color: var(--danger);
+}
+
+.qt-cell:disabled,
+.qt-cell.is-busy {
+  opacity: 0.55;
+  pointer-events: none;
+}
+
+.qt-status {
+  flex: 0 0 auto;
+  min-height: 14px;
+  margin-top: 8px;
+  text-align: center;
+  font-size: 9px;
+  color: var(--muted);
+}
+
+.qt-status[data-kind="error"] { color: var(--danger); }
+.qt-status[data-kind="ok"] { color: var(--success); }

@@ -41,35 +41,60 @@ from desktop_agent.actions import execute as exec_action
 class ClickOverlay:
     """Brief red ring at (screen_x, screen_y) on the real display."""
 
+    R = 36
+
     def __init__(self, root: tk.Tk):
         self.root = root
-
-    def flash(self, x: int, y: int, button: str = "left"):
-        win = tk.Toplevel(self.root)
-        win.overrideredirect(True)
-        win.attributes("-topmost", True)
+        self._fade_after = None
+        # One reused window; a Toplevel per click leaks handles during long runs.
+        self.win = tk.Toplevel(self.root)
+        self.win.withdraw()
+        self.win.overrideredirect(True)
+        self.win.attributes("-topmost", True)
         try:
-            win.attributes("-transparentcolor", "white")
+            self.win.attributes("-transparentcolor", "white")
         except tk.TclError:
             pass
-        R = 36
-        win.geometry(f"{R*2}x{R*2}+{x - R}+{y - R}")
-        c = tk.Canvas(win, width=R*2, height=R*2, bg="white", highlightthickness=0)
-        c.pack()
+        size = self.R * 2
+        self.canvas = tk.Canvas(self.win, width=size, height=size, bg="white", highlightthickness=0)
+        self.canvas.pack()
+        self.ring = self.canvas.create_oval(4, 4, size - 4, size - 4, outline="#ff3030", width=4)
+        self.dot = self.canvas.create_oval(
+            self.R - 4, self.R - 4, self.R + 4, self.R + 4, fill="#ff3030", outline="#ff3030")
+
+    def flash(self, x: int, y: int, button: str = "left"):
+        if self._fade_after is not None:
+            try:
+                self.win.after_cancel(self._fade_after)
+            except tk.TclError:
+                pass
+            self._fade_after = None
+        R = self.R
+        try:
+            self.win.attributes("-alpha", 1.0)
+            self.win.geometry(f"{R*2}x{R*2}+{x - R}+{y - R}")
+        except tk.TclError:
+            return
         color = {"left": "#ff3030", "right": "#3060ff", "middle": "#30ff60"}.get(button, "#ff3030")
-        c.create_oval(4, 4, R*2 - 4, R*2 - 4, outline=color, width=4)
-        c.create_oval(R - 4, R - 4, R + 4, R + 4, fill=color, outline=color)
+        self.canvas.itemconfigure(self.ring, outline=color)
+        self.canvas.itemconfigure(self.dot, fill=color, outline=color)
+        self.win.deiconify()
+        self.win.lift()
+
         # fade-out via after
         def step(i=0):
             try:
-                win.attributes("-alpha", max(0.0, 1.0 - i * 0.08))
+                self.win.attributes("-alpha", max(0.0, 1.0 - i * 0.08))
             except tk.TclError:
                 return
             if i < 14:
-                win.after(50, lambda: step(i + 1))
+                self._fade_after = self.win.after(50, step, i + 1)
             else:
-                try: win.destroy()
-                except tk.TclError: pass
+                self._fade_after = None
+                try:
+                    self.win.withdraw()
+                except tk.TclError:
+                    pass
         step()
 
 

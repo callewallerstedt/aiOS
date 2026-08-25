@@ -282,7 +282,7 @@ def test_history_keeps_tool_protocol_atomic_across_interleaved_user_message(dire
     assert items[2]["content"][0]["text"] == "I have more context"
 
 
-def test_history_closes_interrupted_call_and_omits_orphan_result(director):
+def test_history_closes_interrupted_call_and_preserves_late_result_as_data(director):
     from director import runtime
 
     agent = director.create_agent(name="T", agent_id="agt_interrupted")
@@ -296,10 +296,11 @@ def test_history_closes_interrupted_call_and_omits_orphan_result(director):
     items = runtime.build_items(thread["id"])
 
     assert [item["type"] for item in items] == [
-        "tool_call", "tool_result", "message"]
+        "tool_call", "tool_result", "message", "message"]
     assert items[0]["call_id"] == items[1]["call_id"] == "call_lost"
     assert "interrupted" in items[1]["output"]
-    assert "orphan" not in json.dumps(items)
+    assert "Late result" in json.dumps(items)
+    assert "orphan" in json.dumps(items)
 
 
 def test_cancelling_running_tool_persists_its_result(director, monkeypatch):
@@ -547,7 +548,7 @@ def test_x11_double_click_targets_the_window_under_the_pointer(monkeypatch):
 
     assert calls[0] == ("mousemove", 805, 560)
     assert calls[1] == ("getmouselocation", "--shell")
-    assert calls[2] == (
+    assert calls[-1] == (
         "click", "--window", "46137348", "--repeat", "2", "--delay", "80", "1")
 
 
@@ -561,7 +562,7 @@ def test_x11_click_uses_accessible_action_for_native_control(monkeypatch):
     async def fake_xdotool(*args, settings=None):
         calls.append(args)
         if args[:2] == ("getmouselocation", "--shell"):
-            return 0, "WINDOW=42"
+            return 0, "X=700\nY=440\nWINDOW=42"
         if args[0] == "getwindowname":
             return 0, "Confirm action"
         return 0, ""
@@ -587,7 +588,7 @@ def test_x11_click_falls_back_when_native_control_is_not_accessible(monkeypatch)
     async def fake_xdotool(*args, settings=None):
         calls.append(args)
         if args[:2] == ("getmouselocation", "--shell"):
-            return 0, "WINDOW=42"
+            return 0, "X=10\nY=20\nWINDOW=42"
         if args[0] == "getwindowname":
             return 0, "Canvas"
         return 0, ""
@@ -612,7 +613,7 @@ def test_x11_click_surfaces_delivery_failure(monkeypatch):
         if args[0] == "click":
             return 1, "button event rejected"
         if args[:2] == ("getmouselocation", "--shell"):
-            return 0, "WINDOW=42"
+            return 0, "X=10\nY=20\nWINDOW=42"
         return 0, ""
 
     monkeypatch.setattr(x11, "xdotool", fake_xdotool)
@@ -626,11 +627,15 @@ def test_x11_scroll_uses_standard_direction_and_targets_window(monkeypatch):
     from director.operator import x11
 
     calls = []
+    pointer = [0, 0]
 
     async def fake_xdotool(*args, settings=None):
         calls.append(args)
+        if args and args[0] == "mousemove":
+            pointer[:] = [int(args[1]), int(args[2])]
+            return 0, ""
         if args[:2] == ("getmouselocation", "--shell"):
-            return 0, "WINDOW=42"
+            return 0, f"X={pointer[0]}\nY={pointer[1]}\nWINDOW=42"
         return 0, ""
 
     monkeypatch.setattr(x11, "xdotool", fake_xdotool)
@@ -727,6 +732,7 @@ def test_operator_progress_checkpoint_stops_with_the_observed_issue(monkeypatch)
     monkeypatch.setattr(x11, "screen_size", screen_size)
     monkeypatch.setattr(x11, "capture", capture)
     monkeypatch.setattr(x11, "encode_jpeg", encode_jpeg)
+    monkeypatch.setattr(x11, "image_signature", lambda png: png)
     monkeypatch.setattr(x11, "window_list", window_list)
     monkeypatch.setattr(loop, "execute", execute)
     monkeypatch.setattr(loop.models, "complete", complete)
@@ -796,6 +802,7 @@ def test_operator_progress_checkpoint_can_continue_past_the_interval(monkeypatch
     monkeypatch.setattr(x11, "capture", capture)
     monkeypatch.setattr(x11, "encode_jpeg",
                         lambda png: ("data:image/jpeg;base64,QQ==", 1280, 720))
+    monkeypatch.setattr(x11, "image_signature", lambda png: png)
     monkeypatch.setattr(x11, "window_list", window_list)
     monkeypatch.setattr(loop, "execute", execute)
     monkeypatch.setattr(loop.models, "complete", complete)
@@ -815,7 +822,7 @@ def test_operator_progress_checkpoint_can_continue_past_the_interval(monkeypatch
     assert "Progress confirmed" in third_message
     assert "Open the artist and inspect Music analytics" in third_message
     assert "ACTION FEEDBACK" in json.dumps(normal_messages[1])
-    assert "screen is unchanged" in json.dumps(normal_messages[1]).lower()
+    assert "canonical screen state is unchanged" in json.dumps(normal_messages[1]).lower()
 
 
 def test_operator_defaults_to_progress_reviews_not_a_step_budget():
@@ -878,8 +885,9 @@ def test_operator_action_log_does_not_persist_typed_verification_code(monkeypatc
     monkeypatch.setattr(x11, "type_text", type_text)
     result = asyncio.run(loop.execute({"type": "type", "text": "123456"}, {}))
 
-    assert result == "typed 6 characters"
-    assert "123456" not in result
+    assert result.description == "issued 6 typed characters"
+    assert result.issued and not result.verified
+    assert "123456" not in result.description
 
 
 def test_operator_prompt_uses_direct_urls_and_authorized_gmail_codes():
@@ -909,6 +917,16 @@ def test_x11_text_uses_clipboard_so_swedish_layout_does_not_mangle_urls(monkeypa
 
     seen = {}
 
+    class Stdout:
+        def __init__(self):
+            self.lines = asyncio.Queue()
+
+        async def readline(self):
+            return await self.lines.get()
+
+        def feed(self, line):
+            self.lines.put_nowait(line)
+
     class Stdin:
         def write(self, data):
             seen["data"] = data
@@ -920,33 +938,56 @@ def test_x11_text_uses_clipboard_so_swedish_layout_does_not_mangle_urls(monkeypa
             seen["closed"] = True
 
     class Proc:
-        returncode = None
-        stdin = Stdin()
+        def __init__(self):
+            self.returncode = None
+            self.stdin = Stdin()
+            self.stdout = Stdout()
+            self.done = asyncio.Event()
 
         def terminate(self):
             seen["terminated"] = True
+            self.returncode = -15
+            self.stdout.feed(b"")
+            self.done.set()
+
+        def kill(self):
+            self.terminate()
 
         async def wait(self):
-            self.returncode = 0
-            return 0
+            await self.done.wait()
+            return self.returncode
 
     async def create(*args, **kwargs):
         seen["argv"] = args
-        return Proc()
+        proc = Proc()
+        seen["proc"] = proc
+        proc.stdout.feed(b"  Waiting for selection request number 1\n")
+        return proc
 
     async def hotkey(keys, settings=None):
         seen["keys"] = keys
+        seen["proc"].stdout.feed(
+            b"  Waiting for selection request number 2\n")
+
+    async def focus(settings=None):
+        seen["focused"] = True
+        return "42"
 
     monkeypatch.setattr(x11.shutil, "which", lambda name: "/usr/bin/xclip")
     monkeypatch.setattr(x11.asyncio, "create_subprocess_exec", create)
     monkeypatch.setattr(x11, "hotkey", hotkey)
+    monkeypatch.setattr(x11, "focus_pointer_window", focus)
+    monkeypatch.setattr(x11, "CLIPBOARD_OWNER_QUIET_PERIOD", 0.001)
 
     asyncio.run(x11.type_text("https://artists.spotify.com/"))
 
     assert seen["argv"][:3] == ("xclip", "-selection", "clipboard")
     assert "-quiet" in seen["argv"]
+    assert "-loops" not in seen["argv"]
     assert seen["data"] == b"https://artists.spotify.com/"
-    assert seen["drained"] and seen["closed"] and seen["terminated"]
+    assert seen["drained"] and seen["closed"]
+    assert seen["terminated"], "clipboard owner should be released after the transfer"
+    assert seen["focused"]
     assert seen["keys"] == ["ctrl", "v"]
 
 

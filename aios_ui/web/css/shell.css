@@ -1,0 +1,719 @@
+/* The window chrome: 18px transparent inset, rounded panel, 56px header,
+   158px nav rail, flexible page, 330px chat panel, collapsible bottom tray.
+   Same geometry as _build_ui() in helper_overlay.py. */
+
+/* No gutter. The window frame IS the panel -- an inset only worked when the
+   surrounding pixels were transparent, and WebView2 painted them white. */
+.shell {
+  height: 100%;
+}
+
+.panel {
+  position: relative;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--app-background, var(--panel));
+  overflow: hidden;
+}
+
+/* ------------------------------------------------------------------ header */
+
+.header {
+  flex: 0 0 56px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 18px 0;
+}
+
+.brand {
+  font-family: var(--font-brand);
+  font-size: 18px;
+  letter-spacing: 0.02em;
+}
+
+.subtitle {
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.header-tools {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  /* The header is the drag region; its controls must not drag the window. */
+  -webkit-app-region: no-drag;
+}
+
+.stats { display: flex; gap: 6px; }
+
+.stat {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: calc(var(--global-radius) * 0.7);
+  color: var(--muted);
+  font-size: 10px;
+  padding: 3px 9px;
+  white-space: nowrap;
+}
+
+.balance-stat {
+  cursor: pointer;
+  transition: color var(--fast) var(--ease), background var(--fast) var(--ease), border-color var(--fast) var(--ease);
+}
+.balance-stat:hover { color: var(--text); background: var(--panel2); }
+.balance-stat.loading { color: var(--accent); }
+.balance-stat.unavailable { color: var(--danger); }
+
+.divider { width: 1px; align-self: stretch; margin: 8px 0; background: var(--border); }
+
+.icon-btn {
+  width: 28px;
+  height: 26px;
+  border-radius: calc(var(--global-radius) * 0.7);
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1;
+  transition: color var(--fast) var(--ease), background var(--fast) var(--ease), transform var(--fast) var(--ease);
+}
+.icon-btn:hover { color: var(--text); background: var(--panel2); }
+.icon-btn:active { transform: scale(0.94); }
+.fullscreen-btn { font-size: 16px; }
+
+/* -------------------------------------------------------------------- body */
+
+.body {
+  position: relative;
+  flex: 1 1 auto;
+  display: flex;
+  min-height: 0;
+  min-width: 0;
+  padding: 8px 18px 18px;
+  gap: 12px;
+}
+
+.nav {
+  position: relative;
+  flex: 0 0 158px;
+  background: var(--surface);
+  border-radius: calc(var(--global-radius) * 1.4);
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  transition: flex var(--slow) var(--ease), padding var(--slow) var(--ease), opacity var(--slow) var(--ease);
+  overflow: hidden;
+}
+.nav.collapsed {
+  flex: 0 0 0;
+  width: 0;
+  min-width: 0;
+  padding: 0;
+  background: transparent;
+  border-radius: 0;
+  overflow: visible;
+}
+.nav.collapsed .nav-btn { opacity: 0; pointer-events: none; }
+.nav.collapsed .nav-collapse {
+  right: -12px;
+  transform: translateY(-50%);
+}
+.nav.collapsed .nav-tools { opacity: 0; pointer-events: none; }
+
+.nav-collapse {
+  position: absolute;
+  right: 0;
+  top: 50%;
+  z-index: 2;
+  transform: translateY(-50%);
+  width: 12px;
+  height: 32px;
+  border-radius: 0;
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  font-size: 22px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  opacity: 0.5;
+  transition: color var(--fast) var(--ease), background var(--fast) var(--ease), transform var(--slow) var(--ease), opacity var(--fast) var(--ease);
+}
+.nav-collapse:hover {
+  color: var(--text);
+  opacity: 0.9;
+  background: color-mix(in srgb, var(--surface) 88%, white);
+}
+
+.nav-btn {
+  position: relative;
+  text-align: left;
+  padding: 10px 12px;
+  border-radius: calc(var(--global-radius) * 0.9);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  transition: color var(--fast) var(--ease), background var(--fast) var(--ease);
+}
+/* Nav items are raised cards, and the active one is a solid accent block --
+   matching the Tk build, where CODE reads as a filled red button. */
+.nav-btn {
+  background: var(--panel2);
+  border: 1px solid var(--border-soft);
+}
+.nav-btn:hover { color: var(--text); background: color-mix(in srgb, var(--panel2) 76%, var(--accent)); }
+.nav-btn.active {
+  color: #fff;
+  background: var(--accent);
+  border-color: transparent;
+}
+.nav-btn.brand-font { font-family: var(--font-brand); font-size: 9px; padding: 11px 12px; }
+
+.page {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* The agent panel floats OVER page content instead of squeezing it, so wide
+   views (e.g. CODE split panes) keep their full width underneath. */
+.chat-panel {
+  position: absolute;
+  top: 8px;
+  right: 18px;
+  bottom: 18px;
+  z-index: 40;
+  flex: 0 0 auto;
+  width: var(--chat-w, 330px);
+  min-width: 0;
+  background: var(--surface);
+  border-radius: calc(var(--global-radius) * 1.4);
+  display: flex;
+  min-height: 0;
+  box-shadow: 0 10px 34px rgba(0, 0, 0, 0.35);
+  transition: width var(--slow) var(--ease), padding var(--slow) var(--ease), opacity var(--slow) var(--ease);
+  overflow: hidden;
+}
+.chat-panel.collapsed {
+  width: 0;
+  min-width: 0;
+  padding: 0;
+  background: transparent;
+  border-radius: 0;
+  box-shadow: none;
+  overflow: visible;
+}
+.chat-panel.collapsed .chat-inner { display: none; }
+.chat-panel.collapsed .chat-resize { display: none; }
+.chat-panel.collapsed .chat-collapse {
+  left: -12px;
+  transform: translateY(-50%);
+}
+
+.chat-collapse {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  z-index: 2;
+  transform: translateY(-50%);
+  width: 12px;
+  height: 32px;
+  border-radius: 0;
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  font-size: 22px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  opacity: 0.5;
+  transition: color var(--fast) var(--ease), background var(--fast) var(--ease), transform var(--slow) var(--ease), opacity var(--fast) var(--ease);
+}
+.chat-collapse:hover {
+  color: var(--text);
+  opacity: 0.9;
+  background: color-mix(in srgb, var(--surface) 88%, white);
+}
+.chat-resize {
+  flex: 0 0 8px;
+  cursor: ew-resize;
+  border-radius: calc(var(--global-radius) * 1.4) 0 0 calc(var(--global-radius) * 1.4);
+}
+.chat-inner { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
+
+.collapse-glyph { display: block; transform: translateY(-1px); font-family: Arial, sans-serif; font-weight: 300; }
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+}
+
+/* ------------------------------------------------------------ quick tools */
+
+/* Quick tools is a rail entry pinned to the bottom of the nav, styled like the
+   CODE / Apps / Drop / OPERATOR buttons. The spacer is what pins it. */
+.nav-spacer { flex: 1 1 auto; min-height: 4px; }
+.nav-tools { flex: 0 0 auto; }
+.nav.collapsed .nav-tools { opacity: 0; pointer-events: none; }
+
+.quick-tools {
+  position: fixed;
+  z-index: 55;
+  width: 218px;
+  padding: 8px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: calc(var(--global-radius) * 1.2);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45);
+}
+.quick-tools[hidden] { display: none; }
+.quick-tools-head {
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--accent);
+  padding: 2px 4px 6px;
+}
+.quick-tools-list { display: flex; flex-direction: column; gap: 2px; }
+.quick-tool {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 6px 8px;
+  border-radius: calc(var(--global-radius) * 0.7);
+  text-align: left;
+  transition: background var(--fast) var(--ease);
+}
+.quick-tool:hover { background: var(--panel2); }
+.quick-tool.recording {
+  background: color-mix(in srgb, var(--danger) 14%, var(--panel2));
+  border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+}
+.quick-tool.recording .glyph,
+.quick-tool.recording b { color: var(--danger); }
+.quick-tool .glyph { flex: 0 0 14px; color: var(--accent); font-size: 12px; text-align: center; }
+.quick-tool .copy { min-width: 0; }
+.quick-tool b { display: block; font-size: 10px; font-weight: 600; }
+.quick-tool i {
+  display: block;
+  font-size: 8.5px;
+  font-style: normal;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.quick-tools-status {
+  margin-top: 6px;
+  padding: 4px 6px 2px;
+  border-top: 1px solid var(--border-soft);
+  font-size: 8.5px;
+  color: var(--muted);
+}
+
+.recorder-modal { width: min(430px, 84vw); }
+
+.webcam-modal { width: min(520px, 92vw); }
+.webcam-stage {
+  position: relative;
+  margin-top: 12px;
+  aspect-ratio: 16 / 10;
+  overflow: hidden;
+  background: #070b12;
+  border: 1px solid var(--border);
+  border-radius: calc(var(--global-radius) * 0.9);
+}
+.webcam-video,
+.webcam-preview {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0;
+  transition: opacity var(--fast) var(--ease);
+}
+.webcam-video.live,
+.webcam-preview.live { opacity: 1; }
+.webcam-empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  font-size: 11px;
+  pointer-events: none;
+}
+.webcam-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 10px;
+}
+.webcam-device {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 9px;
+}
+.webcam-device select {
+  width: 100%;
+  min-width: 0;
+}
+.webcam-note {
+  flex: 0 0 auto;
+  max-width: 46%;
+  color: var(--muted);
+  font-size: 9px;
+  text-align: right;
+}
+.webcam-note[data-kind="error"] { color: var(--danger); }
+.webcam-shots {
+  display: flex;
+  gap: 6px;
+  margin-top: 10px;
+  min-height: 0;
+  overflow-x: auto;
+}
+.webcam-shots:empty { display: none; }
+.webcam-shots img {
+  flex: 0 0 auto;
+  width: 54px;
+  height: 40px;
+  object-fit: cover;
+  border: 1px solid var(--border);
+  border-radius: calc(var(--global-radius) * 0.55);
+  background: #070b12;
+}
+.webcam-actions { margin-top: 14px; }
+
+.recorder-area {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  width: 100%;
+  gap: 3px;
+  margin: 13px 0 10px;
+  padding: 11px 12px;
+  text-align: left;
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--accent) 34%, var(--border));
+  border-radius: calc(var(--global-radius) * 0.8);
+}
+.recorder-area:hover { background: color-mix(in srgb, var(--accent) 17%, var(--surface)); }
+.recorder-area b { font-size: 11px; }
+.recorder-area span { color: var(--muted); font-size: 9px; }
+.recorder-target {
+  display: grid;
+  grid-template-columns: 62px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 9px;
+}
+.recorder-target select {
+  min-width: 0;
+  width: 100%;
+  padding: 6px 8px;
+  color: var(--text);
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: calc(var(--global-radius) * 0.6);
+  font: inherit;
+}
+.recorder-target + .btn { margin-top: 6px; margin-left: 70px; }
+.recorder-note {
+  min-height: 16px;
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.sheet-rows { margin-top: 4px; }
+.sheet-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 4px 0;
+  font-size: 11px;
+  border-bottom: 1px solid var(--border-soft);
+}
+.sheet-row span { color: var(--muted); white-space: pre; }
+.sheet-row b { font-weight: 600; font-family: var(--font-mono); font-size: 10px; }
+.footnote { margin-top: 10px; font-size: 10px; }
+
+/* ---------------------------------------------------------- USB phone mirror
+
+   This is the same shell and the same CODE DOM.  Phone mode only removes the
+   desktop window chrome that cannot do anything in Android and spends those
+   pixels on the existing session rail + transcript. */
+.phone-mirror body { background: var(--panel); }
+.phone-mirror {
+  --phone-safe-left: max(env(safe-area-inset-left), 0px);
+  --phone-safe-top: max(env(safe-area-inset-top), 0px);
+  --phone-safe-right: max(env(safe-area-inset-right), 0px);
+  --phone-safe-bottom: max(env(safe-area-inset-bottom), 0px);
+}
+.phone-mirror .header { display: none; }
+.phone-mirror .header .brand { font-size: 15px; }
+.phone-mirror .header .subtitle {
+  font-size: 9px;
+  opacity: .72;
+}
+.phone-mirror .header-tools,
+.phone-mirror .nav,
+.phone-mirror .chat-panel,
+.phone-mirror .quick-tools,
+.phone-mirror .resize-grip { display: none !important; }
+.phone-mirror .body {
+  padding: var(--phone-safe-top) var(--phone-safe-right) var(--phone-safe-bottom) var(--phone-safe-left);
+  gap: 0;
+}
+.phone-mirror .page { width: 100%; }
+.phone-mirror .toast { bottom: calc(18px + env(safe-area-inset-bottom)); }
+.phone-mirror .modal { width: min(96vw, 560px); max-height: 92vh; overflow-y: auto; }
+
+.phone-agent-backdrop { display: none; }
+.phone-mirror .phone-agent-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 95;
+  display: block;
+  background: rgba(0, 0, 0, .54);
+  backdrop-filter: blur(2px);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--slow) var(--ease);
+}
+
+.phone-native-rail,
+.phone-native-viewer { display: none; }
+.phone-mirror .phone-native-rail {
+  position: fixed;
+  z-index: 110;
+  top: 42px;
+  right: 0;
+  bottom: 42px;
+  width: var(--phone-safe-right);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  pointer-events: none;
+}
+.phone-mirror .phone-native-btn {
+  width: 29px;
+  height: 29px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border-soft);
+  border-radius: calc(var(--global-radius) * .75);
+  color: var(--muted);
+  background: var(--surface2);
+  font: 700 9px/1 var(--font-mono);
+  pointer-events: auto;
+}
+.phone-mirror .phone-native-btn.active {
+  color: #fff;
+  border-color: transparent;
+  background: var(--accent);
+}
+.phone-mirror .phone-native-btn.unavailable:not(.active) { opacity: .42; }
+.phone-mirror .phone-native-viewer {
+  position: fixed;
+  z-index: 90;
+  inset: var(--phone-safe-top) var(--phone-safe-right) var(--phone-safe-bottom) var(--phone-safe-left);
+  display: none;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: #0b0b0c;
+}
+.phone-mirror.phone-native-open .phone-native-viewer { display: flex; }
+.phone-mirror .phone-native-viewer > header {
+  flex: 0 0 35px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--panel);
+}
+.phone-mirror .phone-native-name { color: var(--text); font-size: 11px; font-weight: 700; }
+.phone-mirror .phone-native-title {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.phone-mirror .phone-native-readonly {
+  margin-left: auto;
+  color: var(--muted);
+  font: 700 7px/1 var(--font-mono);
+  letter-spacing: .12em;
+}
+.phone-mirror .phone-native-stage {
+  position: relative;
+  flex: 1 1 auto;
+  display: grid;
+  min-height: 0;
+  place-items: center;
+  overflow: hidden;
+  background: #08090b;
+}
+.phone-mirror .phone-native-stage img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  pointer-events: none;
+  user-select: none;
+}
+.phone-mirror .phone-native-message {
+  position: absolute;
+  max-width: 70%;
+  color: var(--muted);
+  font-size: 11px;
+  text-align: center;
+}
+.phone-mirror .phone-native-message[hidden],
+.phone-mirror .phone-native-stage img[hidden] { display: none; }
+.phone-mirror.phone-agent-open .phone-agent-backdrop {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* ------------------------------------------------------------------ misc */
+
+.resize-grip {
+  position: absolute;
+  right: 4px; bottom: 4px;
+  width: 14px; height: 14px;
+  cursor: nwse-resize;
+  border-right: 2px solid var(--border);
+  border-bottom: 2px solid var(--border);
+  border-radius: 0 0 calc(var(--global-radius) * 0.6) 0;
+  opacity: 0.6;
+}
+
+.page-title { font-size: 20px; font-weight: 600; margin: 0 0 10px; }
+
+.card {
+  background: var(--surface);
+  border-radius: calc(var(--global-radius) * 1.4);
+  border: 1px solid var(--border-soft);
+}
+
+.btn {
+  padding: 9px 13px;
+  border-radius: calc(var(--global-radius) * 0.9);
+  background: var(--panel2);
+  border: 1px solid var(--border-soft);
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 600;
+  transition: background var(--fast) var(--ease), border-color var(--fast) var(--ease), transform var(--fast) var(--ease);
+}
+.btn:hover { background: color-mix(in srgb, var(--panel2) 70%, var(--accent) 8%); border-color: var(--accent-soft); }
+.btn:active { transform: scale(0.97); }
+.btn.compact { padding: 6px 10px; font-size: 10px; }
+/* White on accent, not dark. The accent is a saturated red here; dark text on
+   it fails contrast badly. */
+.btn.accent { background: var(--accent); color: #fff; border-color: transparent; }
+.btn.accent:hover { background: color-mix(in srgb, var(--accent) 86%, white); }
+.btn.ghost { background: transparent; }
+.btn[disabled] { opacity: 0.45; pointer-events: none; }
+
+.placeholder {
+  margin: auto;
+  text-align: center;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.7;
+}
+.placeholder strong { display: block; color: var(--text); font-size: 15px; margin-bottom: 6px; }
+
+/* ---------------------------------------------------------- toast + modal */
+
+.toast {
+  position: fixed;
+  left: 50%; bottom: 46px;
+  transform: translate3d(-50%, 12px, 0);
+  padding: 9px 16px;
+  border-radius: calc(var(--global-radius) * 1);
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 11px;
+  opacity: 0;
+  z-index: 60;
+  transition: opacity var(--fast) var(--ease), transform var(--fast) var(--ease);
+}
+.toast.show { opacity: 1; transform: translate3d(-50%, 0, 0); }
+.toast.error { border-color: color-mix(in srgb, var(--danger) 55%, transparent); color: var(--danger); }
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgba(4, 8, 14, 0.55);
+  backdrop-filter: blur(3px);
+  opacity: 0;
+  z-index: 70;
+  transition: opacity var(--fast) var(--ease);
+}
+.modal-backdrop.show { opacity: 1; }
+.modal {
+  width: min(360px, 80vw);
+  padding: 18px;
+  border-radius: calc(var(--global-radius) * 1.6);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.5);
+  transform: scale(0.96);
+  transition: transform var(--slow) var(--ease);
+}
+.modal-backdrop.show .modal { transform: none; }
+.modal-title { font-size: 14px; font-weight: 600; margin-bottom: 6px; }
+.modal-detail { font-size: 11px; color: var(--muted); line-height: 1.6; }
+.pick-rows { margin-top: 12px; display: grid; gap: 6px; max-height: 40vh; overflow: auto; }
+.pick-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 8px 10px;
+  font-size: 12px;
+  text-align: left;
+  color: var(--text);
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: calc(var(--global-radius) * 0.6);
+  cursor: pointer;
+}
+.pick-row:hover { background: color-mix(in srgb, var(--accent) 12%, var(--panel2)); border-color: var(--accent); }
+.pick-row span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pick-row b { font-weight: 600; font-family: var(--font-mono); font-size: 10px; color: var(--muted); white-space: nowrap; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }

@@ -1,0 +1,370 @@
+/* HARNESS.
+
+   A reading page, not a working one, so it is laid out like documentation
+   rather than like a tool: a section rail, one column of prose, and a measured
+   line length. It borrows CODE's card, tag and code-span treatments so it still
+   reads as the same product.
+
+   The content is generated from code_jobs at request time, so the styling has
+   to survive a list growing a tool or a paragraph getting longer. Nothing here
+   is sized to a specific number of rows. */
+
+.harness-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.harness-head h1 { font-size: 18px; font-weight: 700; margin: 0; }
+.harness-head .tagline { color: var(--muted); font-size: 10px; }
+.harness-head .spacer { margin-left: auto; }
+
+.harness-split {
+  flex: 1 1 auto;
+  display: flex;
+  gap: 8px;
+  min-height: 0;
+}
+
+/* ---------------------------------------------------------- section rail */
+
+.harness-rail {
+  flex: 0 0 186px;
+  min-width: 160px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  overflow-y: auto;
+}
+.harness-rail-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  padding: 8px 10px;
+  border-radius: calc(var(--global-radius) * 1);
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text);
+  font-size: 11px;
+  transition: background var(--fast) var(--ease), border-color var(--fast) var(--ease);
+}
+.harness-rail-btn:hover { background: var(--panel2); }
+.harness-rail-btn.selected {
+  background: var(--panel2);
+  border-color: var(--accent-soft);
+  font-weight: 600;
+}
+.harness-rail-btn .label { flex: 1 1 auto; }
+.harness-rail-btn .count {
+  font-size: 9px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------------------------------------------------------------- body */
+
+.harness-body {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-y: auto;
+  padding: 16px 18px 24px;
+}
+.harness-empty {
+  color: var(--muted);
+  font-size: 11px;
+  padding: 24px 4px;
+}
+
+/* Documentation reads badly at full monitor width. */
+.harness-body > * { max-width: 780px; }
+
+.harness-intro {
+  margin: 0 0 14px;
+  font-size: 12px;
+  line-height: 1.65;
+  color: var(--text);
+}
+.harness-intro em { color: var(--muted); font-style: normal; }
+.harness-note {
+  margin: 14px 0 0;
+  font-size: 10px;
+  line-height: 1.6;
+  color: var(--muted);
+}
+.harness-body code {
+  font-family: var(--mono, ui-monospace, "Cascadia Code", Consolas, monospace);
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--panel2);
+  color: var(--text);
+}
+
+/* ----------------------------------------------------------------- flow */
+
+.harness-flow {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.harness-step {
+  display: flex;
+  gap: 12px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--line);
+}
+.harness-step:last-child { border-bottom: none; }
+.harness-step .n {
+  flex: 0 0 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--panel2);
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.harness-step strong { font-size: 11px; }
+.harness-step p {
+  margin: 3px 0 0;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--muted);
+}
+
+/* ---------------------------------------------------------------- cards */
+
+.harness-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.harness-card {
+  border: 1px solid var(--line);
+  border-radius: calc(var(--global-radius) * 1.2);
+  background: var(--panel2);
+  padding: 11px 13px;
+}
+.harness-card header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 7px;
+}
+.harness-card header strong { font-size: 12px; }
+.harness-card header .spacer { margin-left: auto; }
+.harness-card p {
+  margin: 0 0 5px;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--muted);
+}
+.harness-card p:last-child { margin-bottom: 0; }
+.harness-card p.lead { color: var(--text); }
+
+.harness-kv {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+.harness-kv > span:first-child {
+  flex: 0 0 62px;
+  font-size: 9px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.harness-kv.warn { color: var(--warn, #e0a458); }
+
+.harness-tag {
+  font-size: 9px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  white-space: nowrap;
+}
+.harness-tag.accent { border-color: var(--accent-soft); color: var(--accent); }
+.harness-tag.warn { border-color: var(--warn-soft, var(--line)); color: var(--warn, #e0a458); }
+
+.harness-status {
+  font-size: 9px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.harness-status.ready { background: var(--ok-soft, rgba(80, 200, 130, 0.14)); color: var(--ok, #4ec98a); }
+.harness-status.cold { background: var(--panel); color: var(--muted); }
+.harness-status.pending { color: var(--muted); }
+
+/* ---------------------------------------------------------------- tools */
+
+.harness-tools {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.harness-group h3 {
+  margin: 0 0 6px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.harness-group ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.harness-tool {
+  border: 1px solid var(--line);
+  border-radius: calc(var(--global-radius) * 1);
+  padding: 8px 11px;
+}
+.harness-tool .top {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+.harness-tool .name {
+  font-size: 11px;
+  font-weight: 600;
+  background: transparent;
+  padding: 0;
+  color: var(--accent);
+}
+.harness-tool p {
+  margin: 4px 0 0;
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--muted);
+}
+.harness-tool .args {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+}
+.harness-tool .arg {
+  font-size: 9px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--panel2);
+  color: var(--muted);
+}
+.harness-tool .arg.required { color: var(--text); }
+.harness-tool .arg i {
+  font-style: normal;
+  opacity: 0.55;
+  margin-left: 5px;
+}
+
+/* ------------------------------------------------------- limits, context */
+
+.harness-limits {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.harness-limit {
+  padding: 9px 0;
+  border-bottom: 1px solid var(--line);
+}
+.harness-limit:last-child { border-bottom: none; }
+.harness-limit .top {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+.harness-limit .top strong { font-size: 11px; }
+.harness-limit .top code { margin-left: auto; }
+.harness-limit p {
+  margin: 4px 0 0;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--muted);
+}
+
+/* ------------------------------------------------------------- telemetry */
+
+.harness-telemetry-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+.harness-telemetry-card {
+  min-width: 0;
+  padding: 10px 11px;
+  border: 1px solid var(--line);
+  border-radius: calc(var(--global-radius) * 1);
+  background: var(--panel2);
+}
+.harness-telemetry-card header {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+.harness-telemetry-card strong {
+  flex: 0 0 auto;
+  font-size: 11px;
+}
+.harness-telemetry-card code {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.harness-telemetry-card p {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+/* ---------------------------------------------------------------- states */
+
+.harness-states {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.harness-state {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 7px 0 7px 10px;
+  border-left: 2px solid var(--line);
+}
+.harness-state.active { border-left-color: var(--accent); }
+.harness-state code { flex: 0 0 104px; }
+.harness-state p {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--muted);
+}
+
+@media (max-width: 720px) {
+  .harness-telemetry-grid { grid-template-columns: minmax(0, 1fr); }
+}

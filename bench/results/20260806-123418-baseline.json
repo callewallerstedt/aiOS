@@ -1,0 +1,172 @@
+{
+  "summary": {
+    "label": "baseline",
+    "provider": "openrouter",
+    "model": "deepseek/deepseek-v4-flash",
+    "reasoning": "off",
+    "tasks": 8,
+    "passed": 8,
+    "pass_rate": 1.0,
+    "total_tokens": 136166,
+    "tokens_per_task": 17021,
+    "tokens_per_pass": 17021,
+    "cost_usd": 0.0085,
+    "total_seconds": 364.1,
+    "seconds_per_task": 45.5,
+    "tool_calls": 185
+  },
+  "records": [
+    {
+      "task": "HumanEval/0",
+      "passed": true,
+      "error": "",
+      "status": "completed",
+      "seconds": 92.4,
+      "usage": {
+        "input_tokens": 13757,
+        "cached_input_tokens": 5888,
+        "output_tokens": 786,
+        "reasoning_tokens": 284,
+        "total_tokens": 14543,
+        "cost_usd": 0.0009611278
+      },
+      "events": 26,
+      "tool_calls": 22,
+      "review": "pass",
+      "workspace": "C:\\Users\\calle\\AppData\\Local\\Temp\\aios-bench-__gqzlim"
+    },
+    {
+      "task": "HumanEval/7",
+      "passed": true,
+      "error": "",
+      "status": "completed",
+      "seconds": 31.6,
+      "usage": {
+        "input_tokens": 13396,
+        "cached_input_tokens": 9216,
+        "output_tokens": 499,
+        "reasoning_tokens": 167,
+        "total_tokens": 13895,
+        "cost_usd": 0.0006182868
+      },
+      "events": 24,
+      "tool_calls": 20,
+      "review": "pass",
+      "workspace": "C:\\Users\\calle\\AppData\\Local\\Temp\\aios-bench-yn82kjjr"
+    },
+    {
+      "task": "HumanEval/14",
+      "passed": true,
+      "error": "",
+      "status": "completed",
+      "seconds": 37.6,
+      "usage": {
+        "input_tokens": 13452,
+        "cached_input_tokens": 6400,
+        "output_tokens": 581,
+        "reasoning_tokens": 187,
+        "total_tokens": 14033,
+        "cost_usd": 0.0008540136
+      },
+      "events": 28,
+      "tool_calls": 22,
+      "review": "pass",
+      "workspace": "C:\\Users\\calle\\AppData\\Local\\Temp\\aios-bench-q7vo7rm5"
+    },
+    {
+      "task": "HumanEval/21",
+      "passed": true,
+      "error": "",
+      "status": "completed",
+      "seconds": 73.6,
+      "usage": {
+        "input_tokens": 32252,
+        "cached_input_tokens": 17920,
+        "output_tokens": 1344,
+        "reasoning_tokens": 265,
+        "total_tokens": 33596,
+        "cost_usd": 0.0027873105
+      },
+      "events": 39,
+      "tool_calls": 34,
+      "review": "concerns",
+      "workspace": "C:\\Users\\calle\\AppData\\Local\\Temp\\aios-bench-fppiygya"
+    },
+    {
+      "task": "HumanEval/28",
+      "passed": true,
+      "error": "",
+      "status": "completed",
+      "seconds": 30.1,
+      "usage": {
+        "input_tokens": 13418,
+        "cached_input_tokens": 5888,
+        "output_tokens": 543,
+        "reasoning_tokens": 197,
+        "total_tokens": 13961,
+        "cost_usd": 0.0010572513
+      },
+      "events": 26,
+      "tool_calls": 22,
+      "review": "pass",
+      "workspace": "C:\\Users\\calle\\AppData\\Local\\Temp\\aios-bench-24bjpu8s"
+    },
+    {
+      "task": "HumanEval/35",
+      "passed": true,
+      "error": "",
+      "status": "completed",
+      "seconds": 21.1,
+      "usage": {
+        "input_tokens": 13211,
+        "cached_input_tokens": 9216,
+        "output_tokens": 309,
+        "reasoning_tokens": 96,
+        "total_tokens": 13520,
+        "cost_usd": 0.0005685331
+      },
+      "events": 24,
+      "tool_calls": 20,
+      "review": "pass",
+      "workspace": "C:\\Users\\calle\\AppData\\Local\\Temp\\aios-bench-lbvxtof0"
+    },
+    {
+      "task": "HumanEval/42",
+      "passed": true,
+      "error": "",
+      "status": "completed",
+      "seconds": 37.6,
+      "usage": {
+        "input_tokens": 17396,
+        "cached_input_tokens": 9472,
+        "output_tokens": 534,
+        "reasoning_tokens": 133,
+        "total_tokens": 17930,
+        "cost_usd": 0.0009790505
+      },
+      "events": 31,
+      "tool_calls": 25,
+      "review": "pass",
+      "workspace": "C:\\Users\\calle\\AppData\\Local\\Temp\\aios-bench-8l42403p"
+    },
+    {
+      "task": "HumanEval/49",
+      "passed": true,
+      "error": "",
+      "status": "completed",
+      "seconds": 40.1,
+      "usage": {
+        "input_tokens": 13938,
+        "cached_input_tokens": 9472,
+        "output_tokens": 750,
+        "reasoning_tokens": 297,
+        "total_tokens": 14688,
+        "cost_usd": 0.0006921868
+      },
+      "events": 26,
+      "tool_calls": 20,
+      "review": "pass",
+      "workspace": "C:\\Users\\calle\\AppData\\Local\\Temp\\aios-bench-c1f_j7_v"
+    }
+  ]
+}

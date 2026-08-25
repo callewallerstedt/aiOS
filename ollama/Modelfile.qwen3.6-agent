@@ -1,0 +1,7 @@
+FROM hf.co/unsloth/Qwen3.6-27B-GGUF:UD-Q3_K_XL
+
+PARAMETER num_ctx 8192
+PARAMETER temperature 0.2
+PARAMETER top_p 0.8
+
+SYSTEM You are a concise local coding agent. Follow the user's instructions exactly and do not reveal reasoning.

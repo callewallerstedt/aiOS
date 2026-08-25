@@ -188,8 +188,40 @@ def test_code_dashboard_has_expandable_live_activity_and_diff_surfaces():
     assert "activity-output" in styles
     assert "diff-line.add" in styles
     assert "markdown-table-wrap" in styles
-    assert "overflow-anchor: none" in styles
+    # Scroll anchoring stays on. Disabling it and restoring scrollTop by hand
+    # was what made expanding a card jump the transcript.
+    assert "overflow-anchor: none" not in styles
+    assert "overscroll-behavior: contain" in styles
+    # Tail-following is one piece of state the user's own scrolling owns, not a
+    # per-event measurement that live re-renders could flip mid-turn.
+    assert "function pinTimelineToTail" in script
+    assert "function scrollTimelineToTail" in script
+    assert "followTail" in script
     assert ".activity-card { flex: 0 0 auto" in styles
     assert ".event { flex: 0 0 auto" in styles
     assert "max-height: 330px" not in styles
     assert "max-height: 460px" not in styles
+
+
+def test_turn_summary_row_is_short_and_reports_generation_rate():
+    """The row named a provider and a 60-character tag and no speed at all."""
+    from pathlib import Path as _Path
+
+    js = (_Path(__file__).resolve().parent.parent
+          / "aios_ui" / "web" / "js" / "transcript.js").read_text(encoding="utf-8")
+    row = js.split("paintTurnUsage() {", 1)[1].split("finishTurnUsage", 1)[0]
+
+    # Short labels, and the configuration's own name.
+    assert "} in`" in row and "} out`" in row
+    assert "} input`" not in row and "} output`" not in row
+    assert "shortConfigName(row)" in row
+    assert "row.provider || \"\"," not in row, "the provider prefix should be gone"
+    assert "turn-usage-role" not in row, "the Coder label should be gone"
+
+    # Measured rate, with the turn average beside the round when they differ.
+    assert "rateLabel(roundRate, turnRate)" in row
+    label = js.split("function rateLabel(", 1)[1].split("function shortConfigName", 1)[0]
+    assert "tok/s" in label
+    assert "(avg " in label
+    assert "row.roundRate" in js and "row.turnRate" in js
+    assert "state.round_tokens_per_second" in js and "state.turn_tokens_per_second" in js

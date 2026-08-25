@@ -15,6 +15,8 @@ let selectedJob = null;
 let logSize = 0;
 let eventSource = null;
 let refreshTimer = null;
+let eventsFetchInFlight = false;
+let selectedMetaTimer = null;
 let followupAttachments = [];
 let speaking = localStorage.getItem('aiosCodeSpeak') !== '0';
 const activityNodes = new Map();
@@ -25,6 +27,18 @@ let currentActivityTitle = '';
 let currentActivityId = '';
 let legacyActivitySequence = 0;
 let turnAssistantText = '';
+// Whether the transcript follows new output. Measuring "am I near the bottom?"
+// per event fought the live re-renders: an activity card can change height
+// between the measurement and the append, so the answer flipped mid-turn and
+// the view jumped. The user's own scrolling is the only thing that sets this.
+let followTail = true;
+let tailScrollFrame = 0;
+let tailWroteTop = -1;
+// While the user is actually working the scrollbar (thumb drag, wheel, touch)
+// nothing may write scrollTop. Auto-scrolling mid-drag is what made the thumb
+// snap back and feel like it lagged behind the cursor.
+let scrollPointerHeld = false;
+let scrollHoldUntil = 0;
 
 document.addEventListener('DOMContentLoaded', init);
 
@@ -54,11 +68,55 @@ async function init() {
   $('job-title').parentElement.addEventListener('click', () => {
     if (matchMedia('(max-width: 760px)').matches) clearSelection();
   });
+  const timeline = $('timeline');
+  timeline.addEventListener('scroll', () => {
+    // Our own pinning also fires scroll events. Recognise them by the exact
+    // offset we wrote rather than by a time window — during a busy turn we
+    // write every frame, and a window that wide would swallow the user's own
+    // scrolling and trap them at the bottom.
+    if (Math.abs(timeline.scrollTop - tailWroteTop) <= 1) return;
+    followTail = timelineNearBottom(timeline);
+  }, { passive: true });
+  // A pointerdown anywhere on the timeline, including its scrollbar, means the
+  // user has taken the wheel. Hold every automatic scroll until they let go.
+  timeline.addEventListener('pointerdown', () => { scrollPointerHeld = true; }, { passive: true });
+  for (const release of ['pointerup', 'pointercancel']) {
+    window.addEventListener(release, () => {
+      if (!scrollPointerHeld) return;
+      scrollPointerHeld = false;
+      // Where they parked the thumb decides whether output keeps following.
+      followTail = timelineNearBottom(timeline);
+    }, { passive: true });
+  }
+  // Wheel and touch have momentum with no "up" to wait for; hold briefly after
+  // the last one instead.
+  for (const gesture of ['wheel', 'touchstart', 'touchmove']) {
+    timeline.addEventListener(gesture, () => { scrollHoldUntil = performance.now() + 350; }, { passive: true });
+  }
+  // Streamed output changes height after it is inserted (markdown, diffs, an
+  // activity card that grows as its output arrives). Re-pin on those changes
+  // instead of only at append time.
+  new MutationObserver(() => { if (followTail) scrollTimelineToTail(); })
+    .observe(timeline, { childList: true, subtree: true, characterData: true });
   updateSpeakButton();
   await Promise.all([loadCapabilities(false), loadJobs()]);
   if (selectedId) await selectJob(selectedId);
   refreshTimer = setInterval(loadJobs, 2500);
   setInterval(updateRunStrip, 1000);
+  // Apply saved defaults to the create-job dialog
+  const defaultsResp = await request('/api/code/settings');
+  if (defaultsResp.ok) {
+    const defaultProvider = defaultsResp.code_default_provider || 'openrouter';
+    const defaultModel = defaultsResp.code_default_model || 'deepseek/deepseek-v4-flash';
+    const radio = document.querySelector(`input[name="provider"][value="${defaultProvider}"]`);
+    if (radio) { radio.checked = true; }
+    const modelSelect = $('model');
+    // If the saved model is in the options, select it
+    if (modelSelect) {
+      const match = Array.from(modelSelect.options).find(o => o.value === defaultModel);
+      if (match) { modelSelect.value = defaultModel; }
+    }
+  }
 }
 
 async function request(path, options = {}) {
@@ -131,7 +189,11 @@ function updateModelChoices() {
   modelSelect.onchange = updateReasoningChoices;
   $('launch').disabled = !info.ready || !modelSelect.options.length;
   $('setup-agent').hidden = info.ready;
-  $('setup-agent').textContent = `Sign in to ${capital(provider)}`;
+  $('setup-agent').textContent = provider === 'ollama'
+    ? 'Start Ollama'
+    : provider === 'openrouter'
+      ? 'Add OpenRouter key'
+      : `Sign in to ${capital(provider)}`;
   $('fast').disabled = modelSelect.selectedOptions[0]?.dataset.fast !== '1';
   if ($('fast').disabled) $('fast').checked = false;
 }
@@ -143,10 +205,18 @@ async function setupProvider(provider) {
     body: '{}',
   });
   if (!result.ok) {
-    alert(result.error || `Could not open ${capital(provider)} sign-in.`);
+    alert(result.error || result.message || (provider === 'ollama'
+      ? 'Could not start Ollama.'
+      : provider === 'openrouter'
+        ? 'Add your OpenRouter API key in CODE settings (/code/settings).'
+      : `Could not open ${capital(provider)} sign-in.`));
     return;
   }
-  alert(result.message || `${capital(provider)} sign-in opened. Refresh CODE when it is complete.`);
+  alert(result.message || (provider === 'ollama'
+    ? 'Ollama is starting. Refresh CODE when it is ready.'
+    : provider === 'openrouter'
+      ? 'Paste your OpenRouter key in CODE settings (/code/settings), then enable models.'
+    : `${capital(provider)} sign-in opened. Refresh CODE when it is complete.`));
 }
 
 function updateReasoningChoices() {
@@ -178,7 +248,7 @@ async function loadJobs() {
     if (selectedId) {
       const current = jobs.find((job) => job.id === selectedId);
       if (current) { selectedJob = current; renderJobHeader(); }
-      await fetchNewEvents();
+      if (!eventSource || eventSource.readyState === EventSource.CLOSED) await fetchNewEvents();
     }
   } catch (_) { /* transient offline; preserve current UI */ }
 }
@@ -195,10 +265,23 @@ function matchesFilter(job, filter) {
   return job.status === filter;
 }
 
+function jobsSignature(visible) {
+  return visible.map((job) => [
+    job.id, job.status, job.provider, job.model, job.title, job.project_name, job.cwd,
+  ].join('')).join('');
+}
+
 function renderJobs() {
   const list = $('job-list');
-  list.replaceChildren();
   const visible = jobs.filter((job) => matchesFilter(job, $('filter').value));
+  // The poll runs every 2.5s. Rebuilding an unchanged list threw the rail's
+  // scroll position back to the top, so scrolling the sessions fought a
+  // refresh that had nothing new to say.
+  const signature = `${selectedId}${jobsSignature(visible)}`;
+  if (list.dataset.signature === signature) return;
+  const scrollTop = list.scrollTop;
+  list.dataset.signature = signature;
+  list.replaceChildren();
   if (!visible.length) {
     const empty = document.createElement('div');
     empty.className = 'job-list-empty';
@@ -217,8 +300,22 @@ function renderJobs() {
     copy.className = 'job-copy';
     const title = document.createElement('b');
     title.textContent = job.title || `${capital(job.provider)} job`;
-    const detail = document.createElement('span');
-    detail.textContent = `${job.project_name || job.cwd || ''} · ${job.model || ''}`;
+    const detail = document.createElement('div');
+    detail.className = 'job-detail';
+    const detailText = document.createElement('span');
+    detailText.className = 'job-detail-text';
+    detailText.textContent = `${job.project_name || job.cwd || ''} · ${job.model || ''}`;
+    const plusBtn = document.createElement('span');
+    plusBtn.role = 'button';
+    plusBtn.className = 'job-plus';
+    plusBtn.textContent = '+';
+    plusBtn.title = 'New job in this project';
+    plusBtn.addEventListener('click', (event) => {
+      event.stopPropagation();
+      $('cwd').value = job.cwd || job.project_name || '';
+      openCreate();
+    });
+    detail.append(detailText, plusBtn);
     copy.append(title, detail);
     const state = document.createElement('span');
     state.className = `job-state ${job.status}`;
@@ -226,6 +323,7 @@ function renderJobs() {
     card.append(dot, copy, state);
     list.appendChild(card);
   }
+  list.scrollTop = scrollTop;
 }
 
 async function selectJob(id) {
@@ -250,10 +348,7 @@ async function selectJob(id) {
   logSize = data.size || 0;
   for (const event of data.events || []) appendEvent(event, false);
   if (!(data.events || []).length) renderTimelineEmpty();
-  requestAnimationFrame(() => requestAnimationFrame(() => {
-    const timeline = $('timeline');
-    timeline.scrollTop = timeline.scrollHeight;
-  }));
+  pinTimelineToTail();
   renderJobHeader();
   startEvents();
 }
@@ -304,7 +399,6 @@ function appendEvent(event, live = true) {
     event = { ...event, kind: 'assistant', text: event.delta ?? event.text ?? '' };
   }
   const timeline = $('timeline');
-  const followOutput = live && timelineNearBottom(timeline);
   timeline.querySelector('.timeline-empty')?.remove();
   const text = event.text || event.kind;
 
@@ -334,19 +428,19 @@ function appendEvent(event, live = true) {
     copy.append(title, detail);
     row.append(marker, copy);
     timeline.appendChild(row);
-    scrollTimelineIfFollowing(timeline, followOutput);
+    followTailIfLive(live);
     if (live && event.notify) notifyEvent(event);
     return;
   }
   if (event.kind === 'activity') {
     upsertActivity(event);
-    scrollTimelineIfFollowing(timeline, followOutput);
+    followTailIfLive(live);
     if (live && event.notify) notifyEvent(event);
     return;
   }
   if (['tool', 'thinking', 'approval'].includes(event.kind)) {
     appendLegacyActivity(event);
-    scrollTimelineIfFollowing(timeline, followOutput);
+    followTailIfLive(live);
     if (live && event.notify) notifyEvent(event);
     return;
   }
@@ -360,6 +454,12 @@ function appendEvent(event, live = true) {
     event = { ...event, kind: 'assistant', notify: false };
   }
 
+  if (event.kind === 'status' && /^(working|queued)$/i.test(text.trim())) {
+    // The run strip already owns transient lifecycle state; keeping it out of
+    // the transcript prevents noisy rows and unnecessary scroll movement.
+    return;
+  }
+
   if (event.kind === 'user') turnAssistantText = '';
   if (event.kind === 'assistant') turnAssistantText += text;
 
@@ -369,7 +469,7 @@ function appendEvent(event, live = true) {
   if (event.kind === 'assistant' && previous?.classList.contains('assistant')) {
     previous.dataset.markdown = `${previous.dataset.markdown || ''}${text}`;
     renderMarkdown(previous.querySelector('.markdown'), previous.dataset.markdown);
-    scrollTimelineIfFollowing(timeline, followOutput);
+    followTailIfLive(live);
     if (live && event.notify) notifyEvent(event);
     return;
   }
@@ -392,16 +492,52 @@ function appendEvent(event, live = true) {
     row.appendChild(document.createTextNode(text));
   }
   timeline.appendChild(row);
-  scrollTimelineIfFollowing(timeline, followOutput);
+  followTailIfLive(live);
   if (live && event.notify) notifyEvent(event);
 }
 
 function timelineNearBottom(timeline) {
-  return timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight < 4;
+  return timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight < 80;
 }
 
-function scrollTimelineIfFollowing(timeline, follow) {
-  if (follow) timeline.scrollTop = timeline.scrollHeight;
+// One scroll write per frame. A busy turn emits many events per frame, and
+// writing scrollTop for each of them forced a layout every time.
+function scrollLocked() {
+  return scrollPointerHeld || performance.now() < scrollHoldUntil;
+}
+
+function scrollTimelineToTail() {
+  if (tailScrollFrame || scrollLocked()) return;
+  tailScrollFrame = requestAnimationFrame(() => {
+    tailScrollFrame = 0;
+    // Re-check: the drag may have started between scheduling and this frame.
+    if (scrollLocked()) return;
+    const timeline = $('timeline');
+    timeline.scrollTop = timeline.scrollHeight;
+    tailWroteTop = timeline.scrollTop;   // clamped value, for the scroll handler
+  });
+}
+
+function followTailIfLive(live) {
+  if (live && followTail) scrollTimelineToTail();
+}
+
+/** Land on the latest message when a session opens.
+ *
+ * A single scroll after rendering is not enough: markdown, diffs, and activity
+ * cards settle over the next few frames, so the one measurement was taken
+ * against a shorter transcript and left the view near the top. Keep re-pinning
+ * until the layout stops moving.
+ */
+function pinTimelineToTail(settleMs = 800) {
+  followTail = true;
+  const deadline = performance.now() + settleMs;
+  const step = () => {
+    if (!followTail) return;   // the user scrolled away; stop yanking them back
+    scrollTimelineToTail();
+    if (performance.now() < deadline) requestAnimationFrame(step);
+  };
+  step();
 }
 
 function appendInlineMarkdown(parent, source) {
@@ -642,6 +778,9 @@ function renderActivity(activity) {
   if (!card) {
     card = document.createElement('details');
     card.dataset.activityId = activity.id;
+    // Expanding a card above the viewport is handled by the browser's scroll
+    // anchoring; only the tail needs help, and only after `open` has flipped.
+    card.addEventListener('toggle', () => followTailIfLive(true));
     activityNodes.set(activity.id, card);
     $('timeline').appendChild(card);
   }
@@ -675,20 +814,6 @@ function renderActivity(activity) {
   chevron.className = 'activity-chevron';
   chevron.textContent = '›';
   summary.append(icon, copy, meta, chevron);
-  summary.addEventListener('click', (clickEvent) => {
-    clickEvent.preventDefault();
-    const timeline = $('timeline');
-    const scrollTop = timeline.scrollTop;
-    const nextOpen = !card.open;
-    setTimeout(() => {
-      card.open = nextOpen;
-      const behavior = timeline.style.scrollBehavior;
-      timeline.style.scrollBehavior = 'auto';
-      timeline.scrollTop = scrollTop;
-      timeline.style.scrollBehavior = behavior;
-      requestAnimationFrame(() => { timeline.scrollTop = scrollTop; });
-    }, 0);
-  });
 
   const body = document.createElement('div');
   body.className = 'activity-body';
@@ -851,7 +976,7 @@ function commandPreview(command) {
 function activityMeta(activity) {
   if (Number.isFinite(activity.durationMs)) return `${formatDuration(activity.durationMs / 1000)} · ${activityTypeLabel(activity.type)}`;
   if (Number.isFinite(activity.elapsedSeconds)) return `${formatDuration(activity.elapsedSeconds)} · ${activityTypeLabel(activity.type)}`;
-  if (activity.exitCode != null) return `exit ${activity.exitCode} · ${activityTypeLabel(activity.type)}`;
+  if (activity.exitCode != null && Number(activity.exitCode) !== 0) return `exit ${activity.exitCode} · ${activityTypeLabel(activity.type)}`;
   return activityTypeLabel(activity.type);
 }
 
@@ -916,26 +1041,48 @@ function startEvents() {
         const event = JSON.parse(message.data);
         logSize = event.size || logSize;
         appendEvent(event, true);
-        loadSelectedMeta();
+        scheduleSelectedMeta();
       } catch (_) { /* ignore malformed event */ }
     };
     eventSource.addEventListener('reset', () => { logSize = 0; });
+    eventSource.onerror = () => { fetchNewEvents(); };
   } catch (_) { eventSource = null; }
 }
 
 function stopEvents() {
   if (eventSource) eventSource.close();
   eventSource = null;
+  if (selectedMetaTimer) clearTimeout(selectedMetaTimer);
+  selectedMetaTimer = null;
 }
 
 async function fetchNewEvents() {
-  if (!selectedId) return;
-  const data = await request(`/api/code/jobs/${encodeURIComponent(selectedId)}/log?since=${logSize}`);
-  if (!data.ok) return;
-  if (data.reset) { await selectJob(selectedId); return; }
-  logSize = data.size || logSize;
-  for (const event of data.events || []) appendEvent(event, true);
-  if (data.job) { selectedJob = data.job; renderJobHeader(); }
+  if (!selectedId || eventsFetchInFlight) return;
+  eventsFetchInFlight = true;
+  const requestedJob = selectedId;
+  const requestedSince = logSize;
+  try {
+    const data = await request(`/api/code/jobs/${encodeURIComponent(requestedJob)}/log?since=${requestedSince}`);
+    if (!data.ok || requestedJob !== selectedId) return;
+    if (data.reset) { await selectJob(selectedId); return; }
+    // The event stream may have advanced while this fallback request was in
+    // flight. Discard the overlapping response instead of rendering tokens or
+    // activity updates twice.
+    if (logSize !== requestedSince) return;
+    logSize = data.size || logSize;
+    for (const event of data.events || []) appendEvent(event, true);
+    if (data.job) { selectedJob = data.job; renderJobHeader(); }
+  } finally {
+    eventsFetchInFlight = false;
+  }
+}
+
+function scheduleSelectedMeta() {
+  if (selectedMetaTimer) return;
+  selectedMetaTimer = setTimeout(() => {
+    selectedMetaTimer = null;
+    loadSelectedMeta();
+  }, 400);
 }
 
 async function loadSelectedMeta() {
@@ -1050,6 +1197,8 @@ async function sendMessage() {
   followupAttachments = [];
   renderAttachmentList();
   autoGrow.call($('message'));
+  // Sending is an explicit "I want to watch this" — rejoin the tail.
+  pinTimelineToTail(300);
   await fetchNewEvents();
 }
 

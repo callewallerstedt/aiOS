@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import ctypes
 import json
 import os
@@ -24,6 +25,7 @@ UPDATE_HEALTH_PATH = BASE_DIR / ".aios-update-health.json"
 UPDATE_REQUEST_PATH = BASE_DIR / ".aios-update-request"
 OPERATOR_STATUS_PATH = BASE_DIR / "phone_operator_events" / "status.json"
 LOG_PATH = BASE_DIR / "aios-watchdog.log"
+BRIDGE_START_LOG = BASE_DIR / "phone-bridge-start.log"
 CONFIG_PATH = BASE_DIR / "helper_config.json"
 MUTEX_NAME = "Local\\aiOS.Desktop.Watchdog.Singleton"
 CHECK_INTERVAL = 10
@@ -93,6 +95,43 @@ def director_enabled() -> bool:
     return bool(str(data.get("url") or "").strip() and str(data.get("token") or "").strip())
 
 
+def ensure_director_client(pythonw: str, now: float,
+                           grace_until: float) -> tuple[str, float, bool]:
+    """Keep the outbound Director machine link alive and self-healing."""
+    if not director_enabled():
+        return "not paired", grace_until, False
+    if is_fresh(DIRECTOR_HEARTBEAT, DIRECTOR_TIMEOUT, now):
+        return "healthy", grace_until, False
+    if now < grace_until:
+        return "starting", grace_until, False
+    stop_python_script("director_client.py")
+    spawn([pythonw, str(BASE_DIR / "director_client.py")])
+    return "restarting", now + 45, True
+
+
+def ensure_phone_bridge(config: dict, now: float, grace_until: float) -> tuple[str, float, bool]:
+    """Keep the local CODE/OPERATOR API alive, with or without phone pairing."""
+    paired = phone_enabled(config)
+    backend_ok = local_bridge_healthy()
+    relay_ok = is_fresh(RELAY_HEARTBEAT, RELAY_TIMEOUT, now) if paired else False
+
+    if paired:
+        status = "healthy" if backend_ok and relay_ok else "restarting"
+        needs_start = not backend_ok or not relay_ok
+    else:
+        status = "not paired" if backend_ok else "local bridge restarting"
+        needs_start = not backend_ok
+
+    started = False
+    if needs_start and now >= grace_until:
+        if paired and not relay_ok:
+            stop_python_script("phone_relay.py")
+        start_phone_bridge()
+        grace_until = now + 45
+        started = True
+    return status, grace_until, started
+
+
 def find_pythonw() -> str:
     candidates = [
         BASE_DIR / ".venv" / "Scripts" / "pythonw.exe",
@@ -117,16 +156,25 @@ def find_autohotkey() -> str:
     return shutil.which("AutoHotkey.exe") or ""
 
 
-def spawn(command: list[str]) -> None:
-    subprocess.Popen(
-        command,
-        cwd=str(BASE_DIR),
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        creationflags=CREATE_NO_WINDOW | DETACHED_PROCESS,
-        close_fds=True,
-    )
+def spawn(command: list[str], *, output_path: Path | None = None) -> None:
+    output = None
+    try:
+        output = output_path.open("a", encoding="utf-8") if output_path else None
+        subprocess.Popen(
+            command,
+            cwd=str(BASE_DIR),
+            stdin=subprocess.DEVNULL,
+            stdout=output or subprocess.DEVNULL,
+            stderr=subprocess.STDOUT if output else subprocess.DEVNULL,
+            # A detached Windows process silently drops redirected standard
+            # handles. CREATE_NO_WINDOW is enough for logged recovery helpers;
+            # ordinary long-lived desktop children remain fully detached.
+            creationflags=CREATE_NO_WINDOW if output else CREATE_NO_WINDOW | DETACHED_PROCESS,
+            close_fds=True,
+        )
+    finally:
+        if output:
+            output.close()
 
 
 def stop_python_script(script_name: str) -> None:
@@ -150,9 +198,41 @@ def stop_python_script(script_name: str) -> None:
     )
 
 
+def script_running(script_name: str) -> bool:
+    if os.name != "nt":
+        return False
+    escaped = script_name.replace("'", "''")
+    command = (
+        f"$needle = '{escaped}'; "
+        "(Get-CimInstance Win32_Process | Where-Object { "
+        "$_.Name -match '^pythonw?\\.exe$' -and $_.CommandLine -like ('*' + $needle + '*') "
+        "} | Measure-Object).Count"
+    )
+    try:
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+            cwd=str(BASE_DIR),
+            capture_output=True,
+            text=True,
+            timeout=12,
+            creationflags=CREATE_NO_WINDOW,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return (result.stdout or "").strip().isdigit() and int((result.stdout or "0").strip()) > 0
+
+
 def local_bridge_healthy() -> bool:
     try:
         with urllib.request.urlopen("http://127.0.0.1:5000/api/phone/status", timeout=3) as response:
+            return response.status == 200
+    except Exception:
+        return False
+
+
+def mirror_healthy() -> bool:
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:48738/mirror-health", timeout=2) as response:
             return response.status == 200
     except Exception:
         return False
@@ -162,7 +242,8 @@ def start_phone_bridge() -> None:
     spawn([
         "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
         "-File", str(BASE_DIR / "start-phone-bridge.ps1"),
-    ])
+        "-PythonExe", find_pythonw(),
+    ], output_path=BRIDGE_START_LOG)
 
 
 def write_health(status: dict) -> None:
@@ -233,14 +314,18 @@ def _auto_update_worker(pythonw: str) -> None:
             "current": result.get("current") or check.get("latest"), "latest": check.get("latest"),
         })
         stop_python_script("helper_overlay.py")
+        stop_python_script("aios_shell.py")
         stop_python_script("phone_relay.py")
         stop_python_script("agent_clicker/run.py")
+        stop_python_script("aios_ui.mirror")
         if result.get("staged"):
             if not aios_updater.spawn_staged_apply(parent_pid=0):
                 raise RuntimeError("could not launch staged update applier")
             return
         time.sleep(1.0)
-        spawn([pythonw, str(BASE_DIR / "helper_overlay.py"), "--background"])
+        spawn([pythonw, str(BASE_DIR / "helper_overlay.py"), "--background", "--tk"])
+        spawn([pythonw, str(BASE_DIR / "aios_shell.py")])
+        spawn([pythonw, "-m", "aios_ui.mirror"])
         start_phone_bridge()
         _write_update_health({
             "state": "current", "message": "Update installed and services restarted",
@@ -266,17 +351,43 @@ def schedule_auto_update(pythonw: str) -> None:
     ).start()
 
 
-def run() -> None:
+def fast_start_stack(pythonw: str) -> tuple[float, float, float, float]:
+    """Launch every user-facing component immediately after a full restart."""
+    now = time.time()
+    spawn([pythonw, str(BASE_DIR / "helper_overlay.py"), "--background", "--tk"])
+    spawn([pythonw, str(BASE_DIR / "aios_shell.py")])
+    spawn([pythonw, "-m", "aios_ui.mirror"])
+    ahk = find_autohotkey()
+    if ahk:
+        spawn([ahk, str(BASE_DIR / "autocorrect.ahk")])
+    start_phone_bridge()
+    if director_enabled():
+        spawn([pythonw, str(BASE_DIR / "director_client.py")])
+    log("fast-start launched helper, WebView2 shell, USB mirror, hotkeys, phone backend and Director client")
+    return now + 55, now + 45, now + 35, now + 45
+
+
+def run(*, fast_start: bool = False) -> None:
     pythonw = find_pythonw()
-    helper_grace_until = 0.0
-    bridge_grace_until = 0.0
-    director_grace_until = 0.0
+    if fast_start:
+        (helper_grace_until, bridge_grace_until, ahk_grace_until,
+         director_grace_until) = fast_start_stack(pythonw)
+    else:
+        helper_grace_until = 0.0
+        bridge_grace_until = 0.0
+        ahk_grace_until = 0.0
+        director_grace_until = 0.0
     next_update_check = time.time() + 12
     log("watchdog started")
     while True:
         now = time.time()
-        status = {"helper": "healthy", "hotkeys": "healthy", "phone": "not paired",
-                  "director": "not paired"}
+        status = {
+            "helper": "healthy",
+            "hotkeys": "healthy",
+            "phone": "not paired",
+            "usb_mirror": "healthy",
+            "director": "not paired",
+        }
 
         updating = (BASE_DIR / ".aios_update_staging").exists()
         if not is_fresh(HELPER_HEARTBEAT, HELPER_TIMEOUT, now) and now >= helper_grace_until:
@@ -284,40 +395,44 @@ def run() -> None:
                 status["helper"] = "update in progress"
             else:
                 stop_python_script("helper_overlay.py")
-                spawn([pythonw, str(BASE_DIR / "helper_overlay.py"), "--background"])
+                spawn([pythonw, str(BASE_DIR / "helper_overlay.py"), "--background", "--tk"])
                 helper_grace_until = now + 55
                 status["helper"] = "restarted"
                 log("helper restarted")
 
+        if not script_running("aios_shell.py") and not updating:
+            spawn([pythonw, str(BASE_DIR / "aios_shell.py")])
+            log("aios_shell started")
+
+        if not mirror_healthy() and not updating:
+            if not script_running("aios_ui.mirror"):
+                spawn([pythonw, "-m", "aios_ui.mirror"])
+                status["usb_mirror"] = "restarting"
+                log("USB mirror started")
+            else:
+                status["usb_mirror"] = "starting"
+
         ahk = find_autohotkey()
-        if not is_fresh(AHK_HEARTBEAT, AHK_TIMEOUT, now):
+        if not is_fresh(AHK_HEARTBEAT, AHK_TIMEOUT, now) and now >= ahk_grace_until:
             if ahk:
                 spawn([ahk, str(BASE_DIR / "autocorrect.ahk")])
+                ahk_grace_until = now + 35
                 status["hotkeys"] = "restarted"
                 log("AutoHotkey launcher restarted")
             else:
                 status["hotkeys"] = "AutoHotkey missing"
 
         config = load_config()
-        if phone_enabled(config):
-            backend_ok = local_bridge_healthy()
-            relay_ok = is_fresh(RELAY_HEARTBEAT, RELAY_TIMEOUT, now)
-            status["phone"] = "healthy" if backend_ok and relay_ok else "restarting"
-            if (not backend_ok or not relay_ok) and now >= bridge_grace_until:
-                if not relay_ok:
-                    stop_python_script("phone_relay.py")
-                start_phone_bridge()
-                bridge_grace_until = now + 45
-                log("phone bridge recovery started")
+        status["phone"], bridge_grace_until, bridge_started = ensure_phone_bridge(
+            config, now, bridge_grace_until)
+        if bridge_started:
+            log("phone bridge recovery started")
 
-        if director_enabled():
-            director_ok = is_fresh(DIRECTOR_HEARTBEAT, DIRECTOR_TIMEOUT, now)
-            status["director"] = "healthy" if director_ok else "restarting"
-            if not director_ok and now >= director_grace_until:
-                stop_python_script("director_client.py")
-                spawn([pythonw, str(BASE_DIR / "director_client.py")])
-                director_grace_until = now + 45
-                log("Director Windows bridge restarted")
+        (status["director"], director_grace_until,
+         director_started) = ensure_director_client(
+            pythonw, now, director_grace_until)
+        if director_started:
+            log("Director Windows bridge restarted")
 
         requested = UPDATE_REQUEST_PATH.exists()
         if auto_update_enabled(config) and (requested or now >= next_update_check):
@@ -329,14 +444,17 @@ def run() -> None:
         time.sleep(CHECK_INTERVAL)
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--fast-start", action="store_true")
+    args, _unknown = parser.parse_known_args(argv)
     if os.name != "nt":
         print("aiOS watchdog is intended for Windows.")
         return 1
     if not claim_single_instance():
         return 0
     try:
-        run()
+        run(fast_start=args.fast_start)
     except KeyboardInterrupt:
         return 0
     except Exception as exc:

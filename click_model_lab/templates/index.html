@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Click Model Lab</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Sora:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="atmosphere" aria-hidden="true"></div>
+
+  <header class="top">
+    <div class="brand">
+      <span class="brand-mark"></span>
+      <div>
+        <h1>Click Model Lab</h1>
+        <p>OpenRouter vision models · image → click coordinates</p>
+      </div>
+    </div>
+    <div class="key-box">
+      <label for="apiKey">OpenRouter key</label>
+      <div class="key-row">
+        <input id="apiKey" type="password" placeholder="sk-or-v1-..." autocomplete="off" spellcheck="false" />
+        <button type="button" id="toggleKey" class="ghost" title="Show/hide key">Show</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="panel stage-panel">
+      <div class="panel-head">
+        <h2>Target image</h2>
+        <div class="head-actions">
+          <button type="button" id="pasteBtn" class="ghost">Paste</button>
+          <label class="ghost file-btn">
+            Upload
+            <input id="fileInput" type="file" accept="image/*" hidden />
+          </label>
+          <button type="button" id="clearImage" class="ghost danger" disabled>Clear</button>
+        </div>
+      </div>
+
+      <div id="dropzone" class="dropzone" tabindex="0">
+        <canvas id="stage" width="1280" height="720"></canvas>
+        <div id="emptyState" class="empty">
+          <strong>Drop, upload, or Ctrl+V</strong>
+          <span>Paste a screenshot from your clipboard</span>
+        </div>
+      </div>
+
+      <div class="meta-row">
+        <span id="imageMeta">No image</span>
+        <span id="runMeta"></span>
+      </div>
+    </section>
+
+    <aside class="side">
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Ask</h2>
+        </div>
+        <label class="field-label" for="target">What should they click?</label>
+        <textarea id="target" rows="3" placeholder="e.g. the blue Learn more button"></textarea>
+        <label class="fast-toggle">
+          <input id="fastMode" type="checkbox" checked />
+          <span>Fast mode</span>
+          <small>minimal reasoning · smaller image · low detail</small>
+        </label>
+        <button type="button" id="runBtn" class="primary" disabled>Run selected models</button>
+        <p class="hint">Models run in parallel. Markers appear as each finishes.</p>
+      </section>
+
+      <section class="panel models-panel">
+        <div class="panel-head">
+          <h2>Models</h2>
+          <div class="head-actions">
+            <button type="button" id="refreshModels" class="ghost">Refresh</button>
+            <button type="button" id="selectDefaults" class="ghost">Top 12</button>
+            <button type="button" id="clearModels" class="ghost">None</button>
+          </div>
+        </div>
+        <div class="search-row">
+          <input id="modelSearch" type="search" placeholder="Filter models… (try deepseek)" />
+          <span id="modelCount" class="pill">0 selected</span>
+        </div>
+        <div class="filter-row">
+          <div class="seg" role="group" aria-label="Model filter">
+            <button type="button" class="seg-btn active" data-filter="vision">Vision</button>
+            <button type="button" class="seg-btn" data-filter="all">All</button>
+            <button type="button" class="seg-btn" data-filter="selected">Selected</button>
+          </div>
+          <label class="sort-label">
+            Sort
+            <select id="modelSort">
+              <option value="popular">Popular</option>
+              <option value="input-asc">Input $ ↑</option>
+              <option value="input-desc">Input $ ↓</option>
+              <option value="output-asc">Output $ ↑</option>
+              <option value="output-desc">Output $ ↓</option>
+              <option value="name">Name A–Z</option>
+            </select>
+          </label>
+        </div>
+        <div class="cheap-row">
+          <label class="cheap-label" for="maxInputPrice">
+            Cheaper than
+            <span class="cheap-unit">$/M input</span>
+          </label>
+          <input id="maxInputPrice" type="number" min="0" step="0.01" placeholder="0.10 = Luna" />
+          <button type="button" id="selectCheaper" class="ghost">Select</button>
+        </div>
+        <div class="cheap-row">
+          <label class="cheap-label" for="maxInputPrice">
+            Cheaper than
+            <span class="cheap-input-wrap">
+              <span class="cheap-prefix">$</span>
+              <input id="maxInputPrice" type="number" min="0" step="any" placeholder="0.10" />
+            </span>
+            <span class="cheap-unit">/1M input</span>
+          </label>
+          <button type="button" id="selectCheaper" class="ghost">Select</button>
+        </div>
+        <div id="modelList" class="model-list">
+          <div class="loading">Loading OpenRouter models…</div>
+        </div>
+      </section>
+    </aside>
+  </main>
+
+  <section class="panel results-panel">
+    <div class="panel-head">
+      <h2>Results</h2>
+      <div class="stats" id="summaryStats"></div>
+    </div>
+    <div id="results" class="results">
+      <div class="empty-inline">Run a comparison to see latency, coords, and click markers.</div>
+    </div>
+  </section>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

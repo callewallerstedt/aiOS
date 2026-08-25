@@ -37,6 +37,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import ctypes
+import hashlib
 import json
 import os
 import pathlib
@@ -45,6 +46,7 @@ import re
 import socket
 import subprocess
 import sys
+import threading
 import time
 import traceback
 import uuid
@@ -59,6 +61,10 @@ ROOT = pathlib.Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "aios_director_client.json"
 LOG_PATH = ROOT / ".aios-director-client.log"
 HEARTBEAT_PATH = ROOT / ".aios-director-client-heartbeat"
+CONTINUATION_RECEIPTS_PATH = (
+    pathlib.Path(os.environ.get("LOCALAPPDATA") or ROOT)
+    / "aiOS" / "director-continuation-receipts.json"
+)
 
 RECONNECT_MIN = 2.0
 RECONNECT_MAX = 60.0
@@ -327,7 +333,10 @@ DEFAULT_CODE_CONFIG_NAME = "Balanced Engineering"
 
 # Statuses code_jobs writes into job.json that mean the session is over.
 TERMINAL_OK = {"done", "completed", "finished", "ready"}
-TERMINAL_BAD = {"failed", "error", "stopped", "cancelled", "interrupted"}
+TERMINAL_BAD = {"failed", "error"}
+TERMINAL_STOPPED = {"stopped", "cancelled", "interrupted"}
+TERMINAL_INCOMPLETE = {"incomplete"}
+TERMINAL_CODE = TERMINAL_OK | TERMINAL_BAD | TERMINAL_STOPPED | TERMINAL_INCOMPLETE
 
 
 class MouseController:
@@ -411,6 +420,7 @@ class CodeBridge:
         self._jobs = None
         self._roles = None
         self._sessions: dict[str, dict] = {}
+        self._session_lock = threading.RLock()
 
     def harness(self):
         if self._jobs is None:
@@ -587,6 +597,10 @@ class CodeBridge:
         session_id = str(result.get("id") or (result.get("job") or {}).get("id") or "")
         if not session_id:
             return {"ok": False, "error": "code_jobs.create_job returned no job id"}
+        try:
+            meta = jobs.get_job(session_id) or {}
+        except Exception:
+            meta = {}
         self._sessions[session_id] = {"started": time.time(),
                                       "director_job": payload.get("job_id", "")}
         return {
@@ -600,6 +614,7 @@ class CodeBridge:
             "strategy": resolved["strategy"],
             "config_id": resolved["config_id"],
             "config_name": resolved["config_name"],
+            "native_session_id": str(meta.get("native_session_id") or ""),
         }
 
     def status(self, session_id: str) -> dict:
@@ -612,7 +627,7 @@ class CodeBridge:
             return {"ok": False, "error": "no such CODE session"}
         status = str(meta.get("status") or "running")
         summary = str(meta.get("last_summary") or meta.get("title") or "")
-        if status.lower() in TERMINAL_OK | TERMINAL_BAD:
+        if status.lower() in TERMINAL_CODE:
             try:
                 events = jobs.read_events(session_id, 0)
                 for event in reversed(events.get("events") or []):
@@ -636,6 +651,11 @@ class CodeBridge:
             "model": str(meta.get("model") or ""),
             "config_id": str(meta.get("config_id") or ""),
             "config_name": str(meta.get("config_name") or ""),
+            "project": str(meta.get("cwd") or meta.get("project") or ""),
+            "reasoning": str(meta.get("reasoning") or ""),
+            "fast": bool(meta.get("fast")),
+            "strategy": str(meta.get("strategy") or ""),
+            "native_session_id": str(meta.get("native_session_id") or ""),
         }
 
     def events(self, session_id: str, since: int = 0) -> dict:
@@ -646,16 +666,152 @@ class CodeBridge:
             return {"ok": False, "error": f"{type(exc).__name__}: {exc}",
                     "events": [], "size": int(since or 0)}
 
+    def continuation_seen(self, session_id: str, text: str, since: int) -> dict:
+        """Prove whether an interrupted durable delivery already reached CODE.
+
+        ``CodeJob.send_message`` appends the user event before it queues or
+        steers the turn.  A client that died after that append can therefore
+        recover its receipt without sending the instruction a second time.
+        """
+        events = self.events(session_id, since)
+        if not events.get("ok"):
+            return events
+        if events.get("reset"):
+            return {"ok": False, "unknown": True,
+                    "error": "CODE event log reset before continuation recovery"}
+        wanted = str(text or "").strip()
+        seen = any(
+            str(event.get("kind") or "") == "user"
+            and str(event.get("text") or "").strip() == wanted
+            for event in (events.get("events") or [])
+            if isinstance(event, dict)
+        )
+        return {"ok": True, "seen": seen,
+                "event_cursor": max(0, int(events.get("size") or since))}
+
     def send(self, session_id: str, text: str) -> dict:
         jobs = self.harness()
         return jobs.send_message(session_id, text)
 
-    def stop(self, session_id: str) -> dict:
+    def continue_session(self, session_id: str, text: str,
+                         urgent: bool = False) -> dict:
+        with self._session_lock:
+            return self._continue_session(session_id, text, urgent)
+
+    def _continue_session(self, session_id: str, text: str,
+                          urgent: bool = False) -> dict:
+        """Continue one logical CODE job and return its pre-send event cursor.
+
+        Capturing the cursor before enqueue/steer gives a replacement Director
+        follower an exact hand-off point: it sees the continuation and every
+        later event, without replaying the prior session transcript.
+        """
         jobs = self.harness()
-        return jobs.stop_job(session_id)
+        session_id = str(session_id or "").strip()
+        instruction = str(text or "").strip()
+        if not session_id:
+            return {"ok": False, "error": "session_id is required"}
+        if not instruction:
+            return {"ok": False, "error": "continuation text is required"}
+        try:
+            before = jobs.get_job(session_id)
+        except Exception as exc:
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        if not before:
+            return {"ok": False, "error": "no such CODE session"}
+        previous_status = str(before.get("status") or "").lower()
+        if previous_status in {"stopped", "cancelled", "interrupted"}:
+            # A stopped CodeJob deliberately keeps its stop event armed.  Its
+            # public send_message API queues a new turn, but that turn is then
+            # discarded at the worker boundary while the flag remains set.
+            # Rearm only after the old worker/turn is fully settled, using the
+            # same in-memory CodeJob that the public API will enqueue on.
+            getter = getattr(jobs, "_get_job", None)
+            live = getter(session_id) if callable(getter) else None
+            if live is None:
+                return {"ok": False, "error": "stopped CODE session cannot be safely rearmed"}
+            lock = getattr(live, "turn_lock", None)
+            messages = getattr(live, "_messages", None)
+            still_stopping = (
+                lock is None or lock.locked()
+                or bool(getattr(live, "_worker_running", False))
+                or getattr(live, "process", None) is not None
+                or getattr(live, "rpc", None) is not None
+                or (messages is not None and not messages.empty())
+            )
+            if still_stopping:
+                return {"ok": False, "error": "CODE session is still stopping; try again shortly"}
+            if not lock.acquire(blocking=False):
+                return {"ok": False, "error": "CODE session is still stopping; try again shortly"}
+            try:
+                live.stop_requested = False
+                live.interrupt_requested = False
+                stop_event = getattr(live, "_stop_event", None)
+                if stop_event is not None:
+                    stop_event.clear()
+                # Stopped workers may have discarded queued payloads before
+                # decrementing this counter.  At this point the queue is known
+                # empty, so zero is the only truthful value.
+                live.queued = 0
+                save = getattr(live, "save", None)
+                if callable(save):
+                    save(queued=0)
+            finally:
+                lock.release()
+        try:
+            event_cursor = int((jobs.read_events(session_id, 0) or {}).get("size") or 0)
+        except Exception as exc:
+            return {"ok": False, "error": f"could not read CODE event cursor: {exc}"}
+
+        sent = jobs.send_message(session_id, instruction, urgent=bool(urgent))
+        if not isinstance(sent, dict):
+            return {"ok": False, "error": "code_jobs.send_message returned no result"}
+        if sent.get("ok") is False:
+            return {"ok": False, "error": str(sent.get("error") or "send refused")}
+        current = sent.get("job") if isinstance(sent.get("job"), dict) else None
+        if current is None:
+            try:
+                current = jobs.get_job(session_id) or before
+            except Exception:
+                current = before
+        self._sessions[session_id] = {
+            "started": self._sessions.get(session_id, {}).get("started", time.time()),
+            "director_job": self._sessions.get(session_id, {}).get("director_job", ""),
+        }
+        result = {
+            "ok": True,
+            "session_id": session_id,
+            "event_cursor": event_cursor,
+            "previous_status": str(before.get("status") or ""),
+            "previous_summary": str(before.get("last_summary") or before.get("title") or ""),
+            "status": str(current.get("status") or "running"),
+            "project": str(current.get("cwd") or current.get("project") or ""),
+            "provider": str(current.get("provider") or before.get("provider") or ""),
+            "model": str(current.get("model") or before.get("model") or ""),
+            "reasoning": str(current.get("reasoning") or before.get("reasoning") or ""),
+            "fast": bool(current.get("fast", before.get("fast", False))),
+            "strategy": str(current.get("strategy") or before.get("strategy") or ""),
+            "config_id": str(current.get("config_id") or before.get("config_id") or ""),
+            "config_name": str(current.get("config_name") or before.get("config_name") or ""),
+            "native_session_id": str(current.get("native_session_id")
+                                     or before.get("native_session_id") or ""),
+        }
+        for key in ("answered", "steered", "queued"):
+            if key in sent:
+                result[key] = sent[key]
+        return result
+
+    def stop(self, session_id: str) -> dict:
+        with self._session_lock:
+            jobs = self.harness()
+            return jobs.stop_job(session_id)
 
     def answer(self, session_id: str, text: str) -> dict:
         """Answer whatever the session is waiting on and let it run again."""
+        with self._session_lock:
+            return self._answer(session_id, text)
+
+    def _answer(self, session_id: str, text: str) -> dict:
         jobs = self.harness()
         try:
             meta = jobs.get_job(session_id)
@@ -663,7 +819,10 @@ class CodeBridge:
             return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
         if not meta:
             return {"ok": False, "error": "no such CODE session"}
-        question = str(meta.get("pending_question") or "")
+        question = str(meta.get("pending_question") or "").strip()
+        if not question:
+            return {"ok": False,
+                    "error": "CODE session is not waiting on a question; use a continuation"}
         result = jobs.send_message(session_id, str(text or ""))
         if isinstance(result, dict) and result.get("ok") is False:
             return {"ok": False, "error": str(result.get("error") or "send refused")}
@@ -680,8 +839,126 @@ class DirectorClient:
         self.name = str(config["name"])
         self.code = CodeBridge()
         self.mouse = MouseController()
+        self._code_followers: dict[str, asyncio.Task] = {}
+        self._code_follower_generations: dict[str, int] = {}
+        self._code_follower_keys: dict[str, tuple[str, str]] = {}
+        self._continuation_receipts: dict[str, dict] = self._load_continuation_receipts()
+        self._continuation_inflight: dict[str, asyncio.Task] = {}
         self.session: aiohttp.ClientSession | None = None
         self.socket: aiohttp.ClientWebSocketResponse | None = None
+
+    @staticmethod
+    def _continuation_request_hash(payload: dict) -> str:
+        bound = {
+            "session_id": str(payload.get("session_id") or "").strip(),
+            "job_id": str(payload.get("job_id") or "").strip(),
+            "text": str(payload.get("text") or "").strip(),
+            "urgent": bool(payload.get("urgent")),
+        }
+        raw = json.dumps(bound, sort_keys=True, separators=(",", ":"),
+                         ensure_ascii=False).encode("utf-8", errors="replace")
+        return hashlib.sha256(raw).hexdigest()
+
+    @staticmethod
+    def _load_continuation_receipts() -> dict[str, dict]:
+        try:
+            raw = json.loads(CONTINUATION_RECEIPTS_PATH.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return {}
+        if not isinstance(raw, dict):
+            return {}
+        rows: dict[str, dict] = {}
+        for key, value in list(raw.items())[-256:]:
+            if (str(key).strip() and isinstance(value, dict)
+                    and str(value.get("request_hash") or "")):
+                rows[str(key)] = dict(value)
+        return rows
+
+    def _persist_continuation_receipts(self) -> bool:
+        while len(self._continuation_receipts) > 256:
+            self._continuation_receipts.pop(next(iter(self._continuation_receipts)))
+        path = CONTINUATION_RECEIPTS_PATH
+        temporary = path.with_name(path.name + ".tmp")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporary.write_text(
+                json.dumps(self._continuation_receipts, ensure_ascii=False,
+                           separators=(",", ":")), encoding="utf-8")
+            os.replace(temporary, path)
+            return True
+        except OSError as exc:
+            log(f"could not persist CODE continuation receipts: {exc}")
+            return False
+
+    async def _deliver_continuation(self, payload: dict, request_hash: str,
+                                    existing: dict | None) -> dict:
+        """Durably deliver one bound request, recovering unknown outcomes."""
+        session_id = str(payload.get("session_id") or "").strip()
+        instruction = str(payload.get("text") or "").strip()
+        urgent = bool(payload.get("urgent"))
+        continuation_id = str(payload.get("continuation_id") or "").strip()
+        before_cursor = 0
+
+        if existing and str(existing.get("state") or "") == "inflight":
+            before_cursor = max(0, int(existing.get("before_cursor") or 0))
+            recovery = await asyncio.get_running_loop().run_in_executor(
+                None, self.code.continuation_seen,
+                session_id, instruction, before_cursor)
+            if not recovery.get("ok"):
+                return {"ok": False, "outcome_unknown": True,
+                        "error": str(recovery.get("error") or
+                                     "could not recover continuation outcome")}
+            if recovery.get("seen"):
+                state = await asyncio.get_running_loop().run_in_executor(
+                    None, self.code.status, session_id)
+                result = {
+                    "ok": True, "session_id": session_id,
+                    "event_cursor": before_cursor,
+                    "status": str(state.get("status") or "running"),
+                    "recovered": True,
+                }
+                for key in (
+                        "project", "provider", "model", "reasoning", "fast",
+                        "strategy", "config_id", "config_name", "native_session_id"):
+                    if state.get(key) not in (None, ""):
+                        result[key] = state[key]
+                result["continuation_id"] = continuation_id
+                self._continuation_receipts[continuation_id] = {
+                    "state": "done", "request_hash": request_hash,
+                    "result": result, "saved_at": time.time(),
+                }
+                self._persist_continuation_receipts()
+                return result
+        else:
+            snapshot = await asyncio.get_running_loop().run_in_executor(
+                None, self.code.events, session_id, 0)
+            if not snapshot.get("ok"):
+                return snapshot
+            before_cursor = max(0, int(snapshot.get("size") or 0))
+            if continuation_id:
+                self._continuation_receipts[continuation_id] = {
+                    "state": "inflight", "request_hash": request_hash,
+                    "before_cursor": before_cursor, "saved_at": time.time(),
+                }
+                if not self._persist_continuation_receipts():
+                    self._continuation_receipts.pop(continuation_id, None)
+                    return {"ok": False,
+                            "error": "could not durably record the continuation before delivery"}
+
+        result = await asyncio.get_running_loop().run_in_executor(
+            None, self.code.continue_session, session_id, instruction, urgent)
+        result = dict(result or {})
+        if continuation_id:
+            result["continuation_id"] = continuation_id
+            if result.get("ok"):
+                self._continuation_receipts[continuation_id] = {
+                    "state": "done", "request_hash": request_hash,
+                    "result": result, "saved_at": time.time(),
+                }
+            else:
+                self._continuation_receipts.pop(continuation_id, None)
+            self._persist_continuation_receipts()
+        return result
 
     # --- transport ---
 
@@ -747,22 +1024,40 @@ class DirectorClient:
             heartbeat()
             await asyncio.sleep(30)
 
-    async def reply(self, call_id: str, result: dict) -> None:
-        if self.socket is None or self.socket.closed:
-            return
-        await self.socket.send_json({"type": "result", "call_id": call_id, "result": result})
+    async def reply(self, call_id: str, result: dict) -> bool:
+        socket = self.socket
+        if socket is None or socket.closed:
+            return False
+        try:
+            await socket.send_json({"type": "result", "call_id": call_id, "result": result})
+        except Exception as exc:
+            log(f"reply delivery failed: {type(exc).__name__}: {exc}")
+            return False
+        return True
 
-    async def report_job(self, job_id: str, status: str, result: dict) -> None:
-        if self.socket is None or self.socket.closed:
-            return
-        await self.socket.send_json({"type": "job", "job_id": job_id,
-                                     "status": status, "result": result})
+    async def report_job(self, job_id: str, status: str, result: dict) -> bool:
+        socket = self.socket
+        if socket is None or socket.closed:
+            return False
+        try:
+            await socket.send_json({"type": "job", "job_id": job_id,
+                                    "status": status, "result": result})
+        except Exception as exc:
+            log(f"CODE final delivery failed: {type(exc).__name__}: {exc}")
+            return False
+        return True
 
-    async def emit(self, job_id: str, kind: str, payload: dict) -> None:
-        if self.socket is None or self.socket.closed:
-            return
-        await self.socket.send_json({"type": "event", "job_id": job_id,
-                                     "kind": kind, "payload": payload})
+    async def emit(self, job_id: str, kind: str, payload: dict) -> bool:
+        socket = self.socket
+        if socket is None or socket.closed:
+            return False
+        try:
+            await socket.send_json({"type": "event", "job_id": job_id,
+                                    "kind": kind, "payload": payload})
+        except Exception as exc:
+            log(f"CODE event delivery failed: {type(exc).__name__}: {exc}")
+            return False
+        return True
 
     # --- calls ---
 
@@ -839,10 +1134,40 @@ class DirectorClient:
         result = await asyncio.get_running_loop().run_in_executor(
             None, self.code.start, payload)
         if result.get("ok"):
-            asyncio.create_task(self.follow_session(str(result["session_id"]),
-                                                    str(payload.get("job_id") or ""),
-                                                    result))
+            self._start_code_follower(
+                str(result["session_id"]), str(payload.get("job_id") or ""), result)
         return result
+
+    def _start_code_follower(self, session_id: str, job_id: str,
+                             meta: dict | None = None, *, since: int = 0,
+                             replace: bool = False) -> asyncio.Task:
+        """Keep exactly one reporter attached to a logical CODE session."""
+        existing = self._code_followers.get(session_id)
+        if existing is not None and not existing.done():
+            if not replace:
+                return existing
+            existing.cancel()
+        generation = self._code_follower_generations.get(session_id, 0) + 1
+        self._code_follower_generations[session_id] = generation
+        self._code_follower_keys[session_id] = (
+            str(job_id or ""), str((meta or {}).get("continuation_id") or ""))
+        task = asyncio.create_task(
+            self.follow_session(
+                session_id, job_id, meta, since=max(0, int(since)),
+                generation=generation))
+        self._code_followers[session_id] = task
+
+        def settled(done: asyncio.Task) -> None:
+            if self._code_followers.get(session_id) is done:
+                self._code_followers.pop(session_id, None)
+            if not done.cancelled():
+                error = done.exception()
+                if error is not None:
+                    log(f"CODE follower {session_id} failed: "
+                        f"{type(error).__name__}: {error}")
+
+        task.add_done_callback(settled)
+        return task
 
     async def do_code_status(self, payload: dict) -> dict:
         return await asyncio.get_running_loop().run_in_executor(
@@ -862,6 +1187,95 @@ class DirectorClient:
         return await asyncio.get_running_loop().run_in_executor(
             None, self.code.send, str(payload.get("session_id") or ""),
             str(payload.get("text") or ""))
+
+    async def do_code_continue(self, payload: dict) -> dict:
+        ready, message = self.code.available()
+        if not ready:
+            return {"ok": False, "error": message}
+        session_id = str(payload.get("session_id") or "")
+        continuation_id = str(payload.get("continuation_id") or "").strip()
+        request_hash = self._continuation_request_hash(payload)
+        receipt = self._continuation_receipts.get(continuation_id) if continuation_id else None
+        if (receipt and str(receipt.get("request_hash") or "") != request_hash):
+            return {"ok": False,
+                    "error": "continuation_id is already bound to a different CODE request"}
+
+        result: dict | None = None
+        deduplicated = False
+        created_task = False
+        if receipt and str(receipt.get("state") or "") == "done":
+            stored = receipt.get("result")
+            result = dict(stored) if isinstance(stored, dict) else None
+            deduplicated = result is not None
+        if result is None and continuation_id:
+            task = self._continuation_inflight.get(continuation_id)
+            deduplicated = task is not None
+            if task is None:
+                task = asyncio.create_task(
+                    self._deliver_continuation(payload, request_hash, receipt))
+                self._continuation_inflight[continuation_id] = task
+                created_task = True
+            try:
+                result = await asyncio.shield(task)
+            finally:
+                if task.done():
+                    self._continuation_inflight.pop(continuation_id, None)
+        elif result is None:
+            result = await asyncio.get_running_loop().run_in_executor(
+                None, self.code.continue_session,
+                session_id, str(payload.get("text") or ""), bool(payload.get("urgent")))
+        result = dict(result or {})
+        if not result.get("ok"):
+            return result
+        job_id = str(payload.get("job_id") or "")
+        self.code._sessions.setdefault(session_id, {})["director_job"] = job_id
+        follower = self._code_followers.get(session_id)
+        replace = bool(payload.get("replace_follower")) and (created_task or not deduplicated)
+        if replace or follower is None or follower.done():
+            follow_since = (payload.get("follow_since")
+                            if "follow_since" in payload
+                            else result.get("event_cursor"))
+            meta = {**result, "continuation_id": continuation_id}
+            self._start_code_follower(
+                session_id, job_id, meta,
+                since=int(follow_since or 0),
+                replace=replace)
+        return result
+
+    async def do_code_follow(self, payload: dict) -> dict:
+        """Reattach a durable Director row after either endpoint reconnects."""
+        ready, message = self.code.available()
+        if not ready:
+            return {"ok": False, "error": message}
+        session_id = str(payload.get("session_id") or "").strip()
+        job_id = str(payload.get("job_id") or "").strip()
+        if not session_id or not job_id:
+            return {"ok": False, "error": "session_id and job_id are required"}
+        state = await asyncio.get_running_loop().run_in_executor(
+            None, self.code.status, session_id)
+        if not state.get("ok"):
+            return state
+        meta = dict(payload.get("meta") or {})
+        continuation_id = str(
+            payload.get("continuation_id") or meta.get("continuation_id") or "")
+        if continuation_id:
+            meta["continuation_id"] = continuation_id
+        for key in (
+                "project", "provider", "model", "reasoning", "fast", "strategy",
+                "config_id", "config_name", "native_session_id"):
+            if state.get(key) not in (None, ""):
+                meta[key] = state[key]
+        self.code._sessions.setdefault(session_id, {})["director_job"] = job_id
+        existing = self._code_followers.get(session_id)
+        wanted_key = (job_id, continuation_id)
+        replace = (existing is not None and not existing.done()
+                   and self._code_follower_keys.get(session_id) != wanted_key)
+        self._start_code_follower(
+            session_id, job_id, meta, since=int(payload.get("since") or 0),
+            replace=replace)
+        return {"ok": True, "session_id": session_id,
+                "status": str(state.get("status") or "running"),
+                "continuation_id": continuation_id}
 
     async def do_code_stop(self, payload: dict) -> dict:
         return await asyncio.get_running_loop().run_in_executor(
@@ -918,86 +1332,158 @@ class DirectorClient:
             None, resolve_project, str(payload.get("project") or ""))
 
     async def follow_session(self, session_id: str, job_id: str,
-                             meta: dict | None = None) -> None:
-        """Poll the CODE session and stream its events/state back to Director."""
+                             meta: dict | None = None, *, since: int = 0,
+                             generation: int = 0) -> None:
+        """Poll CODE and deliver each generation's events/final exactly once."""
         last = ""
         last_question = ""
-        since = 0
+        since = max(0, int(since or 0))
         meta = dict(meta or {})
-        deadline = time.time() + 7200
+        continuation_id = str(meta.get("continuation_id") or "")
         ticks = 0
-        while time.time() < deadline:
-            await asyncio.sleep(1.0)
-            ticks += 1
-            events = await asyncio.get_running_loop().run_in_executor(
-                None, self.code.events, session_id, since)
-            if events.get("ok"):
-                if events.get("reset"):
-                    since = 0
-                batch = events.get("events") or []
-                size = int(events.get("size") or since)
-                if batch:
-                    await self.emit(job_id, "code.events", {
-                        "job_id": job_id,
-                        "session_id": session_id,
-                        "events": batch,
-                        "size": size,
-                        "reset": bool(events.get("reset")),
-                    })
-                since = size
+        status_failures = 0
+        event_failures = 0
+        poll_failures = 0
 
-            # Status is cheaper than full meta; check every ~5s.
-            if ticks % 5 != 0:
-                continue
-            info = await asyncio.get_running_loop().run_in_executor(
-                None, self.code.status, session_id)
-            if not info.get("ok"):
-                await self.report_job(job_id, "fail", {
-                    "summary": info.get("error", "lost the session"),
-                    "session_id": session_id,
-                    "config_id": meta.get("config_id") or "",
-                    "config_name": meta.get("config_name") or "",
-                    "provider": meta.get("provider") or "",
-                    "model": meta.get("model") or "",
-                })
+        def current() -> bool:
+            return (generation <= 0
+                    or self._code_follower_generations.get(session_id) == generation)
+
+        async def report_terminal(status: str, result: dict) -> bool:
+            # A websocket reconnect is expected, not a reason to discard the
+            # only final report. A newer continuation invalidates this
+            # generation and prevents a stale terminal result from winning.
+            while current():
+                if await self.report_job(job_id, status, result):
+                    return True
+                await asyncio.sleep(1.0)
+            return False
+
+        def details(info: dict | None = None) -> dict:
+            current_info = dict(info or {})
+            merged = {
+                field: current_info.get(field) if current_info.get(field) not in (None, "")
+                else meta.get(field, "")
+                for field in (
+                    "config_id", "config_name", "provider", "model", "project",
+                    "reasoning", "strategy", "native_session_id")
+            }
+            merged["fast"] = bool(current_info.get("fast", meta.get("fast", False)))
+            if continuation_id:
+                merged["continuation_id"] = continuation_id
+            return merged
+
+        while current():
+            await asyncio.sleep(1.0)
+            if not current():
                 return
-            status = str(info.get("status") or "running").lower()
-            summary = str(info.get("summary") or "")
-            question = str(info.get("pending_question") or "").strip()
-            # A question is the one state that stalls forever on its own. Send
-            # it once, as its own event, so Director can answer or relay it
-            # instead of watching a "running" session that will never move.
-            if question and question != last_question:
-                last_question = question
-                await self.emit(job_id, "code.question",
-                                {"job_id": job_id, "session_id": session_id,
-                                 "question": question, "status": status,
-                                 "title": str(info.get("title") or "")[:120]})
-            elif not question:
-                last_question = ""
-            if summary and summary != last:
-                last = summary
-                await self.emit(job_id, "code.progress",
-                                {"job_id": job_id, "session_id": session_id,
-                                 "title": summary[:120], "status": status})
-            if status in TERMINAL_OK or status in TERMINAL_BAD:
-                await self.report_job(
-                    job_id, "done" if status in TERMINAL_OK else "fail",
-                    {"summary": summary or status,
-                     "session_id": session_id,
-                     "config_id": info.get("config_id") or meta.get("config_id") or "",
-                     "config_name": info.get("config_name") or meta.get("config_name") or "",
-                     "provider": info.get("provider") or meta.get("provider") or "",
-                     "model": info.get("model") or meta.get("model") or ""})
-                return
-        await self.report_job(job_id, "stopped", {
-            "summary": "session ran past two hours",
-            "session_id": session_id,
-            "config_id": meta.get("config_id") or "",
-            "config_name": meta.get("config_name") or "",
-            "provider": meta.get("provider") or "",
-            "model": meta.get("model") or "",
-        })
+            try:
+                ticks += 1
+                events = await asyncio.get_running_loop().run_in_executor(
+                    None, self.code.events, session_id, since)
+                if events.get("ok"):
+                    event_failures = 0
+                    batch = events.get("events") or []
+                    size = int(events.get("size") or since)
+                    if batch or events.get("reset") or size != since:
+                        body = {
+                            "job_id": job_id, "session_id": session_id,
+                            "events": batch, "size": size,
+                            "reset": bool(events.get("reset")),
+                        }
+                        if continuation_id:
+                            body["continuation_id"] = continuation_id
+                        delivered = current() and await self.emit(
+                            job_id, "code.events", body)
+                        if delivered and current():
+                            since = size
+                else:
+                    event_failures += 1
+                    if event_failures >= 3:
+                        await report_terminal("incomplete", {
+                            "summary": str(events.get("error") or
+                                           "CODE event stream became unavailable"),
+                            "session_id": session_id, "event_cursor": since,
+                            "code_status": "incomplete", **details(),
+                        })
+                        return
+
+                # Status is cheaper than full meta; check every ~5s.
+                if ticks % 5 != 0:
+                    continue
+                info = await asyncio.get_running_loop().run_in_executor(
+                    None, self.code.status, session_id)
+                if not info.get("ok"):
+                    status_failures += 1
+                    if status_failures < 3:
+                        continue
+                    reason = str(info.get("error") or "lost the session")
+                    state = "fail" if any(token in reason.lower() for token in (
+                        "no such code session", "unknown code job", "no such session",
+                    )) else "incomplete"
+                    await report_terminal(state, {
+                        "summary": reason, "session_id": session_id,
+                        "event_cursor": since, "code_status": state, **details(),
+                    })
+                    return
+                status_failures = 0
+                poll_failures = 0
+                status = str(info.get("status") or "running").lower()
+                summary = str(info.get("summary") or "")
+                question = str(info.get("pending_question") or "").strip()
+                # A question is the one state that stalls forever on its own.
+                if question and question != last_question:
+                    body = {
+                        "job_id": job_id, "session_id": session_id,
+                        "question": question, "status": status,
+                        "title": str(info.get("title") or "")[:120],
+                    }
+                    if continuation_id:
+                        body["continuation_id"] = continuation_id
+                    delivered = current() and await self.emit(
+                        job_id, "code.question", body)
+                    if delivered and current():
+                        last_question = question
+                elif not question:
+                    last_question = ""
+                if summary and summary != last:
+                    body = {"job_id": job_id, "session_id": session_id,
+                            "title": summary[:120], "status": status}
+                    if continuation_id:
+                        body["continuation_id"] = continuation_id
+                    delivered = current() and await self.emit(
+                        job_id, "code.progress", body)
+                    if delivered and current():
+                        last = summary
+                if status in TERMINAL_CODE:
+                    if status in TERMINAL_OK:
+                        director_status = "done"
+                    elif status in TERMINAL_INCOMPLETE:
+                        director_status = "incomplete"
+                    elif status in TERMINAL_STOPPED:
+                        director_status = "stopped"
+                    else:
+                        director_status = "fail"
+                    await report_terminal(
+                        director_status,
+                        {"summary": summary or status, "session_id": session_id,
+                         "event_cursor": since, "code_status": status,
+                         "delivery_uncertain": False,
+                         **details(info)})
+                    return
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                poll_failures += 1
+                log(f"CODE follower poll {session_id} failed: "
+                    f"{type(exc).__name__}: {exc}")
+                if poll_failures >= 3:
+                    await report_terminal("incomplete", {
+                        "summary": f"CODE reporting paused after repeated bridge errors: {exc}",
+                        "session_id": session_id, "event_cursor": since,
+                        "code_status": "incomplete", **details(),
+                    })
+                    return
 
     async def do_shell(self, payload: dict) -> dict:
         command = str(payload.get("command") or "").strip()

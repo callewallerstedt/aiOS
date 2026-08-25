@@ -99,7 +99,7 @@ _LEGACY_SEEDS: dict[str, dict[str, str]] = {
     "reviewer": {"model": "code_review_model", "enabled": "code_review_enabled"},
 }
 
-VALID_REASONING: tuple[str, ...] = ("off", "low", "medium", "high", "xhigh")
+VALID_REASONING: tuple[str, ...] = ("off", "on", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
 
 
 def _read_config() -> dict[str, Any]:
@@ -195,6 +195,8 @@ def catalogue() -> list[dict[str, Any]]:
 _MODEL_CONFIGS_KEY = "model_configs"
 _VALID_PROVIDERS = frozenset({"codex", "claude", "cursor", "ollama", "openrouter"})
 _VALID_STRATEGIES = frozenset({"auto", "direct", "planned", "distributed"})
+_MODEL_CONFIG_ORIGINS = frozenset({"user", "benchmark_history"})
+_LEGACY_BENCH_RECOVERY_DESCRIPTION = "Restored from benchmark history"
 
 
 def _clean_provider(value: Any) -> str:
@@ -262,7 +264,10 @@ def _scan_bench_model_configs() -> list[dict[str, Any]]:
         candidate = {
             "id": preset_id,
             "name": name,
-            "description": "Restored from benchmark history",
+            "description": _LEGACY_BENCH_RECOVERY_DESCRIPTION,
+            "origin": "benchmark_history",
+            "show_in_composer": False,
+            "show_in_composer_explicit": False,
             "roles": roles_raw,
             "provider": _clean_provider(run.get("saved_config_provider") or run.get("provider")),
             "strategy": _clean_strategy(
@@ -288,7 +293,12 @@ def _bench_recovered_configs(existing: list[dict[str, Any]]) -> list[dict[str, A
     if now - _BENCH_RECOVERY_CACHE[0] >= 300.0:
         _BENCH_RECOVERY_CACHE = (now, _scan_bench_model_configs())
     known = {str(row.get("id")) for row in existing}
-    return [row for row in _BENCH_RECOVERY_CACHE[1] if str(row.get("id")) not in known]
+    return [
+        cleaned
+        for raw in _BENCH_RECOVERY_CACHE[1]
+        if str(raw.get("id")) not in known
+        if (cleaned := _clean_model_config(raw))
+    ]
 
 
 def _clean_review_fix(value: Any) -> bool:
@@ -315,6 +325,21 @@ def _clean_model_config(raw: Any) -> dict[str, Any] | None:
     name = str(raw.get("name") or "").strip()[:80]
     if not preset_id or not name:
         return None
+    description = str(raw.get("description") or "").strip()[:500]
+    raw_origin = str(raw.get("origin") or "").strip().casefold()
+    if raw_origin in _MODEL_CONFIG_ORIGINS:
+        origin = raw_origin
+    elif description == _LEGACY_BENCH_RECOVERY_DESCRIPTION:
+        # Older recovery rows predate explicit provenance.  Their visibility
+        # bit was synthesized as True merely because the field was absent, so
+        # the system description is the one safe migration marker we own.
+        origin = "benchmark_history"
+    else:
+        origin = "user"
+    visibility_explicit = _clean_review_fix(raw.get("show_in_composer_explicit"))
+    show_in_composer = _clean_show_in_composer(raw.get("show_in_composer"))
+    if origin == "benchmark_history" and not visibility_explicit:
+        show_in_composer = False
     try:
         created_at = float(raw.get("created_at") or 0)
         updated_at = float(raw.get("updated_at") or created_at or 0)
@@ -326,11 +351,13 @@ def _clean_model_config(raw: Any) -> dict[str, Any] | None:
     return {
         "id": preset_id,
         "name": name,
-        "description": str(raw.get("description") or "").strip()[:500],
+        "description": description,
+        "origin": origin,
         "provider": _clean_provider(raw.get("provider")),
         "strategy": _clean_strategy(raw.get("strategy")),
         "review_fix": _clean_review_fix(raw.get("review_fix")),
-        "show_in_composer": _clean_show_in_composer(raw.get("show_in_composer")),
+        "show_in_composer": show_in_composer,
+        "show_in_composer_explicit": visibility_explicit,
         "roles": roles,
         "created_at": created_at,
         "updated_at": updated_at,
@@ -349,12 +376,16 @@ def load_model_configs(config: dict[str, Any] | None = None) -> list[dict[str, A
 
 
 def merge_recovered_model_configs(config: dict[str, Any]) -> bool:
-    """Persist bench-recovered presets once. Returns True if *config* changed."""
+    """Persist recovered presets and one-time provenance/visibility migration."""
+    raw = config.get(_MODEL_CONFIGS_KEY) if isinstance(config.get(_MODEL_CONFIGS_KEY), list) else []
     stored = _load_stored_model_configs(config)
     recovered = _bench_recovered_configs(stored)
-    if not recovered:
+    merged = stored + recovered
+    merged.sort(key=lambda row: float(row.get("updated_at") or 0), reverse=True)
+    merged = merged[:100]
+    if raw == merged:
         return False
-    config[_MODEL_CONFIGS_KEY] = stored + recovered
+    config[_MODEL_CONFIGS_KEY] = merged
     return True
 
 
@@ -389,10 +420,14 @@ def save_model_config(
         "id": preset_id,
         "name": name,
         "description": str(preset.get("description") or "").strip()[:500],
+        # A save through the CODE configuration API is an explicit user
+        # adoption, including when it promotes a history-only snapshot.
+        "origin": "user",
         "provider": _clean_provider(preset.get("provider")),
         "strategy": _clean_strategy(preset.get("strategy")),
         "review_fix": _clean_review_fix(preset.get("review_fix")),
         "show_in_composer": _clean_show_in_composer(preset.get("show_in_composer")),
+        "show_in_composer_explicit": "show_in_composer" in preset,
         "roles": save_roles(preset.get("roles") if isinstance(preset.get("roles"), dict) else {}, {}),
         "created_at": now,
         "updated_at": now,
@@ -414,6 +449,9 @@ def save_model_config(
             entry["review_fix"] = _clean_review_fix(old.get("review_fix"))
         if "show_in_composer" not in preset:
             entry["show_in_composer"] = _clean_show_in_composer(old.get("show_in_composer"))
+            entry["show_in_composer_explicit"] = _clean_review_fix(
+                old.get("show_in_composer_explicit")
+            )
         configs[idx] = entry
     else:
         configs.insert(0, entry)

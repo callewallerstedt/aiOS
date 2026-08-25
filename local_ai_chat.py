@@ -23,9 +23,9 @@ from PIL import Image, ImageGrab, ImageTk
 
 APP_TITLE = "Local AI"
 API_BASE = "http://localhost:11434"
-DEFAULT_MODEL = "qwen3.6-agent:27b"
+DEFAULT_MODEL = os.environ.get("AIOS_LOCAL_CHAT_MODEL") or "qwen3.6-agent:27b"
 VISION_MODEL = "qwen2.5vl:7b"
-MODEL_ROOT = r"C:\AI\OllamaModels"
+MODEL_ROOT = os.environ.get("OLLAMA_MODELS") or str(Path.home() / ".ollama" / "models")
 KEEP_ALIVE = "1h"
 WORKSPACE = Path(__file__).resolve().parent
 DATASET_ROOT = WORKSPACE / "training_data" / "gui_clicks"

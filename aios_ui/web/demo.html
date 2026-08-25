@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>aiOS · Component Demo</title>
+  <link rel="stylesheet" href="css/theme.css">
+  <link rel="stylesheet" href="css/shell.css">
+  <link rel="stylesheet" href="css/code.css">
+  <link rel="stylesheet" href="css/code-beautiful.css">
+  <link rel="stylesheet" href="css/harness.css">
+  <link rel="stylesheet" href="css/demo.css">
+</head>
+<body class="demo-body">
+  <header class="demo-head">
+    <div class="demo-head-title">
+      <h1>aiOS agent chat — component demo</h1>
+      <p>Every card, input, spinner, loader and tool call the agent transcript can render, fed through the real <code>Transcript</code> renderer with fake events.</p>
+    </div>
+    <div class="demo-head-actions">
+      <button type="button" id="demo-run" class="demo-btn">Replay demo</button>
+      <button type="button" id="demo-reset" class="demo-btn">Clear</button>
+    </div>
+  </header>
+
+  <main class="demo-layout">
+    <section class="demo-panel">
+      <div class="demo-panel-title">Live transcript (real renderer)</div>
+      <div class="demo-transcript" id="demo-transcript" role="log" aria-live="polite"></div>
+    </section>
+
+    <aside class="demo-panel demo-static">
+      <div class="demo-panel-title">Static samples (pure CSS)</div>
+
+      <div class="demo-block">
+        <div class="demo-block-label">Loading pixels — all animation variants</div>
+        <div class="demo-pixels-row">
+          <span class="loading-pixels anim-wave" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span></span>
+          <span class="loading-pixels anim-pulse" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span></span>
+          <span class="loading-pixels anim-orbit" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span></span>
+          <span class="loading-pixels anim-rain" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span></span>
+          <span class="loading-pixels anim-bloom" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span></span>
+        </div>
+      </div>
+
+      <div class="demo-block">
+        <div class="demo-block-label">Task badges — running / done / failed</div>
+        <div class="demo-badges-row">
+          <span class="task-ring active"><svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="11" fill="none" stroke="var(--line)" stroke-width="2" /><circle cx="12" cy="12" r="11" fill="none" stroke="var(--ink-3)" stroke-width="2" stroke-linecap="round" stroke-dasharray="8 23" /></svg><span>subagent</span></span>
+          <span class="task-badge-icon done"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5" /></svg></span>
+          <span class="task-badge-icon failed"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12" /></svg></span>
+        </div>
+      </div>
+
+      <div class="demo-block">
+        <div class="demo-block-label">Tool glyphs</div>
+        <div class="demo-tools-row">
+          <span class="tool-glyph">think</span>
+          <span class="tool-glyph">write</span>
+          <span class="tool-glyph">run</span>
+          <span class="tool-glyph">read</span>
+          <span class="tool-glyph">search</span>
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <script type="module" src="js/demo.js"></script>
+</body>
+</html>

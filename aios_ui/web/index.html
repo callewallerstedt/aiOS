@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>aiOS</title>
+<link rel="stylesheet" href="css/theme.css">
+<link rel="stylesheet" href="css/shell.css">
+<link rel="stylesheet" href="css/code.css">
+<link rel="stylesheet" href="css/code-beautiful.css">
+    <link rel="stylesheet" href="css/bench.css">
+    <link rel="stylesheet" href="css/harness.css">
+<link rel="stylesheet" href="css/settings.css">
+<link rel="stylesheet" href="css/chat.css">
+</head>
+<body>
+<div id="shell" class="shell">
+  <div class="panel">
+
+    <header class="header pywebview-drag-region">
+      <span class="brand">aiOS</span>
+      <span class="subtitle" id="subtitle">Ready</span>
+      <div class="header-tools">
+        <div class="stats" id="header-stats">
+          <button class="stat balance-stat" id="openrouter-balance" type="button"
+                  title="Refresh OpenRouter balance" aria-live="polite">OpenRouter --</button>
+        </div>
+        <span class="divider"></span>
+        <button class="icon-btn" data-action="restart" title="Restart app">&#x27f2;</button>
+        <button class="icon-btn" data-action="refresh" title="Refresh data">&#x21bb;</button>
+        <button class="icon-btn fullscreen-btn" data-action="toggle_fullscreen"
+                title="Toggle fullscreen" aria-label="Toggle fullscreen">&#x26f6;</button>
+        <button class="icon-btn" data-action="hide" title="Hide window">&#x2013;</button>
+      </div>
+    </header>
+
+    <div class="body">
+      <nav class="nav" id="nav">
+        <button class="nav-collapse" id="nav-collapse" type="button"
+                aria-controls="nav" aria-expanded="true" title="Collapse navigation">
+          <span class="collapse-glyph" aria-hidden="true">&#x2039;</span>
+          <span class="sr-only">Collapse navigation</span>
+        </button>
+        <!-- Tab buttons are injected here, above the spacer. -->
+        <div class="nav-spacer" id="nav-spacer"></div>
+        <button class="nav-btn" id="nav-demo" title="Component demo gallery">Demo</button>
+        <button class="nav-btn nav-tools" id="nav-tools" title="Quick tools">Quick tools</button>
+      </nav>
+      <main class="page" id="page"></main>
+      <aside class="chat-panel" id="chat-panel">
+        <div class="chat-resize" id="chat-resize"></div>
+        <div class="chat-inner" id="chat-inner"></div>
+        <button class="chat-collapse" id="chat-collapse" type="button"
+                aria-controls="chat-panel" aria-expanded="true" title="Collapse agent panel">
+          <span class="collapse-glyph" aria-hidden="true">&#x203a;</span>
+          <span class="sr-only">Collapse agent panel</span>
+        </button>
+      </aside>
+      <button class="phone-agent-backdrop" id="phone-agent-backdrop"
+              aria-label="Close agent chat"></button>
+    </div>
+
+    <nav class="phone-native-rail" id="phone-native-rail" aria-label="Monitor a PC app">
+      <button class="phone-native-btn active" data-native-app="aios" data-native-label="aiOS" title="aiOS">ai</button>
+      <button class="phone-native-btn" data-native-app="codex" data-native-label="Codex" title="Codex">Cx</button>
+      <button class="phone-native-btn" data-native-app="claude" data-native-label="Claude" title="Claude">Cl</button>
+      <button class="phone-native-btn" data-native-app="cursor" data-native-label="Cursor" title="Cursor">Cu</button>
+    </nav>
+    <section class="phone-native-viewer" id="phone-native-viewer" aria-live="polite">
+      <header>
+        <span class="phone-native-name" id="phone-native-name"></span>
+        <span class="phone-native-title" id="phone-native-title"></span>
+        <span class="phone-native-readonly">VIEW ONLY</span>
+      </header>
+      <div class="phone-native-stage">
+        <img id="phone-native-frame" alt="Live native coding application window">
+        <div class="phone-native-message" id="phone-native-message">Connecting to the PC window…</div>
+      </div>
+    </section>
+
+    <!-- Quick tools: a nav entry at the bottom of the rail, not a full-width
+         tray. It opens this popover next to the button. -->
+    <div class="quick-tools" id="quick-tools" hidden>
+      <div class="quick-tools-head">QUICK TOOLS</div>
+      <div class="quick-tools-list" id="quick-tools-list"></div>
+      <div class="quick-tools-status" id="quick-tools-status">Ready</div>
+    </div>
+
+    <div class="resize-grip" id="resize-grip"></div>
+  </div>
+</div>
+
+<script type="module" src="js/app.js"></script>
+</body>
+</html>

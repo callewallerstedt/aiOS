@@ -26,7 +26,7 @@ BOX_TOOLS = ["shell", "read_file", "write_file", "list_dir", "processes"]
 OPERATOR_TOOLS = ["operator", "operator_say", "operator_screenshot",
                   "operator_stop", "operator_takeover", "handoff"]
 CODE_TOOLS = ["code_session", "code_status", "code_stop", "code_configs",
-              "code_reply", "machines"]
+              "code_reply", "code_continue", "machines"]
 # Reach onto the paired machine. Looking is free; `machine_shell` runs there
 # and is approval-gated like the local shell.
 MACHINE_TOOLS = ["machine_dirs", "machine_find", "machine_read", "machine_shell"]
@@ -48,6 +48,9 @@ How to be useful here:
 * Do the thing. You have a shell, a browser, a screen you can drive, and the
   Windows desktop for coding work. Reach for them instead of describing what
   could be done.
+* Treat the Linux Operator desktop as your persistent computer: its browser
+  profile, tabs and signed-in sessions survive between requests. Inspect and
+  continue the state already on screen instead of reopening the same workflow.
 * Look things up with `web_search` and `web_fetch`. Those are for the public
   web and are much faster than driving the operator browser. Use the operator
   only when the page needs a login or a real click.
@@ -125,6 +128,9 @@ The operator:
   steering note and must not become a question inside the operator loop.
 * It reports back here when it finishes. Say what it found, including when it
   got stuck, and use `operator_screenshot` if he asks what is on screen now.
+* If it stops for no progress, do not silently launch the same task again.
+  Inspect the reported state, choose a materially different route, or ask one
+  concrete question.
 
 CODE sessions:
 
@@ -136,6 +142,10 @@ CODE sessions:
   follows from what Calle already asked for, otherwise put the question to him
   with `ask_yes_no` or `ask_user` and pass his answer through with `code_reply`.
   Never leave a session waiting and never let it look like it is still working.
+* When Calle adds related work, call `code_continue` with the prior job id. It
+  reuses the same logical/native session whether the prior turn is active or
+  finished, and attaches a fresh reporter when needed. Use `code_session` only
+  for unrelated work or when he explicitly asks to start fresh.
 * Before calling `code_session`, always ask which model configuration / provider
   to use — unless Calle already named one in this turn. Recommend
   **Balanced Engineering** (`harness-balanced-engineering`) as the default.
@@ -181,6 +191,8 @@ CODER_PROMPT = """You are **Coder**, the one who ships code.
 Coding work runs on Calle's Windows desktop through the aiOS CODE harness,
 where the repositories and the provider CLIs live. Start a session with
 `code_session`, describe the change precisely, and report what came back.
+Continue related work with `code_continue`; do not throw away the existing
+session context just because its previous turn finished.
 
 Before every `code_session`, ask which model configuration / provider to use
 unless Calle already named one this turn. Recommend **Balanced Engineering**
@@ -338,11 +350,11 @@ def tools_for(agent: dict) -> list[str]:
     # agents keep their curated tool sets but still gain the ability to find
     # and talk to the rest of the house.
     base = names or DIRECTOR_TOOLS
-    # Stopping is part of CODE control, not a persona preference. Custom agents
-    # created before code_stop existed must not be able to launch and poll a job
-    # while being unable to obey a direct "stop it" request.
+    # Stop/continue are part of CODE control, not persona preferences. Custom
+    # agents created before these tools existed must not be able to launch a
+    # session while being unable to stop or continue it correctly.
     if any(name in base for name in ("code_session", "code_status")):
-        base = list(base) + ["code_stop"]
+        base = list(base) + ["code_stop", "code_continue"]
     return list(dict.fromkeys(base + COMMUNICATION_TOOLS))
 
 

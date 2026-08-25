@@ -137,7 +137,20 @@ def agent_settings():
     voice = config.get("voice_dictation")
     if isinstance(voice, dict):
         settings.update({key: value for key, value in voice.items() if key in settings})
-    settings["api_key"] = str(config.get("openai_api_key") or os.environ.get("OPENAI_API_KEY") or "").strip()
+    model = str(settings.get("agent_model") or DEFAULT_AGENT_SETTINGS["agent_model"])
+    if model.startswith("openrouter:"):
+        import openrouter_client
+
+        settings["provider"] = "openrouter"
+        settings["api_base"] = openrouter_client.API_BASE
+        settings["api_key"] = openrouter_client.get_api_key(config=config)
+        settings["agent_model"] = model.split(":", 1)[1]
+    else:
+        settings["provider"] = "openai"
+        settings["api_base"] = ""
+        settings["api_key"] = str(
+            config.get("openai_api_key") or os.environ.get("OPENAI_API_KEY") or ""
+        ).strip()
     settings["config"] = config
     return settings
 
@@ -401,6 +414,7 @@ class VoiceAgent:
         self._hide_requested = False
         self._client = None
         self._client_key = ""
+        self._plan = []
         # The conversation itself: user turns, what the tools did, and the
         # replies. This is what gets replayed to the model every turn.
         self.turns = []
@@ -436,15 +450,19 @@ class VoiceAgent:
         except Exception as exc:
             log_event(f"event callback failed: {exc}")
 
-    def _ensure_client(self, api_key):
+    def _ensure_client(self, api_key, base_url=""):
         if not api_key:
-            raise RuntimeError("No OpenAI API key — set it in aiOS Settings.")
-        if self._client is not None and self._client_key == api_key:
+            raise RuntimeError("No API key — set it in aiOS Settings.")
+        client_key = f"{base_url}|{api_key}"
+        if self._client is not None and self._client_key == client_key:
             return self._client
         from openai import OpenAI
 
-        self._client = OpenAI(api_key=api_key)
-        self._client_key = api_key
+        options = {"api_key": api_key}
+        if base_url:
+            options["base_url"] = base_url
+        self._client = OpenAI(**options)
+        self._client_key = client_key
         return self._client
 
     def warmup(self):
@@ -453,7 +471,7 @@ class VoiceAgent:
         key = str(settings.get("api_key") or "").strip()
         if not key:
             return False
-        self._ensure_client(key)
+        self._ensure_client(key, str(settings.get("api_base") or ""))
         return True
 
     def reset(self):
@@ -872,7 +890,41 @@ class VoiceAgent:
     def _tools(self, settings):
         tools = []
         if settings.get("agent_web_search"):
-            tools.append({"type": "web_search"})
+            tools.append({
+                "type": "openrouter:web_search" if settings.get("provider") == "openrouter" else "web_search"
+            })
+        tools.append(
+            {
+                "type": "function",
+                "name": "update_plan",
+                "description": (
+                    "Create or update the visible task plan. Use for work with multiple meaningful steps; "
+                    "keep at most one step in_progress and mark finished steps completed."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "steps": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "step": {"type": "string"},
+                                    "status": {
+                                        "type": "string",
+                                        "enum": ["pending", "in_progress", "completed"],
+                                    },
+                                },
+                                "required": ["step", "status"],
+                                "additionalProperties": False,
+                            },
+                        }
+                    },
+                    "required": ["steps"],
+                    "additionalProperties": False,
+                },
+            }
+        )
         if settings.get("agent_open_apps"):
             tools.append(
                 {
@@ -1491,6 +1543,7 @@ class VoiceAgent:
 
     def _execute(self, name, arguments):
         handler = {
+            "update_plan": self._tool_update_plan,
             "open_app": self._tool_open_app,
             "open_url": self._tool_open_url,
             "run_powershell": self._tool_run_powershell,
@@ -1547,6 +1600,25 @@ class VoiceAgent:
         except Exception as exc:
             log_event(f"tool {name} failed: {exc}")
             return f"tool failed: {exc}"
+
+    def _tool_update_plan(self, arguments):
+        rows = arguments.get("steps") if isinstance(arguments, dict) else []
+        plan = []
+        active_seen = False
+        for row in rows if isinstance(rows, list) else []:
+            if not isinstance(row, dict):
+                continue
+            step = str(row.get("step") or "").strip()
+            status = str(row.get("status") or "pending").strip().casefold()
+            if not step or status not in {"pending", "in_progress", "completed"}:
+                continue
+            if status == "in_progress":
+                if active_seen:
+                    status = "pending"
+                active_seen = True
+            plan.append({"step": step[:300], "status": status})
+        self._plan = plan[:20]
+        return json.dumps({"ok": True, "steps": self._plan}, ensure_ascii=False)
 
     def _tool_open_app(self, arguments):
         wanted = str(arguments.get("name") or "").strip()
@@ -3022,13 +3094,32 @@ class VoiceAgent:
             reasoning = str(overrides.get("agent_reasoning") or "").strip().lower()
             if reasoning in {"minimal", "low", "medium", "high", "xhigh"}:
                 settings["agent_reasoning"] = reasoning
+            picked = str(overrides.get("agent_model") or "").strip()
+            if picked:
+                # The sidebar's per-turn pick wins over the saved default. It
+                # still goes through the same openrouter:/plain routing below.
+                settings["agent_model"] = picked
+                if picked.startswith("openrouter:"):
+                    import openrouter_client
+
+                    settings["provider"] = "openrouter"
+                    settings["api_base"] = openrouter_client.API_BASE
+                    settings["api_key"] = openrouter_client.get_api_key(config=settings.get("config") or {})
+                    settings["agent_model"] = picked.split(":", 1)[1]
+                else:
+                    settings["provider"] = "openai"
+                    settings["api_base"] = ""
+                    settings["api_key"] = str(
+                        (settings.get("config") or {}).get("openai_api_key")
+                        or os.environ.get("OPENAI_API_KEY") or ""
+                    ).strip()
         used_tools = []
         tool_trace = []
         tool_details = []
         self._hide_requested = False
         self._pending_images = []
         try:
-            client = self._ensure_client(settings["api_key"])
+            client = self._ensure_client(settings["api_key"], settings.get("api_base", ""))
         except Exception as exc:
             log_event(f"client unavailable: {exc}")
             return AgentResult(error=str(exc))
@@ -3061,7 +3152,7 @@ class VoiceAgent:
                     "previous_response_id": previous_id,
                     "max_output_tokens": 1500,
                 }
-                if settings.get("agent_web_search"):
+                if settings.get("agent_web_search") and settings.get("provider") != "openrouter":
                     # Include the actual searches, sources and result records so
                     # the sidebar can inspect the web call in full.
                     request_options["include"] = [
@@ -3257,6 +3348,8 @@ class VoiceAgent:
             return "searching the web"
         if name == "read_clipboard":
             return "reading the clipboard"
+        if name == "update_plan":
+            return "updating the plan"
         if name == "read_screen":
             return f"looking at screen {arguments.get('screen') or 'all'}"
         if name == "click_screen":

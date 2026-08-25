@@ -17,6 +17,10 @@ PLANNED_CONTEXT_TOKENS: Final = 65_536
 DISTRIBUTED_CONTEXT_TOKENS: Final = 131_072
 MIN_OUTPUT_RESERVE_TOKENS: Final = 16_384
 OUTPUT_RESERVE_RATIO: Final = 0.15
+# The fixed floor above is sized for cloud windows. On a local 32k model it
+# would withhold half the context for a reply the model will never write, so
+# the floor is itself capped at a share of the window.
+MAX_OUTPUT_RESERVE_RATIO: Final = 0.25
 
 _STRATEGY_OVERRIDES: Final = {
     "[direct]": "direct",
@@ -323,13 +327,24 @@ def resolve_model_profile(model: str, context_tokens: int = 0) -> ModelProfile:
     is_step_37 = "step37" in compact
     is_gemini = "gemini" in compact
     is_deepseek = "deepseek" in compact
+    # Real Ollama tags are `qwen3:14b` or `hf.co/unsloth/...:UD-Q2_K_XL`, and
+    # none of them start with the prefixes this used to look for -- so every
+    # locally served model was classified as an unknown cloud model and lost the
+    # handling meant for it. A hosted id always carries a vendor slash and no
+    # colon outside it; a bare `name:tag` does not.
+    head = normalized.split("/", 1)[0]
     is_local = (
-        normalized.startswith(("local/", "ollama/", "lmstudio/"))
+        normalized.startswith(("local/", "ollama/", "lmstudio/", "hf.co/", "huggingface.co/"))
         or "localhost" in normalized
         or "127.0.0.1" in normalized
+        or (":" in head and "/" not in head)
     )
 
-    robust_replace = is_deepseek_v4_flash or is_mimo or is_kimi or is_step_37
+    # A quantized local model reproduces `old_text` imperfectly far more often
+    # than a hosted one -- a stray space costs it the edit and buys another
+    # read/retry cycle it can barely afford at 32k. Give it the same forgiving
+    # matcher the replacement-heavy families already use.
+    robust_replace = is_deepseek_v4_flash or is_mimo or is_kimi or is_step_37 or is_local
     recognized = robust_replace or is_gemini or is_deepseek or is_local
 
     return ModelProfile(
@@ -366,8 +381,10 @@ def context_budget(strategy: TaskStrategy | str, context_tokens: int) -> Context
     metadata does not expose a window. Once the actual model window is known,
     task routing must not introduce a second artificial context ceiling: doing
     so made long tool turns compact at 32k/65k even on million-token models.
-    For known windows, at least 15 percent or 16,384 tokens (whichever is
-    smaller than the window) is withheld for the model's next response.
+    For known windows, 15 percent or 16,384 tokens (whichever is larger) is
+    withheld for the model's next response, but never more than a quarter of
+    the window: on a 32k local model the flat floor alone was taking half of
+    it, which left too little history to finish reading a single file.
     """
 
     selected = strategy if isinstance(strategy, TaskStrategy) else _strategy(str(strategy).strip().lower(), ["context budget lookup"])
@@ -379,7 +396,11 @@ def context_budget(strategy: TaskStrategy | str, context_tokens: int) -> Context
             output_reserve_tokens=0,
         )
 
-    reserve = min(window, max(MIN_OUTPUT_RESERVE_TOKENS, math.ceil(window * OUTPUT_RESERVE_RATIO)))
+    reserve = min(
+        window,
+        max(MIN_OUTPUT_RESERVE_TOKENS, math.ceil(window * OUTPUT_RESERVE_RATIO)),
+        max(1, math.ceil(window * MAX_OUTPUT_RESERVE_RATIO)),
+    )
     working = max(0, window - reserve)
     return ContextBudget(
         window_tokens=window,

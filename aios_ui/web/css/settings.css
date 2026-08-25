@@ -1,0 +1,326 @@
+/* The Settings tab. Card per group, one row per field, hint under the row --
+   the same shape as settings_group / settings_field in the Tk build. */
+
+.settings-root {
+  display: flex;
+  gap: 14px;
+  height: 100%;
+  min-height: 0;
+}
+
+.settings-rail {
+  flex: 0 0 132px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.settings-nav-btn {
+  text-align: left;
+  padding: 8px 10px;
+  border-radius: calc(var(--global-radius) * 0.8);
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 600;
+  transition: color var(--fast) var(--ease), background var(--fast) var(--ease);
+}
+.settings-nav-btn:hover { color: var(--text); background: var(--panel2); }
+.settings-nav-btn.active { color: #fff; background: var(--accent); }
+
+.settings-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.settings-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 0 4px 8px;
+}
+.settings-hint { font-size: 10px; color: var(--muted); }
+.settings-status {
+  margin-left: auto;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--success);
+}
+.settings-status.problem { color: var(--danger); }
+
+.settings-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 6px 20px 4px;
+}
+
+/* ------------------------------------------------------------------ groups */
+
+.settings-group {
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  border-radius: calc(var(--global-radius) * 1.4);
+  padding: 12px 14px 10px;
+  margin-bottom: 12px;
+}
+.settings-group-title { font-size: 12px; font-weight: 700; }
+.settings-group-hint {
+  font-size: 9.5px;
+  color: var(--muted);
+  line-height: 1.55;
+  margin-top: 2px;
+}
+.settings-group-body { margin-top: 8px; }
+
+.settings-row { padding: 7px 0; }
+.settings-row + .settings-row { border-top: 1px solid var(--border-soft); }
+.settings-row-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 26px;
+}
+.settings-label {
+  flex: 0 0 130px;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--text);
+}
+.settings-field {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.settings-row-hint {
+  margin: 3px 0 0 142px;
+  font-size: 9px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+.settings-note {
+  font-size: 9.5px;
+  color: var(--muted);
+  line-height: 1.6;
+  margin-top: 8px;
+}
+.settings-bullet { font-size: 10px; color: var(--muted); padding: 2px 0; }
+
+.settings-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+.settings-inline-status { font-size: 9.5px; color: var(--muted); }
+
+/* ---------------------------------------------------------------- controls */
+
+.settings-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 340px;
+  font-size: 10.5px;
+  padding: 6px 8px;
+}
+.settings-input.mono { font-family: var(--font-mono); font-size: 10px; }
+
+.settings-select {
+  min-width: 150px;
+  max-width: 340px;
+  font-size: 10.5px;
+  padding: 6px 8px;
+}
+
+.settings-textarea {
+  width: 100%;
+  max-width: 340px;
+  min-height: 66px;
+  font-size: 10px;
+  font-family: var(--font-mono);
+}
+
+/* A real switch, not a checkbox -- it reads at a glance across 30 of them. */
+.settings-toggle { display: inline-flex; cursor: pointer; }
+.settings-toggle input { position: absolute; opacity: 0; pointer-events: none; }
+.settings-toggle-track {
+  width: 34px;
+  height: 18px;
+  border-radius: 9px;
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  position: relative;
+  transition: background var(--fast) var(--ease), border-color var(--fast) var(--ease);
+}
+.settings-toggle-track::after {
+  content: "";
+  position: absolute;
+  top: 2px; left: 2px;
+  width: 12px; height: 12px;
+  border-radius: 50%;
+  background: var(--muted);
+  transition: transform var(--fast) var(--ease), background var(--fast) var(--ease);
+}
+.settings-toggle input:checked + .settings-toggle-track {
+  background: var(--accent);
+  border-color: transparent;
+}
+.settings-toggle input:checked + .settings-toggle-track::after {
+  background: #fff;
+  transform: translateX(16px);
+}
+
+.settings-slider-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1 1 auto;
+}
+.settings-slider-row input[type="range"] {
+  flex: 1 1 auto;
+  max-width: 240px;
+  accent-color: var(--accent);
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+}
+.settings-slider-value {
+  min-width: 46px;
+  font-size: 10.5px;
+  font-weight: 700;
+  font-family: var(--font-mono);
+  color: var(--accent);
+}
+.settings-radius-value {
+  flex: 0 0 72px;
+  width: 72px;
+  min-width: 0;
+  padding: 5px 7px;
+  text-align: right;
+  color: var(--accent);
+  font: 700 10.5px/1 var(--font-mono);
+}
+
+/* ------------------------------------------------------------------ colors */
+
+.settings-color-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 0;
+}
+.settings-color-row + .settings-color-row { border-top: 1px solid var(--border-soft); }
+.settings-color-label {
+  flex: 0 0 130px;
+  font-size: 10.5px;
+  font-weight: 600;
+}
+.settings-color-swatch {
+  flex: 0 0 auto;
+  width: 34px;
+  height: 24px;
+  padding: 2px;
+  border-radius: calc(var(--global-radius) * 0.6);
+  border: 1px solid var(--border);
+  background: var(--panel2);
+  cursor: pointer;
+}
+.settings-color-swatch::-webkit-color-swatch-wrapper { padding: 0; }
+.settings-color-swatch::-webkit-color-swatch {
+  border: none;
+  border-radius: calc(var(--global-radius) * 0.4);
+}
+.settings-color-hex { max-width: 110px; flex: 0 0 110px; }
+
+/* ------------------------------------------------------------ model lists */
+
+.settings-list-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 12px 0 6px;
+}
+.settings-list-title { font-size: 10.5px; font-weight: 700; }
+.settings-list-head .btn { margin-left: auto; }
+
+.settings-model-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+.settings-model-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 5px 7px;
+  border-radius: calc(var(--global-radius) * 0.6);
+  cursor: pointer;
+}
+.settings-model-row:hover { background: var(--panel2); }
+.settings-model-row input { accent-color: var(--accent); width: 14px; height: 14px; padding: 0; }
+.settings-model-copy { min-width: 0; }
+.settings-model-copy b { display: block; font-size: 10px; font-weight: 600; }
+.settings-model-copy i {
+  display: block;
+  font-size: 9px;
+  font-style: normal;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* -------------------------------------------------------------- macro pad */
+
+.macro-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 9px;
+  margin-bottom: 4px;
+  background: var(--panel2);
+  border-radius: calc(var(--global-radius) * 0.6);
+  font-size: 10px;
+}
+.macro-row code { font-family: var(--font-mono); font-size: 10px; flex: 0 0 200px; }
+.macro-row.missing code { color: var(--danger); }
+.macro-hint { color: var(--muted); font-size: 9px; flex: 1 1 auto; min-width: 0; }
+.macro-status { font-size: 9px; font-weight: 700; color: var(--success); }
+.macro-row.missing .macro-status { color: var(--danger); }
+
+/* ---------------------------------------------------------------- updater */
+
+.settings-update-status { font-size: 10px; color: var(--muted); margin-top: 8px; }
+.settings-update-log {
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  max-height: 140px;
+  overflow-y: auto;
+  background: color-mix(in srgb, var(--surface) 60%, black);
+  border-radius: calc(var(--global-radius) * 0.6);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--muted);
+  white-space: pre-wrap;
+  user-select: text;
+}
+.settings-update-log:empty { display: none; }
+
+/* Hotkey capture modal */
+.capture-key {
+  margin-top: 12px;
+  padding: 14px;
+  text-align: center;
+  border-radius: calc(var(--global-radius) * 0.8);
+  background: var(--panel2);
+  border: 1px dashed var(--border);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--accent);
+}

@@ -218,7 +218,36 @@ def _normalize_model(row: Any) -> dict[str, Any] | None:
         return None
     model_id = str(row["id"]).strip()
     context = int(row.get("context_length") or (row.get("top_provider") or {}).get("context_length") or 0)
-    reasoning = ["off", "low", "medium", "high", "xhigh"] if "reasoning" in supported else ["off"]
+    reasoning_info = row.get("reasoning") if isinstance(row.get("reasoning"), dict) else {}
+    supports_effort = "reasoning_effort" in supported
+    supports_reasoning_toggle = "reasoning" in supported
+    advertised_efforts = [
+        ("off" if str(value).strip().casefold() == "none" else str(value).strip().casefold())
+        for value in reasoning_info.get("supported_efforts") or []
+        if str(value).strip()
+    ]
+    if supports_effort or advertised_efforts:
+        reasoning = list(dict.fromkeys(advertised_efforts or ["low", "medium", "high", "xhigh"]))
+        if not reasoning_info.get("mandatory") and "off" not in reasoning:
+            reasoning.insert(0, "off")
+    elif supports_reasoning_toggle:
+        # A generic `reasoning` capability does not promise support for the
+        # `reasoning.effort` enum. Expose the toggle the provider actually
+        # advertises instead of inventing four unsupported effort levels.
+        reasoning = ["on"] if reasoning_info.get("mandatory") else ["off", "on"]
+    else:
+        reasoning = ["off"]
+    advertised_default = str(reasoning_info.get("default_effort") or "").strip().casefold()
+    if advertised_default == "none":
+        advertised_default = "off"
+    default_reasoning = (
+        advertised_default
+        if advertised_default in reasoning
+        else (
+            "off" if "off" in reasoning
+            else ("medium" if "medium" in reasoning else reasoning[0])
+        )
+    )
     description = str(row.get("description") or "").strip().split("\n", 1)[0]
     if context:
         description = f"{context // 1000:,}K context" + (f" · {description}" if description else "")
@@ -228,7 +257,7 @@ def _normalize_model(row: Any) -> dict[str, Any] | None:
         "short_label": str(row.get("name") or model_id),
         "description": description[:220],
         "reasoning": reasoning,
-        "default_reasoning": "off" if reasoning == ["off"] else "medium",
+        "default_reasoning": default_reasoning,
         # OpenRouter's dynamic :nitro routing is supported on every model.
         # aiOS sends the equivalent provider.sort=throughput request setting.
         "fast": True,
@@ -344,9 +373,12 @@ def catalog_models(*, refresh: bool = False, limit: int = 80) -> list[dict[str, 
             # the moment the catalog refreshed.
             live.update({
                 key: curated[key]
-                for key in ("label", "short_label", "scout", "planner", "default_reasoning")
+                for key in ("label", "short_label", "scout", "planner")
                 if key in curated
             })
+            curated_default = str(curated.get("default_reasoning") or "")
+            if curated_default in (live.get("reasoning") or []):
+                live["default_reasoning"] = curated_default
             # Curated entries carry `label` only. Without this the live
             # short_label survives and wins downstream, so the picker showed
             # "DeepSeek: DeepSeek V4 Flash 0423" for an entry named to be read.
@@ -543,30 +575,54 @@ def headers(api_key: str) -> dict[str, str]:
     }
 
 
+def _reasoning_control(model: str) -> str:
+    """Return the reasoning control the live model metadata actually supports."""
+    model_id = str(model or "").strip()
+    cached = _MODEL_CACHE if _MODEL_CACHE is not None else _read_model_cache()
+    for row in cached:
+        if str(row.get("id") or "") != model_id:
+            continue
+        supported = {str(value) for value in row.get("supported_parameters") or []}
+        if not supported:
+            return "effort"
+        if "reasoning_effort" in supported:
+            return "effort"
+        if "reasoning" in supported:
+            return "toggle"
+        return "none"
+    # Curated and manually configured models predate live capability metadata.
+    # Keep their established effort behavior until OpenRouter provides facts.
+    return "effort"
+
+
 def reasoning_payload(model: str, reasoning: str | bool) -> dict[str, Any] | None:
-    """Map aiOS reasoning levels onto OpenRouter's reasoning.effort field."""
+    """Map aiOS reasoning onto the model's advertised OpenRouter control."""
+    control = _reasoning_control(model)
+    if control == "none":
+        return None
     if isinstance(reasoning, bool):
-        if not reasoning:
+        enabled = reasoning
+        if control == "toggle":
+            return {"enabled": enabled}
+        if not enabled:
             return {"effort": "none"}
         effort = "high"
     else:
         level = str(reasoning or "").strip().lower()
+        enabled = level not in {"", "off", "none", "false", "0"}
+        if control == "toggle":
+            return {"enabled": enabled}
         if level in {"", "off", "none", "false", "0"}:
             # Omitting the field means provider default, which can still emit
             # large reasoning traces.  "Off" must be an explicit request.
             return {"effort": "none"}
-        if level in {"xhigh", "max", "ultra"}:
-            effort = "xhigh"
-        elif level in {"high"}:
-            effort = "high"
-        elif level in {"medium"}:
-            effort = "medium"
-        elif level in {"low", "minimal"}:
-            effort = "low"
+        if level in {"minimal", "low", "medium", "high", "xhigh", "max", "ultra"}:
+            # The picker exposes only efforts from live model metadata. Preserve
+            # that exact contract: minimal/ultra are distinct provider values,
+            # not aliases for low/xhigh.
+            effort = level
         else:
             effort = "medium"
-    # DeepSeek V4 Flash documents high/xhigh; still send low/medium when chosen.
-    _ = model
     return {"effort": effort}
 
 

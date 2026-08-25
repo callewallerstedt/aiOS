@@ -320,10 +320,22 @@ def _thread_payload(thread_id: str, runtime: runtime_mod.Runtime | None = None) 
         stored_status = str(thread.get("status") or "idle")
         thread["status"] = (stored_status if stored_status in {"running", "waiting"}
                             else "running") if busy else "idle"
-    messages = store.list_messages(thread_id)
+    messages = store.list_messages(thread_id, newest=True)
+    # Tool-result cards were persisted when a background job started. Rehydrate
+    # their identity/status from the authoritative job row so reopening a task
+    # cannot resurrect a stale "running" Operator card after completion or a
+    # Director restart.
+    for message in messages:
+        if message.get("role") != "tool_result":
+            continue
+        meta = dict(message.get("meta") or {})
+        card = meta.get("card")
+        if not isinstance(card, dict) or not card.get("job_id"):
+            continue
+        meta["card"] = runtime_mod.Runtime.canonical_job_card(card)
+        message["meta"] = meta
     through = int(thread.get("compacted_through") or 0)
-    thread["hidden_count"] = sum(
-        1 for message in messages if int(message.get("sequence") or 0) <= through)
+    thread["hidden_count"] = store.count_messages_through(thread_id, through)
     working = runtime.working_from_group(thread_id) if runtime else []
     questions = runtime.pending_questions(thread_id) if runtime else []
     return {"thread": thread, "messages": messages, "working": working,
@@ -360,6 +372,21 @@ async def post_message(request: web.Request) -> web.Response:
     attachments = list(body.get("attachments") or [])
     if not text and not attachments:
         return error("empty message")
+    # Desktop clients can steer the brain per turn; the choice sticks on the
+    # agent so the phone and every other view see the same model.
+    picked_model = str(body.get("model") or "").strip()
+    picked_backend = str(body.get("backend") or "").strip()
+    picked_reasoning = str(body.get("reasoning") or "").strip()
+    if picked_model:
+        thread = store.get_thread(thread_id)
+        owner = store.get_agent(str((thread or {}).get("agent_id") or ""))
+        if owner and not store.is_group(owner):
+            patch = {"model": picked_model}
+            if picked_backend:
+                patch["backend"] = picked_backend
+            if picked_reasoning in {"minimal", "low", "medium", "high", "xhigh"}:
+                patch["reasoning"] = picked_reasoning
+            store.update_agent(owner["id"], patch)
     try:
         message = await runtime.send_message(thread_id, text, attachments)
     except ValueError as exc:
@@ -557,9 +584,14 @@ async def job_events(request: web.Request) -> web.Response:
         since = max(0, int(request.query.get("since") or 0))
     except (TypeError, ValueError):
         since = 0
-    events = store.list_job_events(job["id"], since=since)
+    try:
+        limit = max(1, min(int(request.query.get("limit") or 100), 250))
+    except (TypeError, ValueError):
+        limit = 100
+    events = store.list_job_events(job["id"], since=since, limit=limit)
     return json_response({"ok": True, "job": job, "events": events,
-                          "cursor": events[-1]["id"] if events else since})
+                          "cursor": events[-1]["id"] if events else since,
+                          "limit": limit})
 
 
 @ROUTES.get("/api/jobs/{job_id}/code-events")
@@ -964,15 +996,151 @@ async def machine_job_update(request: web.Request) -> web.Response:
     job = store.get_job(job_id)
     if not job:
         return error("no such job", status=404)
+    if str(job.get("machine_id") or "") != str(machine.get("id") or ""):
+        return error("job belongs to a different machine", status=403)
     status = str(body.get("status") or "")
     result = dict(body.get("result") or {})
+    if not _code_generation_matches(job, result):
+        return error("stale CODE continuation report", status=409)
+    updated = job
     if status:
         previous = dict(job.get("result") or {})
-        store.update_job(job_id, status=status, result={**previous, **result})
+        updated = store.update_job(
+            job_id, status=status, result={**previous, **result}) or job
     runtime = request.app["runtime"]
+    _ensure_code_waiter(runtime, updated)
     await runtime.emit("code.progress", {"job_id": job_id, "status": status, **result},
                        thread_id=job.get("thread_id", ""), agent_id=job.get("agent_id", ""))
     return json_response({"ok": True})
+
+
+def _code_generation_matches(job: dict, payload: dict) -> bool:
+    """Reject a prior follower after a newer continuation owns the row."""
+    if job.get("kind") != "code":
+        return True
+    current = str((job.get("result") or {}).get("continuation_id") or "")
+    if not current:
+        return True
+    incoming = str(payload.get("continuation_id") or "")
+    return incoming == current
+
+
+async def _reattach_code_jobs(runtime: runtime_mod.Runtime, machine: dict) -> None:
+    """Restore machine-side followers and process-local waiters from the DB."""
+    from .tools import code as code_tools
+
+    machine_id = str(machine.get("id") or "")
+    # Query active states directly. A general newest-N query used to miss an
+    # older live session after enough newer terminal history accumulated.
+    rows_by_id: dict[str, dict] = {}
+    for state in ("running", "recovering"):
+        for row in store.list_jobs(
+                machine_id=machine_id, status=state, limit=10_000):
+            if row.get("kind") == "code":
+                rows_by_id[str(row.get("id") or "")] = row
+    rows = sorted(rows_by_id.values(),
+                  key=lambda row: float(row.get("created_at") or 0), reverse=True)
+    newest_by_session: dict[str, str] = {}
+    for candidate in store.list_jobs(machine_id=machine_id, limit=10_000):
+        candidate_result = dict(candidate.get("result") or {})
+        candidate_request = dict(candidate.get("request") or {})
+        candidate_session = str(candidate_result.get("session_id")
+                                or candidate_request.get("session_id") or "")
+        if candidate.get("kind") == "code" and candidate_session:
+            newest_by_session.setdefault(candidate_session, str(candidate.get("id") or ""))
+    claimed_sessions: set[str] = set()
+    for stored in rows:
+        if (stored.get("kind") != "code"
+                or str(stored.get("status") or "").lower() not in {"running", "recovering"}):
+            continue
+        result = dict(stored.get("result") or {})
+        session_id = str(result.get("session_id") or "")
+        if not session_id:
+            result["summary"] = "Cannot recover CODE job: its session id was not stored."
+            store.update_job(stored["id"], status="stopped", result=result)
+            continue
+        newest_id = newest_by_session.get(session_id, stored["id"])
+        if newest_id != stored["id"] or session_id in claimed_sessions:
+            result["summary"] = "Superseded by the newer tracking job for this CODE session."
+            result["superseded_by"] = newest_id
+            store.update_job(stored["id"], status="stopped", result=result)
+            continue
+        claimed_sessions.add(session_id)
+        payload = {
+            "job_id": stored["id"],
+            "session_id": session_id,
+            "since": max(0, int(result.get("event_cursor") or 0)),
+            "meta": {
+                key: result.get(key)
+                for key in code_tools.CODE_METADATA_FIELDS if key in result
+            },
+        }
+        continuation_id = str(result.get("continuation_id") or "")
+        if continuation_id:
+            payload["continuation_id"] = continuation_id
+            payload["meta"]["continuation_id"] = continuation_id
+        remote = await runtime.call_machine(
+            machine_id, "code.follow", payload, timeout=20.0)
+        if not remote.get("ok"):
+            # Reattaching is idempotent and does not enqueue work.  One bounded
+            # retry covers a reconnect race without creating a permanent retry
+            # loop or an invisible `recovering` ghost.
+            await asyncio.sleep(1.0)
+            remote = await runtime.call_machine(
+                machine_id, "code.follow", payload, timeout=20.0)
+        if not remote.get("ok"):
+            reason = str(remote.get("error") or "CODE follower could not be reattached")
+            result["summary"] = f"CODE reattachment paused: {reason}"
+            unrecoverable = any(token in reason.lower() for token in (
+                "no such code session", "unknown code job", "no such session"))
+            state = "stopped" if unrecoverable else "incomplete"
+            if not unrecoverable:
+                result["summary"] = (
+                    f"CODE reporting paused after two reattachment attempts: {reason}. "
+                    "The remote session is preserved; check or continue it explicitly."
+                )
+            current = store.update_job(stored["id"], status=state, result=result) or stored
+            _ensure_code_waiter(runtime, current)
+            continue
+
+        # A final report could have landed while code.follow was in flight.
+        current = store.get_job(stored["id"]) or stored
+        if str(current.get("status") or "").lower() in code_tools.DIRECTOR_TERMINAL:
+            continue
+        current_result = dict(current.get("result") or {})
+        if str(current.get("status") or "").lower() == "recovering":
+            current_result["summary"] = "CODE session reattached and running."
+        current = store.update_job(
+            stored["id"], status="running", result=current_result) or current
+        _ensure_code_waiter(runtime, current)
+
+
+def _ensure_code_waiter(runtime: runtime_mod.Runtime, job: dict) -> bool:
+    """Attach the process-local reporter exactly once for a durable CODE row."""
+    if job.get("kind") != "code":
+        return False
+    from .tools import code as code_tools
+
+    async def wait_for_code(job_id: str = str(job.get("id") or "")) -> dict:
+        return await code_tools._await_completion(job_id)
+
+    # Runtime owns the compare-and-create operation; checking live_jobs here
+    # made two simultaneous reattach/status calls overwrite each other's task.
+    return bool(runtime.start_job(job, wait_for_code))
+
+
+def _persist_code_event_cursor(job: dict, payload: dict) -> int:
+    """Checkpoint the delivered offset, allowing an explicit log reset."""
+    previous = dict(job.get("result") or {})
+    try:
+        incoming = max(0, int(payload.get("size") or 0))
+        cursor = incoming if payload.get("reset") else max(
+            int(previous.get("event_cursor") or 0), incoming)
+    except (TypeError, ValueError):
+        cursor = int(previous.get("event_cursor") or 0)
+    previous["event_cursor"] = cursor
+    store.update_job(str(job.get("id") or ""), result=previous)
+    return cursor
 
 
 @ROUTES.get("/machine")
@@ -991,8 +1159,10 @@ async def machine_socket(request: web.Request) -> web.WebSocketResponse:
         async def send(self, payload: dict) -> None:
             await ws.send_json(payload)
 
-    runtime.attach_machine(machine["id"], Link())
+    link = Link()
+    runtime.attach_machine(machine["id"], link)
     await runtime.emit("machine.online", {"id": machine["id"], "name": machine["name"]})
+    recovery = asyncio.create_task(_reattach_code_jobs(runtime, machine))
     try:
         async for message in ws:
             if message.type != aiohttp.WSMsgType.TEXT:
@@ -1013,8 +1183,15 @@ async def machine_socket(request: web.Request) -> web.WebSocketResponse:
             elif kind == "event":
                 job_id = str(payload.get("job_id") or "")
                 job = store.get_job(job_id) or {}
+                if (not job or str(job.get("machine_id") or "")
+                        != str(machine.get("id") or "")):
+                    continue
                 event_kind = str(payload.get("kind") or "code.progress")
                 body = dict(payload.get("payload") or {})
+                if not _code_generation_matches(job, body):
+                    continue
+                if event_kind == "code.events":
+                    _persist_code_event_cursor(job, body)
                 await runtime.emit(event_kind, body,
                                    thread_id=job.get("thread_id", ""),
                                    agent_id=job.get("agent_id", ""))
@@ -1023,11 +1200,25 @@ async def machine_socket(request: web.Request) -> web.WebSocketResponse:
             elif kind == "job":
                 job_id = str(payload.get("job_id") or "")
                 existing = store.get_job(job_id) or {}
+                if (not existing or str(existing.get("machine_id") or "")
+                        != str(machine.get("id") or "")):
+                    continue
                 previous = dict(existing.get("result") or {})
                 incoming = dict(payload.get("result") or {})
-                store.update_job(job_id, status=str(payload.get("status") or "done"),
-                                 result={**previous, **incoming})
+                if not _code_generation_matches(existing, incoming):
+                    continue
+                updated = store.update_job(
+                    job_id, status=str(payload.get("status") or "done"),
+                    result={**previous, **incoming}) or existing
+                _ensure_code_waiter(runtime, updated)
     finally:
+        recovery.cancel()
+        try:
+            await recovery
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            print(f"[director] CODE reattachment failed: {exc}", flush=True)
         if runtime.detach_machine(machine["id"], link):
             await runtime.emit("machine.offline", {
                 "id": machine["id"], "name": machine["name"]})
@@ -1127,7 +1318,9 @@ async def _startup(app: web.Application) -> None:
         code = auth.new_pairing_code()
         print(f"[director] no devices paired yet — pairing code: {code['code']} "
               f"(valid {int(auth.CODE_TTL / 60)} minutes)", flush=True)
-    _release_orphaned_jobs()
+    released_operator_jobs = _release_orphaned_jobs()
+    for job, result in released_operator_jobs:
+        await app["runtime"]._report_job(job, result)
     _realign_wall_clock_routines()
     _catch_up_routines()
     app["runtime"].start_scheduler()
@@ -1141,19 +1334,49 @@ async def _startup(app: web.Application) -> None:
         print(f"[director] operator display not started: {exc}", flush=True)
 
 
-def _release_orphaned_jobs() -> None:
-    """Close out jobs whose waiter died with the last process.
+def _release_orphaned_jobs() -> list[tuple[dict, dict]]:
+    """Preserve recoverable CODE work while closing process-local jobs.
 
-    The task that polls a CODE job lives in memory, so a restart leaves the row
-    saying "running" forever. That is not cosmetic: it is what `code_reply`
-    picks when it looks for the live session, and what the phone draws as a
-    job still in flight.
+    CODE's real session lives on the paired machine and can outlive Director;
+    Operator and other jobs live in this process and cannot.  Recoverable CODE
+    rows are reattached when their machine reconnects.
     """
-    for row in store.list_jobs(status="running", limit=200):
-        result = dict(row.get("result") or {})
-        result.setdefault("summary", "Director restarted while this was running; "
-                                     "state unknown. Check with code_status.")
-        store.update_job(row["id"], status="stopped", result=result)
+    seen: set[str] = set()
+    released_operator_jobs: list[tuple[dict, dict]] = []
+    for status in ("running", "recovering"):
+        # Status-specific scans prevent a deep terminal history from hiding an
+        # older active row during restart recovery.
+        for row in store.list_jobs(status=status, limit=10_000):
+            if row["id"] in seen:
+                continue
+            seen.add(row["id"])
+            result = dict(row.get("result") or {})
+            session_id = str(result.get("session_id") or "")
+            if row.get("kind") == "code" and session_id and row.get("machine_id"):
+                result["summary"] = "Director restarted; reattaching this CODE session."
+                store.update_job(row["id"], status="recovering", result=result)
+                continue
+            result["summary"] = (
+                "Director restarted while this was running; the job had no "
+                "recoverable remote session."
+            )
+            result["status"] = "stopped"
+            store.update_job(row["id"], status="stopped", result=result)
+            if row.get("kind") == "operator":
+                payload = {
+                    "job_id": row["id"], "reason": result["summary"],
+                    "steps": int(result.get("steps") or 0),
+                }
+                store.add_event(
+                    "operator.stopped", payload,
+                    thread_id=str(row.get("thread_id") or ""),
+                    agent_id=str(row.get("agent_id") or ""))
+                store.add_event(
+                    "job.finished", {"id": row["id"], "kind": "operator", **result},
+                    thread_id=str(row.get("thread_id") or ""),
+                    agent_id=str(row.get("agent_id") or ""))
+                released_operator_jobs.append((row, result))
+    return released_operator_jobs
 
 
 def _catch_up_routines() -> None:

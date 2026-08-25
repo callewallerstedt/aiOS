@@ -786,6 +786,34 @@ def coding_page():
     return render_template("coding.html")
 
 
+@app.route("/code/settings")
+def coding_settings():
+    cfg = _load_helper_config()
+    return render_template("coding_settings.html",
+                           default_provider=cfg.get("code_default_provider", "openrouter"),
+                           default_model=cfg.get("code_default_model", "deepseek/deepseek-v4-flash"))
+
+
+@app.route("/api/code/settings", methods=["GET", "POST", "OPTIONS"])
+def api_code_settings():
+    if request.method == "OPTIONS":
+        return "", 204
+    cfg = _load_helper_config()
+    if request.method == "GET":
+        return jsonify({
+            "ok": True,
+            "code_default_provider": cfg.get("code_default_provider", "openrouter"),
+            "code_default_model": cfg.get("code_default_model", "deepseek/deepseek-v4-flash"),
+        })
+    data = request.get_json(silent=True) or {}
+    if "code_default_provider" in data:
+        cfg["code_default_provider"] = str(data["code_default_provider"]).strip()
+    if "code_default_model" in data:
+        cfg["code_default_model"] = str(data["code_default_model"]).strip()
+    _save_helper_config(cfg)
+    return jsonify({"ok": True})
+
+
 def _code_response(result: dict, success_status: int = 200):
     if result.get("ok"):
         return jsonify(result), success_status
@@ -951,7 +979,12 @@ def api_code_events(job_id):
                     with events_file.open("rb") as handle:
                         handle.seek(last_pos)
                         chunk = handle.read(size - last_pos)
-                    last_pos = size
+                    newline = chunk.rfind(b"\n")
+                    if newline < 0:
+                        time.sleep(0.05)
+                        continue
+                    chunk = chunk[:newline + 1]
+                    last_pos += len(chunk)
                     pending_events = []
                     for raw_line in chunk.splitlines():
                         try:
@@ -960,7 +993,7 @@ def api_code_events(job_id):
                             continue
                         pending_events.append(event)
                     for event in code_jobs.coalesce_events(pending_events):
-                        event["size"] = size
+                        event["size"] = last_pos
                         yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
                     idle_ticks = 0
                 else:

@@ -403,7 +403,8 @@ class AgentLoop:
               backend: str = "api", reasoning_effort: str | None = None,
               mid_screenshots: str = "key",
               attachments: list[dict] | None = None,
-              user_context: str = "", planner_model: str = ""):
+              user_context: str = "", planner_model: str = "",
+              web_search: bool = False):
         """mid_screenshots: 'off' | 'key' — capture an extra screenshot after
         each state-changing action so the next round sees the process trail.
 
@@ -436,7 +437,7 @@ class AgentLoop:
             target=self._run,
             args=(task, monitor, model, max_steps, action_delay, settle_after_step,
                   shell_enabled, shell_cwd, backend, reasoning_effort, mid_screenshots,
-                  attachments or [], user_context, planner_model),
+                  attachments or [], user_context, planner_model, web_search),
             daemon=True,
         )
         self._thread.start()
@@ -444,7 +445,8 @@ class AgentLoop:
     # -----------------------------------------------------------
 
     def _call_model(self, system, msgs, *, model, backend, reasoning_effort,
-                    timeout: float | None = None) -> tuple[str, dict]:
+                    timeout: float | None = None,
+                    web_search: bool = False) -> tuple[str, dict]:
         """`vlm.chat_raw` that cannot hang the run.
 
         The call happens on a throwaway worker thread. If it overruns we raise
@@ -462,7 +464,8 @@ class AgentLoop:
         def worker():
             try:
                 raw = vlm.chat_raw(system, msgs, model=model, backend=backend,
-                                   reasoning_effort=reasoning_effort)
+                                   reasoning_effort=reasoning_effort,
+                                   web_search=web_search)
                 box["result"] = (raw, vlm.take_last_usage())
             except BaseException as exc:  # noqa: BLE001 — re-raised on the loop thread
                 box["error"] = exc
@@ -497,7 +500,7 @@ class AgentLoop:
     def _run(self, task, monitor, model, max_steps, action_delay, settle_after_step,
              shell_enabled=False, shell_cwd=None, backend="api",
              reasoning_effort=None, mid_screenshots="key", attachments=None,
-             user_context="", planner_model=""):
+             user_context="", planner_model="", web_search=False):
         attachments = attachments or []
         my_gen = self._generation
 
@@ -753,6 +756,7 @@ class AgentLoop:
                         model=planner_model,
                         backend=backend,
                         reasoning_effort="high",
+                        web_search=web_search,
                     )
                     _add_usage(plan_usage)
                     plan_data = parse_plan(vlm.parse_json_lenient(raw_plan))
@@ -980,6 +984,7 @@ class AgentLoop:
                     raw, step_usage = self._call_model(
                         effective_system, msgs, model=model, backend=backend,
                         reasoning_effort=reasoning_effort,
+                        web_search=web_search,
                     )
                     _add_usage(step_usage)
                     rec.raw = raw
@@ -1055,6 +1060,7 @@ class AgentLoop:
                         task=task, plan=plan_data, closing=rec.message or rec.thought,
                         monitor=monitor, model=(planner_model or model), backend=backend,
                         add_usage=_add_usage, step_dir=sd,
+                        web_search=web_search,
                     )
                     if check:
                         self.on_event({"type": "verified", "n": n, **check})
@@ -1261,7 +1267,7 @@ class AgentLoop:
         self.on_event({"type": "click_fx", "x": x, "y": y, "button": button})
 
     def _verify_completion(self, *, task, plan, closing, monitor, model, backend,
-                           add_usage, step_dir=None) -> dict:
+                           add_usage, step_dir=None, web_search=False) -> dict:
         """Ask a second opinion whether the task is really finished.
 
         Returns {} when the check itself could not run — a broken checker must
@@ -1291,7 +1297,8 @@ class AgentLoop:
             ]
             raw, verify_usage = self._call_model(
                 VERIFIER_SYSTEM_PROMPT, [{"role": "user", "content": content}],
-                model=model, backend=backend, reasoning_effort="low")
+                model=model, backend=backend, reasoning_effort="low",
+                web_search=web_search)
             add_usage(verify_usage)
             parsed = vlm.parse_json_lenient(raw)
             verdict = str(parsed.get("verdict") or "").strip().lower()

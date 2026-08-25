@@ -1,0 +1,59 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<link rel="stylesheet" href="/css/theme.css">
+<link rel="stylesheet" href="/css/code.css">
+<link rel="stylesheet" href="/css/settings.css">
+<link rel="stylesheet" href="/css/code-beautiful.css">
+<style>body { background: var(--bui-bg, var(--surface)); margin: 0; }</style>
+</head><body>
+<div class="modal-backdrop models-backdrop show"><div class="modal models-modal">
+  <div class="models-head">
+    <div><div class="modal-title">Models</div>
+      <div class="models-sub">Who does what in a session, and on which model.</div></div>
+    <div><button class="btn compact ghost">Save config</button>
+      <button class="btn compact ghost">Done</button></div>
+  </div>
+  <div class="models-body">
+    <div class="models-roles" data-scroll="roles"></div>
+    <div class="models-vsplit"></div>
+    <div class="models-pick" data-scroll="pick"></div>
+  </div>
+  <div class="models-ssplit"></div>
+  <div class="models-saved" data-scroll="saved">
+    <div class="saved-title">Saved Model Configurations</div>
+    <div id="list"></div>
+  </div>
+</div></div>
+<script>
+const NAMES = ["Balanced Engineering","High Assurance","Direct Fast","Only Deepseek","Large Team",
+  "aiOS auto v3 - evidence-safe","Claude Code (raw)","Codex CLI (raw)","Hermes Agent (raw)",
+  "OMP same-model baseline","Fable Planner","Opus Planner","aiOS Auto v8 contract skip","Grok Test"];
+const MODELS = ["deepseek/deepseek-v4-flash-0731","anthropic/claude-sonnet-5","openai/gpt-5.6-sol","qwen/qwen3.8-max"];
+function row(name, i) {
+  const open = i === 2, applied = i === 0, runs = i % 3 === 0 ? (i + 2) : 0;
+  return `<div class="saved-config-card${open ? " open" : ""}${applied ? " applied" : ""}" data-config-id="c${i}">
+    <div class="saved-config-row">
+      <button class="saved-config-composer-toggle${i % 3 ? " on" : ""}" role="switch"><span></span></button>
+      <button class="saved-config-disclose" aria-expanded="${open}"><svg viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg></button>
+      <span class="saved-config-name">${name}</span>
+      <span class="saved-config-lead">${MODELS[i % MODELS.length]}${i % 2 ? "<i>+2</i>" : ""}</span>
+      ${runs ? `<span class="saved-config-runcount">${runs}</span>` : ""}
+      <span class="saved-config-actions">
+        <button class="btn mini ghost">Apply</button><button class="btn mini ghost">Edit</button>
+        <button class="btn mini ghost">Copy</button><button class="btn mini ghost">Bench</button>
+        <button class="btn mini ghost danger">Delete</button>
+      </span>
+    </div>
+    ${open ? `<div class="saved-config-detail">
+      <div class="saved-config-desc">Balanced cost and quality for day-to-day work.</div>
+      <div class="saved-config-models">OpenRouter · coder: deepseek/deepseek-v4-flash-0731 | reviewer: anthropic/claude-sonnet-5</div>
+      <div class="saved-config-flags"><span class="saved-config-strategy">AUTO · CODER-LED</span>
+        <span class="saved-config-strategy">review available</span></div>
+      <div class="saved-config-history"><b>3 runs</b>
+        <button class="saved-config-run"><span>run-1</span><i>done · 82</i></button>
+        <button class="saved-config-run"><span>run-2</span><i>done · 77</i></button></div>
+    </div>` : ""}
+  </div>`;
+}
+document.getElementById("list").innerHTML = NAMES.map(row).join("");
+</script></body></html>

@@ -1,3 +1,19 @@
+"""
+[DEPRECATED] The original Tkinter desktop overlay for aiOS.
+
+This file is replaced by aios_ui/ (WebView2-based shell). The new GUI provides
+the same tabs (Dashboard, Projects, CODE, Apps, Drop, OPERATOR, Settings) and
+runs all the same backends (code_jobs, voice_agent, phone_relay). New features,
+performance improvements, and future development happen in aios_ui/ only.
+
+To launch the new web GUI:
+    python aios_shell.py          -- launches the WebView2 panel (no terminal)
+    python launch_aios.py          -- kills any old instance, starts fresh
+
+This file is kept for reference and as a fallback for anyone still using a
+macropad or startup item that calls `python helper_overlay.py` directly.
+"""
+
 import argparse
 import ctypes
 from ctypes import wintypes
@@ -43,6 +59,7 @@ from voice_settings import (
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "helper_config.json"
+CONFIG_BACKUP_PATH = BASE_DIR / "helper_config.json.bak"
 PROJECT_META_FILE = "aios-project.json"
 PROJECT_SUMMARY_FILE = "aios-summary.md"
 DEFAULT_PROJECT_META = {
@@ -91,6 +108,8 @@ CODE_PROVIDER_CHOICES = (
     ("codex", "chatgpt.png", "ChatGPT Codex"),
     ("claude", "claude.png", "Claude"),
     ("cursor", "cursor.png", "Cursor"),
+    ("ollama", "ollama.png", "Ollama local"),
+    ("openrouter", "openrouter.png", "OpenRouter"),
 )
 APP_USER_MODEL_ID = "aiOS.Desktop.Helper"
 APP_MUTEX_NAME = "Local\\aiOS.Desktop.Helper.Singleton"
@@ -218,6 +237,10 @@ class NativeOperatorOverlay:
         self.log_title = log_title
         self.compact = bool(compact)
         self.placements = {}
+        self._last_alpha = {}
+        self._gdi_cache = {}
+        self._gdi_theme_key = None
+        self.visible = False
         self.enabled = sys.platform.startswith("win")
         self._wndproc = None
         if self.enabled:
@@ -237,6 +260,10 @@ class NativeOperatorOverlay:
             wintypes.UINT,
         ]
         self.user32.SetWindowPos.restype = wintypes.BOOL
+        self.gdi32.CreateSolidBrush.argtypes = [wintypes.DWORD]
+        self.gdi32.CreateSolidBrush.restype = wintypes.HANDLE
+        self.gdi32.CreateFontW.restype = wintypes.HANDLE
+        self.gdi32.SelectObject.restype = wintypes.HANDLE
 
         wndproc_type = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, wintypes.HWND, wintypes.UINT, ctypes.c_size_t, ctypes.c_ssize_t)
 
@@ -314,7 +341,7 @@ class NativeOperatorOverlay:
         if self.compact:
             log_w = min(520, max(360, int(width * 0.30)))
             log_h = min(150, max(112, int(height * 0.14)))
-            self.placements = {
+            placements = {
                 "log": (
                     left + width - inset - log_w - 18,
                     top + height - inset - log_h - 24,
@@ -327,7 +354,7 @@ class NativeOperatorOverlay:
             label_w = min(560, max(280, width - 120))
             log_w = min(580, max(360, int(width * 0.34)))
             log_h = min(190, max(120, int(height * 0.20)))
-            self.placements = {
+            placements = {
                 "top": (left + inset, top + inset, max(1, width - inset * 2), border),
                 "bottom": (left + inset, top + height - inset - border, max(1, width - inset * 2), border),
                 "left": (left + inset, top + inset, border, max(1, height - inset * 2)),
@@ -335,8 +362,12 @@ class NativeOperatorOverlay:
                 "label": (left + max(20, (width - label_w) // 2), top + inset + 18, label_w, 38),
                 "log": (left + width - inset - log_w - 12, top + height - inset - log_h - 22, log_w, log_h),
             }
+        placement_changed = placements != self.placements
+        self.placements = placements
+        if not placement_changed and self.visible:
+            return
         for name, hwnd in self.windows.items():
-            x, y, w, h = self.placements[name]
+            x, y, w, h = placements[name]
             # WS_EX_TOPMOST alone is not enough once another topmost or
             # fullscreen window changes the z-order. SetWindowPos both shows
             # and explicitly reasserts the topmost band without stealing focus.
@@ -345,6 +376,7 @@ class NativeOperatorOverlay:
                 SWP_NOACTIVATE | SWP_SHOWWINDOW,
             )
             self.user32.ShowWindow(hwnd, SW_SHOWNOACTIVATE)
+        self.visible = True
 
     def hide(self):
         if not self.enabled:
@@ -354,6 +386,7 @@ class NativeOperatorOverlay:
                 self.user32.ShowWindow(hwnd, SW_HIDE)
             except OSError:
                 pass
+        self.visible = False
 
     def update(self, wave):
         if not self.enabled:
@@ -363,23 +396,21 @@ class NativeOperatorOverlay:
         log_alpha = 238 if self.compact else int(220 + wave * 30)
         for name, hwnd in self.windows.items():
             value = log_alpha if name == "log" else label_alpha if name == "label" else alpha
-            self.user32.SetLayeredWindowAttributes(hwnd, 0, max(0, min(255, value)), LWA_ALPHA)
-            placement = self.placements.get(name)
-            if placement:
-                x, y, w, h = placement
-                self.user32.SetWindowPos(
-                    hwnd, HWND_TOPMOST, x, y, w, h,
-                    SWP_NOACTIVATE | SWP_SHOWWINDOW,
-                )
-            self.user32.InvalidateRect(hwnd, None, True)
+            value = max(0, min(255, value))
+            if self._last_alpha.get(name) != value:
+                self.user32.SetLayeredWindowAttributes(hwnd, 0, value, LWA_ALPHA)
+                self._last_alpha[name] = value
 
     def set_log(self, text, title=None):
-        self.log_text = text or ""
-        if title:
-            self.log_title = str(title)
+        next_text = text or ""
+        next_title = str(title) if title else self.log_title
+        if next_text == self.log_text and next_title == self.log_title:
+            return
+        self.log_text = next_text
+        self.log_title = next_title
         hwnd = self.windows.get("log")
         if hwnd:
-            self.user32.InvalidateRect(hwnd, None, True)
+            self.user32.InvalidateRect(hwnd, None, False)
 
     def destroy(self):
         if not self.enabled:
@@ -391,6 +422,40 @@ class NativeOperatorOverlay:
                 pass
         self.windows.clear()
         self.labels.clear()
+        self._release_gdi_resources()
+        self._last_alpha.clear()
+        self.visible = False
+
+    def _release_gdi_resources(self):
+        for handle in self._gdi_cache.values():
+            if handle:
+                try:
+                    self.gdi32.DeleteObject(handle)
+                except OSError:
+                    pass
+        self._gdi_cache = {}
+        self._gdi_theme_key = None
+
+    def _gdi_resources(self):
+        theme_key = (
+            self.owner.c("accent"),
+            self.owner.c("panel"),
+            getattr(self.owner, "brand_font_family", "Segoe UI"),
+            self.compact,
+        )
+        if self._gdi_theme_key == theme_key and self._gdi_cache:
+            return self._gdi_cache
+        self._release_gdi_resources()
+        accent, panel, brand, compact = theme_key
+        self._gdi_cache = {
+            "accent_brush": self.gdi32.CreateSolidBrush(self._colorref(accent)),
+            "panel_brush": self.gdi32.CreateSolidBrush(self._colorref(panel)),
+            "label_font": self.gdi32.CreateFontW(-16, 0, 0, 0, 700, 0, 0, 0, 0, 0, 0, 5, 0, brand),
+            "title_font": self.gdi32.CreateFontW(-13, 0, 0, 0, 700, 0, 0, 0, 0, 0, 0, 5, 0, brand),
+            "body_font": self.gdi32.CreateFontW(-13 if compact else -12, 0, 0, 0, 400, 0, 0, 0, 0, 0, 0, 5, 0, "Segoe UI"),
+        }
+        self._gdi_theme_key = theme_key
+        return self._gdi_cache
 
     def _paint(self, hwnd):
         class PAINTSTRUCT(ctypes.Structure):
@@ -419,60 +484,45 @@ class NativeOperatorOverlay:
         return 0
 
     def _paint_solid(self, hdc, rect):
-        brush = self.gdi32.CreateSolidBrush(self._colorref(self.owner.c("accent")))
-        try:
-            self.user32.FillRect(hdc, ctypes.byref(rect), brush)
-        finally:
-            self.gdi32.DeleteObject(brush)
+        self.user32.FillRect(hdc, ctypes.byref(rect), self._gdi_resources()["accent_brush"])
 
     def _paint_label(self, hdc, rect):
-        brush = self.gdi32.CreateSolidBrush(self._colorref(self.owner.c("panel")))
-        try:
-            self.user32.FillRect(hdc, ctypes.byref(rect), brush)
-        finally:
-            self.gdi32.DeleteObject(brush)
+        resources = self._gdi_resources()
+        self.user32.FillRect(hdc, ctypes.byref(rect), resources["panel_brush"])
         self.gdi32.SetBkMode(hdc, 1)
         self.gdi32.SetTextColor(hdc, self._colorref(self.owner.c("text")))
-        font = self.gdi32.CreateFontW(-16, 0, 0, 0, 700, 0, 0, 0, 0, 0, 0, 5, 0, getattr(self.owner, "brand_font_family", "Segoe UI"))
+        font = resources["label_font"]
         old = self.gdi32.SelectObject(hdc, font)
         try:
             self.user32.DrawTextW(hdc, self.title_text, -1, ctypes.byref(rect), 0x00000001 | 0x00000004 | 0x00000020)
         finally:
             self.gdi32.SelectObject(hdc, old)
-            self.gdi32.DeleteObject(font)
 
     def _paint_log(self, hdc, rect):
-        panel_brush = self.gdi32.CreateSolidBrush(self._colorref(self.owner.c("panel")))
-        accent_brush = self.gdi32.CreateSolidBrush(self._colorref(self.owner.c("accent")))
-        try:
-            self.user32.FillRect(hdc, ctypes.byref(rect), panel_brush)
-            if not self.compact:
-                frame = wintypes.RECT(rect.left, rect.top, rect.right, rect.top + 3)
-                self.user32.FillRect(hdc, ctypes.byref(frame), accent_brush)
-        finally:
-            self.gdi32.DeleteObject(panel_brush)
-            self.gdi32.DeleteObject(accent_brush)
+        resources = self._gdi_resources()
+        self.user32.FillRect(hdc, ctypes.byref(rect), resources["panel_brush"])
+        if not self.compact:
+            frame = wintypes.RECT(rect.left, rect.top, rect.right, rect.top + 3)
+            self.user32.FillRect(hdc, ctypes.byref(frame), resources["accent_brush"])
         self.gdi32.SetBkMode(hdc, 1)
         title_rect = wintypes.RECT(rect.left + 12, rect.top + 9, rect.right - 12, rect.top + 30)
         self.gdi32.SetTextColor(hdc, self._colorref(self.owner.c("accent")))
-        title_font = self.gdi32.CreateFontW(-13, 0, 0, 0, 700, 0, 0, 0, 0, 0, 0, 5, 0, getattr(self.owner, "brand_font_family", "Segoe UI"))
+        title_font = resources["title_font"]
         old = self.gdi32.SelectObject(hdc, title_font)
         try:
             self.user32.DrawTextW(hdc, self.log_title, -1, ctypes.byref(title_rect), 0x00000000 | 0x00000020)
         finally:
             self.gdi32.SelectObject(hdc, old)
-            self.gdi32.DeleteObject(title_font)
 
         text_rect = wintypes.RECT(rect.left + 12, rect.top + 32, rect.right - 12, rect.bottom - 9)
         self.gdi32.SetTextColor(hdc, self._colorref(self.owner.c("text")))
-        font = self.gdi32.CreateFontW(-13 if self.compact else -12, 0, 0, 0, 400, 0, 0, 0, 0, 0, 0, 5, 0, "Segoe UI")
+        font = resources["body_font"]
         old = self.gdi32.SelectObject(hdc, font)
         try:
             text = self.log_text or "waiting..."
             self.user32.DrawTextW(hdc, text, -1, ctypes.byref(text_rect), 0x00000000 | 0x00000010 | 0x00000800)
         finally:
             self.gdi32.SelectObject(hdc, old)
-            self.gdi32.DeleteObject(font)
 
     def _colorref(self, color):
         color = str(color).lstrip("#")
@@ -571,23 +621,55 @@ def enable_per_monitor_dpi_awareness():
             pass
 
 
-def claim_single_instance():
-    """Close the startup race between the hotkey and Windows startup launcher."""
+def suppress_tk_monitor_windows(owner_pid: int | None = None) -> int:
+    """Hide Tk's per-monitor DPI tracker windows. See tk_win_fixes.py."""
+    try:
+        from tk_win_fixes import suppress_tk_monitor_windows as _suppress
+
+        return _suppress(owner_pid)
+    except Exception:
+        return 0
+
+
+def claim_single_instance(*, wait_seconds: float = 0.0) -> bool:
+    """Close the startup race between the hotkey and Windows startup launcher.
+
+    wait_seconds > 0 retries briefly — used after a restart so we do not lose
+    the handoff while the previous process is still releasing the mutex.
+    """
     global APP_MUTEX_HANDLE
     if not sys.platform.startswith("win"):
         return True
-    try:
-        kernel32 = ctypes.windll.kernel32
-        handle = kernel32.CreateMutexW(None, False, APP_MUTEX_NAME)
-        if not handle:
+    deadline = time.perf_counter() + max(0.0, float(wait_seconds))
+    while True:
+        try:
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.CreateMutexW(None, False, APP_MUTEX_NAME)
+            if not handle:
+                return True
+            if kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+                kernel32.CloseHandle(handle)
+                if time.perf_counter() >= deadline:
+                    return False
+                time.sleep(0.05)
+                continue
+            APP_MUTEX_HANDLE = handle
             return True
-        if kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
-            kernel32.CloseHandle(handle)
-            return False
-        APP_MUTEX_HANDLE = handle
+        except (AttributeError, OSError):
+            return True
+
+
+def release_single_instance() -> None:
+    """Drop the singleton mutex so a restarting instance can claim it."""
+    global APP_MUTEX_HANDLE
+    handle = APP_MUTEX_HANDLE
+    APP_MUTEX_HANDLE = None
+    if not handle or not sys.platform.startswith("win"):
+        return
+    try:
+        ctypes.windll.kernel32.CloseHandle(handle)
     except (AttributeError, OSError):
-        return True
-    return True
+        pass
 
 
 DEFAULT_CONFIG = {
@@ -599,6 +681,11 @@ DEFAULT_CONFIG = {
     "quick_codex_reasoning": "none",
     "chat_model": DEFAULT_CHAT_MODEL,
     "openai_api_key": "",
+    "openrouter_api_key": "",
+    "openrouter_enabled_models": ["deepseek/deepseek-v4-flash"],
+    "code_default_provider": "openrouter",
+    "code_default_model": "deepseek/deepseek-v4-flash",
+    "code_review_fix_enabled": False,
     "codex_sandbox": "workspace-write",
     "window": "1120x720+520+90",
     "chat_width": 380,
@@ -639,14 +726,18 @@ DEFAULT_CONFIG = {
         "panel2": "#151f2d",
         "surface": "#0b111b",
         "surface2": "#111a27",
+        "app_background": "#101722",
+        "code_chat_background": "#1c1d1f",
+        "code_sidebar_background": "#0b111b",
         "text": "#f4f7fb",
         "muted": "#8b98aa",
+        "chat_link": "#61dafb",
         "danger": "#ff5f57",
         "success": "#38d996",
         "opacity": 0.94,
         "font_size": 10,
         "radius": 28,
-        "always_on_top": True,
+        "always_on_top": False,
         "thinking_base": "#2b3340",
         "thinking_base_opacity": 45,
         "thinking_pulse": "#ffffff",
@@ -734,17 +825,84 @@ def merge_dict(base, override):
     return result
 
 
+class _LoadedConfig(dict):
+    """A config mapping that remembers the disk state it was loaded from."""
+
+    def __init__(self, value):
+        super().__init__(value)
+        self._loaded_snapshot = json.loads(json.dumps(value))
+
+
+_MISSING = object()
+
+
+def _merge_concurrent_config(base, incoming, stored):
+    """Three-way merge a save with changes made by another process.
+
+    aiOS and the legacy background overlay share one config file.  A long-lived
+    process must not erase keys another process added or changed after it loaded
+    its copy, while fields deliberately changed by the saving process still win.
+    """
+    if not all(isinstance(value, dict) for value in (base, incoming, stored)):
+        return incoming
+    merged = {}
+    for key in base.keys() | incoming.keys() | stored.keys():
+        old = base.get(key, _MISSING)
+        new = incoming.get(key, _MISSING)
+        current = stored.get(key, _MISSING)
+        if new is _MISSING and old is _MISSING:
+            chosen = current
+        elif new == old and current != old:
+            chosen = current
+        elif all(isinstance(value, dict) for value in (old, new, current)):
+            chosen = _merge_concurrent_config(old, new, current)
+        else:
+            chosen = new
+        if chosen is not _MISSING:
+            merged[key] = chosen
+    return merged
+
+
+def _read_json_object(path):
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else None
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _write_json_atomic(path, value):
+    temp = path.with_name(
+        f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        with temp.open("w", encoding="utf-8") as file:
+            json.dump(value, file, indent=2)
+            file.flush()
+            os.fsync(file.fileno())
+        temp.replace(path)
+    finally:
+        try:
+            temp.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def load_config():
     config = json.loads(json.dumps(DEFAULT_CONFIG))
     loaded_operator = {}
-    if CONFIG_PATH.exists():
-        try:
-            with CONFIG_PATH.open("r", encoding="utf-8") as file:
-                loaded = json.load(file)
-                loaded_operator = loaded.get("ai_operator") if isinstance(loaded.get("ai_operator"), dict) else {}
-                config = merge_dict(config, loaded)
-        except (OSError, json.JSONDecodeError):
-            pass
+    loaded = _read_json_object(CONFIG_PATH)
+    recovered = False
+    if loaded is None:
+        loaded = _read_json_object(CONFIG_BACKUP_PATH)
+        recovered = loaded is not None
+    if loaded is not None:
+        loaded_operator = loaded.get("ai_operator") if isinstance(loaded.get("ai_operator"), dict) else {}
+        config = merge_dict(config, loaded)
+        if recovered:
+            try:
+                _write_json_atomic(CONFIG_PATH, loaded)
+            except OSError:
+                pass
 
     if str(config.get("project_root", "")).casefold() == r"c:\codex":
         config["project_root"] = DEFAULT_PROJECT_ROOT
@@ -763,6 +921,9 @@ def load_config():
         if config.get(key) in LEGACY_MODELS:
             config[key] = DEFAULT_CHAT_MODEL
     config.setdefault("openai_api_key", "")
+    config.setdefault("openrouter_api_key", "")
+    if not isinstance(config.get("openrouter_enabled_models"), list):
+        config["openrouter_enabled_models"] = list(DEFAULT_CONFIG["openrouter_enabled_models"])
     config.setdefault("codex_sandbox", "workspace-write")
     config.setdefault("todos", [])
     config.setdefault("linked_projects", [])
@@ -778,7 +939,7 @@ def load_config():
     if not isinstance(config["dashboard"].get("tickers"), list) or not config["dashboard"]["tickers"]:
         config["dashboard"]["tickers"] = list(DEFAULT_CONFIG["dashboard"]["tickers"])
     migrate_legacy_todos(config)
-    return config
+    return _LoadedConfig(config)
 
 
 def migrate_legacy_todos(config):
@@ -825,12 +986,66 @@ def migrate_legacy_todos(config):
         save_config(config)
 
 
+def _keep_phone_pairing(config, previous):
+    """Never let a stale in-memory config blank the phone pairing.
+
+    The overlay saves the whole config dict it loaded at startup, so a pairing
+    written afterwards by another process (phone_relay pair, the settings API)
+    was silently erased on the next unrelated save. The bridge then reported
+    "not paired" and aiOS Remote showed this computer as offline. Nothing in
+    aiOS unpairs by writing an empty token, so an empty value is always the
+    stale copy losing to the one on disk.
+    """
+    if not isinstance(previous, dict) or not isinstance(config, dict):
+        return config
+    stored = previous.get("phone_relay")
+    if not isinstance(stored, dict):
+        return config
+    incoming = config.get("phone_relay")
+    incoming = dict(incoming) if isinstance(incoming, dict) else {}
+    changed = False
+    for key in ("machine_id", "machine_token", "url"):
+        if str(stored.get(key) or "").strip() and not str(incoming.get(key) or "").strip():
+            incoming[key] = stored[key]
+            changed = True
+    if changed:
+        # A restored token means the pairing is live again; enabled travels
+        # with it so the bridge actually starts the relay.
+        if str(incoming.get("machine_token") or "").strip():
+            incoming["enabled"] = True
+        config = {**config, "phone_relay": incoming}
+    return config
+
+
 def save_config(config):
     try:
-        with CONFIG_PATH.open("w", encoding="utf-8") as file:
-            json.dump(config, file, indent=2)
+        original = config
+        previous = _read_json_object(CONFIG_PATH)
+        if previous is not None:
+            _write_json_atomic(CONFIG_BACKUP_PATH, previous)
+            baseline = getattr(config, "_loaded_snapshot", None)
+            if isinstance(baseline, dict):
+                config = _merge_concurrent_config(baseline, config, previous)
+        config = _keep_phone_pairing(config, previous)
+        _write_json_atomic(CONFIG_PATH, config)
+        if not CONFIG_BACKUP_PATH.exists():
+            _write_json_atomic(CONFIG_BACKUP_PATH, config)
+        if isinstance(original, _LoadedConfig):
+            original.clear()
+            original.update(config)
+            original._loaded_snapshot = json.loads(json.dumps(config))
     except OSError:
         pass
+
+
+def rounded_rect_points(x1, y1, x2, y2, radius):
+    radius = max(0, min(radius, abs(x2 - x1) / 2, abs(y2 - y1) / 2))
+    return [
+        x1 + radius, y1, x2 - radius, y1, x2, y1,
+        x2, y1 + radius, x2, y2 - radius, x2, y2,
+        x2 - radius, y2, x1 + radius, y2, x1, y2,
+        x1, y2 - radius, x1, y1 + radius, x1, y1,
+    ]
 
 
 def rounded_rect(canvas, x1, y1, x2, y2, radius, **kwargs):
@@ -1720,6 +1935,11 @@ class ScrollFrame(tk.Frame):
     def __init__(self, parent, bg):
         super().__init__(parent, bg=bg)
         self.on_user_scroll = None
+        # When set, the view re-pins to the bottom every time content grows.
+        # Without this the scrollregion expands *after* a scroll-to-end, and the
+        # fixed view fraction then points higher up - the chat appears to jump.
+        self.stick_to_bottom = False
+        self._bound_children = {}
         self.canvas = tk.Canvas(self, bg=bg, highlightthickness=0, bd=0)
         self.inner = tk.Frame(self.canvas, bg=bg)
         self.window = self.canvas.create_window(0, 0, anchor="nw", window=self.inner)
@@ -1732,19 +1952,53 @@ class ScrollFrame(tk.Frame):
     def _remove_instance(self, event=None):
         if event is not None and event.widget is not self:
             return
+        self._bound_children.clear()
         try:
             ScrollFrame._instances.remove(self)
         except ValueError:
             pass
 
     def _on_inner_configure(self, _event=None):
-        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
-        self._bind_wheel_tree(self.inner)
+        try:
+            self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+            self._bind_wheel_tree(self.inner)
+            if self.stick_to_bottom:
+                self.canvas.yview_moveto(1.0)
+        except tk.TclError:
+            pass
+
+    def pin_to_bottom(self):
+        try:
+            self.canvas.update_idletasks()
+            self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+            self.canvas.yview_moveto(1.0)
+        except tk.TclError:
+            pass
+
+    def at_bottom(self, tolerance=0.001):
+        try:
+            first, last = self.canvas.yview()
+        except (tk.TclError, ValueError):
+            return True
+        return last >= 1.0 - tolerance or first == last
 
     def _update_width(self, event):
         self.canvas.itemconfigure(self.window, width=event.width)
 
     def _bind_wheel_tree(self, widget):
+        """Bind the wheel on new widgets only.
+
+        A full-tree walk on every <Configure> is O(widgets) per layout change,
+        which is what made a long transcript crawl. Subtrees whose child count
+        has not changed are skipped outright.
+        """
+        key = id(widget)
+        try:
+            children = widget.winfo_children()
+        except tk.TclError:
+            return
+        if self._bound_children.get(key) == len(children):
+            return
         bindings = getattr(widget, "_aios_scroll_bindings", set())
         binding_key = id(self)
         if binding_key not in bindings:
@@ -1753,7 +2007,8 @@ class ScrollFrame(tk.Frame):
                 widget._aios_scroll_bindings = {*bindings, binding_key}
             except tk.TclError:
                 pass
-        for child in widget.winfo_children():
+        self._bound_children[key] = len(children)
+        for child in children:
             self._bind_wheel_tree(child)
 
     def _contains_widget(self, widget):
@@ -1805,6 +2060,9 @@ class ScrollFrame(tk.Frame):
 
 
 CODE_SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+# Cap on rows rebuilt when opening a session. Long transcripts otherwise build
+# thousands of widgets on the Tk thread and the tab appears to hang.
+CODE_HISTORY_RENDER_LIMIT = int(os.environ.get("AIOS_CODE_HISTORY_ROWS", "250"))
 _CODE_INLINE = re.compile(
     r"(?P<code>`[^`\n]+`)"
     r"|(?P<link>\[[^\]\n]+\]\([^)\s]+\))"
@@ -1938,13 +2196,15 @@ def code_activity_key(event):
 
 
 class HelperOverlay:
-    def __init__(self, *, background=False):
+    def __init__(self, *, background=False, fast_start=False):
         self.config = load_config()
         self.theme = self.config["theme"]
         self.project_root = Path(self.config["project_root"])
         self.project_root.mkdir(parents=True, exist_ok=True)
-        self.shortcuts = start_menu_shortcuts()
-        self.apps = self._discover_apps()
+        self.fast_start = bool(fast_start)
+        # Start Menu scan is slow; do it off the UI thread so restart/show is snappy.
+        self.shortcuts = {}
+        self.apps = []
         self.active_tab = "Dashboard"
         # Which sub-page of Settings is showing; survives tab switches.
         self.settings_page = "General"
@@ -1961,6 +2221,7 @@ class HelperOverlay:
         self.codex_log = []
         self.code_selected_id = ""
         self.code_jobs = []
+        self.code_projects = []
         self.code_capabilities = {"providers": []}
         self.code_log_size = 0
         self.code_poll_after = None
@@ -2021,13 +2282,16 @@ class HelperOverlay:
         self._bottom_tray = None
         self._tray_anim_job = None
         self._tray_hide_job = None
-        self._tray_current_h = 30
-        self._tray_current_relwidth = 0.20
+        self._tray_current_h = 24
+        self._tray_current_relwidth = 0.13
         self._tray_open = False
-        self._tray_target_h = 268
-        self._tray_peek_h = 30
-        self._tray_open_relwidth = 0.88
-        self._tray_peek_relwidth = 0.20
+        # Compact, and anchored bottom-left so opening grows in one direction
+        # instead of expanding sideways from the centre.
+        self._tray_target_h = 208
+        self._tray_peek_h = 24
+        self._tray_open_relwidth = 0.44
+        self._tray_peek_relwidth = 0.13
+        self._tray_anim_progress = 0.0
         self.quick_tools_handle = None
         self.screen_record_process = None
         self.screen_record_path = None
@@ -2145,6 +2409,9 @@ class HelperOverlay:
         self._root_native_hwnd = None
 
         self.root = tk.Tk()
+        # Withdraw before any geometry/attributes so Windows never flashes a blank root.
+        self.root.withdraw()
+        suppress_tk_monitor_windows()
         self.root.title("aiOS")
         self._apply_window_icon()
         self.root.geometry(self.config.get("window") or DEFAULT_CONFIG["window"])
@@ -2159,8 +2426,8 @@ class HelperOverlay:
             pass
         self.root.protocol("WM_DELETE_WINDOW", self.hide)
         self.root.bind("<Destroy>", self._on_root_destroy, add="+")
-        self.root.withdraw()
         self.brand_font_family = self._init_brand_font()
+        suppress_tk_monitor_windows()
         self.agent_operator_native_overlay = NativeOperatorOverlay(self, compact=True)
         self.phone_control_native_overlay = NativeOperatorOverlay(
             self,
@@ -2182,13 +2449,47 @@ class HelperOverlay:
         self._poll_ui_queue()
         self._poll_agent_operator_events()
         self._ensure_voice_server()
-        self._ensure_hotkeys()
+        self._ensure_hotkeys(wait_healthy=not self.fast_start)
         self.root.after(100, self._start_agent_operator_load)
         self.root.after(400, self._show_aios_windows_in_normal_capture)
         self.root.after(1200, self._ensure_phone_relay)
         self.root.after(1800, self._poll_code_notifications)
-        if not background:
+        self.root.after(50, self._load_apps_async)
+        # Tk may recreate DPI monitor trackers during early layout — keep stomping them.
+        for delay in (0, 50, 150, 400, 1000, 2000):
+            self.root.after(delay, suppress_tk_monitor_windows)
+        if background:
+            pass
+        elif self.fast_start:
+            self.show()
+        else:
             self.show_startup_screen()
+
+    def _load_apps_async(self):
+        def worker():
+            try:
+                shortcuts = start_menu_shortcuts()
+            except Exception:
+                shortcuts = {}
+
+            def apply():
+                self.shortcuts = shortcuts
+                try:
+                    self.apps = self._discover_apps()
+                except Exception:
+                    self.apps = []
+                if self.active_tab == "Apps" and hasattr(self, "apps_area"):
+                    try:
+                        self.refresh_app_results()
+                    except Exception:
+                        pass
+
+            try:
+                self.root.after(0, apply)
+            except tk.TclError:
+                pass
+
+        threading.Thread(target=worker, daemon=True, name="aios-apps-scan").start()
 
     def _build_ui(self):
         self.shell = tk.Canvas(self.root, bg=TRANSPARENT, highlightthickness=0, bd=0)
@@ -2296,8 +2597,19 @@ class HelperOverlay:
         ).pack(anchor="w")
         voice_cfg = self.config.get("voice_dictation") or {}
         model_label = voice_cfg.get("agent_model") or DEFAULT_VOICE_DICTATION.get("agent_model") or "gpt-5.6-luna"
+        try:
+            import ollama_client
+
+            model_label = ollama_client.agent_model_display(model_label)
+        except Exception:
+            pass
         key_ok = bool(self.get_openai_api_key())
-        auth_label = "API key ready" if key_ok else "No API key"
+        local_model = str(voice_cfg.get("agent_model") or "").lower().startswith("ollama:")
+        if local_model:
+            auth_label = "Local Ollama"
+            key_ok = True
+        else:
+            auth_label = "API key ready" if key_ok else "No API key"
         meta = f"{model_label} · {auth_label}"
         self.chat_account_label = tk.Label(
             head_left,
@@ -2305,10 +2617,16 @@ class HelperOverlay:
             bg=self.c("surface"),
             fg=self.c("success") if key_ok else self.c("danger"),
             font=self.font(8),
+            cursor="hand2",
         )
         self.chat_account_label.pack(anchor="w")
+        self.chat_account_label.bind("<Button-1>", lambda _event: self._open_agent_model_picker())
+        self._bind_header_hint(self.chat_account_label, "Click to change the Agent model")
         chat_actions = tk.Frame(chat_head, bg=self.c("surface"))
         chat_actions.pack(side="right")
+        self.header_chip(chat_actions, "Model", self._open_agent_model_picker, hint="Pick Luna or a local Ollama model").pack(
+            side="right", padx=(4, 0)
+        )
         self.header_chip(chat_actions, "Reset", self.reset_chat, hint="Clear agent chat").pack(side="right", padx=(4, 0))
         self.header_chip(chat_actions, "Settings", lambda: self.render_tab("Settings"), hint="OpenAI key & voice agent").pack(
             side="right"
@@ -2657,7 +2975,7 @@ class HelperOverlay:
     def _dash_actions(self, parent):
         row = tk.Frame(parent, bg=self.c("panel"))
         actions = (
-            ("CODE", lambda: self.render_tab("CODE"), "Open Codex, Claude, and Cursor sessions"),
+            ("CODE", lambda: self.render_tab("CODE"), "Open Codex, Claude, Cursor, and Ollama sessions"),
             ("OPERATOR", lambda: self.render_tab("AI Operator"), "Hand the mouse to the agent"),
             ("Drop", lambda: self.render_tab("Drop"), "Drop files in"),
             ("Phone \u2192 PC", self.open_phone_photos, "Send photos from your phone"),
@@ -3173,7 +3491,7 @@ class HelperOverlay:
         accent = tk.Frame(self._bottom_tray, bg=accent_line, height=2)
         accent.pack(fill="x")
 
-        handle_row = tk.Frame(self._bottom_tray, bg=tray_bg, height=28, cursor="hand2")
+        handle_row = tk.Frame(self._bottom_tray, bg=tray_bg, height=22, cursor="hand2")
         handle_row.pack(fill="x")
         handle_row.pack_propagate(False)
         self.quick_tools_handle = tk.Label(
@@ -3181,13 +3499,13 @@ class HelperOverlay:
             text="QUICK TOOLS  ↑",
             bg=tray_bg,
             fg=self.blend_color(self.c("muted"), self.c("text"), 0.62),
-            font=self.font(8, "bold"),
+            font=self.font(7, "bold"),
             cursor="hand2",
         )
-        self.quick_tools_handle.place(relx=0.5, rely=0.5, anchor="center")
+        self.quick_tools_handle.place(relx=0.0, rely=0.5, x=10, anchor="w")
 
         content = tk.Frame(self._bottom_tray, bg=tray_bg)
-        content.pack(fill="both", expand=True, padx=14, pady=(3, 10))
+        content.pack(fill="both", expand=True, padx=10, pady=(2, 7))
 
         groups = tk.Frame(content, bg=tray_bg)
         groups.pack(fill="both", expand=True)
@@ -3278,10 +3596,12 @@ class HelperOverlay:
         close_hint.pack(side="right")
 
         self._bottom_tray.place(
-            relx=0.5,
-            rely=1,
+            relx=0.0,
+            rely=1.0,
+            x=8,
+            y=-6,
             relwidth=self._tray_peek_relwidth,
-            anchor="s",
+            anchor="sw",
             height=self._tray_peek_h,
         )
         self._bottom_tray.lift()
@@ -3427,61 +3747,42 @@ class HelperOverlay:
         self._tray_animation_step()
 
     def _tray_animation_step(self):
+        """Drive width and height from one eased progress value.
+
+        Animating the two axes independently let them finish at different
+        times, which is what made opening look like it jumped.
+        """
         self._tray_anim_job = None
         if self._bottom_tray is None:
             return
 
-        target_h = self._tray_target_h if self._tray_open else self._tray_peek_h
-        target_relwidth = self._tray_open_relwidth if self._tray_open else self._tray_peek_relwidth
-        current_h = self._tray_current_h
-        current_w = self._tray_current_relwidth
+        progress = getattr(self, "_tray_anim_progress", 0.0)
+        progress += 0.16 if self._tray_open else -0.20
+        progress = max(0.0, min(1.0, progress))
+        self._tray_anim_progress = progress
 
-        if abs(current_h - target_h) <= 1 and abs(current_w - target_relwidth) <= 0.005:
-            self._tray_current_h = target_h
-            self._tray_current_relwidth = target_relwidth
-            try:
-                self._bottom_tray.place_configure(height=int(target_h), relwidth=target_relwidth)
-            except tk.TclError:
-                pass
-            if not self._tray_open and self.quick_tools_status is not None:
-                try:
-                    self.quick_tools_status.configure(
-                        text="Ready",
-                        fg=self.blend_color(self.c("muted"), self.c("text"), 0.58),
-                    )
-                except tk.TclError:
-                    pass
-            return
-
-        diff_h = target_h - current_h
-        if abs(diff_h) <= 1:
-            next_h = target_h
-        else:
-            step_h = max(2, min(12, int(abs(diff_h) * 0.34)))
-            next_h = current_h + step_h if diff_h > 0 else current_h - step_h
-            if diff_h > 0 and next_h > target_h:
-                next_h = target_h
-            elif diff_h < 0 and next_h < target_h:
-                next_h = target_h
-
-        diff_w = target_relwidth - current_w
-        if abs(diff_w) <= 0.005:
-            next_w = target_relwidth
-        else:
-            step_w = max(0.012, min(0.08, abs(diff_w) * 0.34))
-            next_w = current_w + step_w if diff_w > 0 else current_w - step_w
-            if diff_w > 0 and next_w > target_relwidth:
-                next_w = target_relwidth
-            elif diff_w < 0 and next_w < target_relwidth:
-                next_w = target_relwidth
-
-        self._tray_current_h = next_h
-        self._tray_current_relwidth = next_w
+        eased = progress * progress * (3.0 - 2.0 * progress)   # smoothstep
+        height = self._tray_peek_h + (self._tray_target_h - self._tray_peek_h) * eased
+        relwidth = self._tray_peek_relwidth + (self._tray_open_relwidth - self._tray_peek_relwidth) * eased
+        self._tray_current_h = height
+        self._tray_current_relwidth = relwidth
         try:
-            self._bottom_tray.place_configure(height=int(next_h), relwidth=next_w)
+            self._bottom_tray.place_configure(height=int(round(height)), relwidth=relwidth)
         except tk.TclError:
             return
-        self._tray_anim_job = self.root.after(12, self._tray_animation_step)
+
+        settled = (self._tray_open and progress >= 1.0) or (not self._tray_open and progress <= 0.0)
+        if not settled:
+            self._tray_anim_job = self.root.after(12, self._tray_animation_step)
+            return
+        if not self._tray_open and self.quick_tools_status is not None:
+            try:
+                self.quick_tools_status.configure(
+                    text="Ready",
+                    fg=self.blend_color(self.c("muted"), self.c("text"), 0.58),
+                )
+            except tk.TclError:
+                pass
 
     def save_clipboard_image(self):
         saved_path = None
@@ -5749,7 +6050,7 @@ class HelperOverlay:
         self.muted(info_card, "Changes save automatically.").pack(anchor="w", padx=12, pady=(0, 12))
 
     def render_code(self):
-        """Native overview for persistent Codex, Claude, and Cursor jobs."""
+        """Native overview for persistent Codex, Claude, Cursor, and Ollama jobs."""
         self.code_view_token += 1
         # This tab owns a new widget tree on every render. The previous tree's
         # signature must not suppress drawing into the new session list.
@@ -5766,12 +6067,11 @@ class HelperOverlay:
         tk.Label(head, text="CODE", bg=self.c("panel"), fg=self.c("text"), font=self.font(18, "bold")).pack(side="left")
         tk.Label(
             head,
-            text="Codex · Claude · Cursor",
+            text="Codex · Claude · Cursor · Ollama · OpenRouter",
             bg=self.c("panel"),
             fg=self.c("muted"),
             font=self.font(9),
         ).pack(side="left", padx=(10, 0))
-        self.header_btn(head, "↗", self._code_open_web, hint="Open the full phone/web CODE dashboard").pack(side="right")
         self.header_btn(head, "↻", lambda: self._code_refresh_all(force=True), hint="Refresh agents and sessions").pack(side="right", padx=(0, 6))
 
         overview = tk.Frame(self.page, bg=self.c("panel"))
@@ -5793,6 +6093,20 @@ class HelperOverlay:
                 padx=10,
                 pady=6,
             ).pack(side="left", padx=(0 if index == 0 else 6, 0))
+        self.code_usage_var = tk.StringVar(value="28d —")
+        usage_label = tk.Label(
+            overview,
+            textvariable=self.code_usage_var,
+            bg=self.c("surface"),
+            fg=self.c("muted"),
+            font=self.font(9, "bold"),
+            padx=10,
+            pady=6,
+            cursor="hand2",
+        )
+        usage_label.pack(side="left", padx=(6, 0))
+        usage_label.bind("<Button-1>", lambda _event: self._code_show_usage_breakdown())
+        self._code_refresh_usage_window()
         self.code_health_var = tk.StringVar(value="Checking local agent logins and models…")
         self.code_speak_var = tk.BooleanVar(value=bool(self.config.get("code_speak_notifications", True)))
         self.code_setup_button = self.button(overview, "Set up agent", self._code_setup_provider, compact=True)
@@ -5817,15 +6131,19 @@ class HelperOverlay:
             anchor="e",
         ).pack(side="right", fill="x", expand=True)
 
-        creator = self.card(self.page)
-        creator.pack(fill="x", pady=(0, 8))
+        # The launch controls live in the composer at the bottom of the chat;
+        # this offscreen holder just owns the shared variables and menus.
+        creator = tk.Frame(self.page, bg=self.c("surface"))
         row = tk.Frame(creator, bg=self.c("surface"))
         row.pack(fill="x", padx=10, pady=(9, 5))
-        self.code_provider_var = tk.StringVar(value="codex")
-        self.code_model_var = tk.StringVar(value="gpt-5.6-sol")
+        self.code_provider_var = tk.StringVar(value=self.config.get("code_default_provider", "openrouter"))
+        self.code_model_var = tk.StringVar(value=self.config.get("code_default_model", "deepseek/deepseek-v4-flash"))
         self.code_reasoning_var = tk.StringVar(value="medium")
         self.code_fast_var = tk.BooleanVar(value=False)
-        self.code_project_var = tk.StringVar(value=str(self.active_project or self.default_project_path()))
+        self.code_project_var = tk.StringVar(
+            value=str(self.config.get("code_last_project_path") or self.active_project or self.default_project_path())
+        )
+        self.code_project_choice_var = tk.StringVar(value=Path(self.code_project_var.get()).name or self.code_project_var.get())
         tk.Label(row, text="Agent", bg=self.c("surface"), fg=self.c("muted"), font=self.font(8, "bold")).pack(side="left", padx=(0, 6))
         self._code_build_provider_picker(row)
         for label, variable, values, width in (
@@ -5855,7 +6173,11 @@ class HelperOverlay:
 
         folder_row = tk.Frame(creator, bg=self.c("surface"))
         folder_row.pack(fill="x", padx=10, pady=(0, 5))
-        tk.Label(folder_row, text="Folder", bg=self.c("surface"), fg=self.c("muted"), font=self.font(8, "bold")).pack(side="left", padx=(0, 6))
+        tk.Label(folder_row, text="Project", bg=self.c("surface"), fg=self.c("muted"), font=self.font(8, "bold")).pack(side="left", padx=(0, 6))
+        self.code_project_menu = tk.OptionMenu(folder_row, self.code_project_choice_var, self.code_project_choice_var.get())
+        self.style_option(self.code_project_menu)
+        self.code_project_menu.configure(width=20)
+        self.code_project_menu.pack(side="left", padx=(0, 7))
         self.code_project_entry = tk.Entry(
             folder_row,
             textvariable=self.code_project_var,
@@ -5866,7 +6188,7 @@ class HelperOverlay:
             font=self.font(9),
         )
         self.code_project_entry.pack(side="left", fill="x", expand=True, ipady=6)
-        self.button(folder_row, "Browse", self._code_browse_project, compact=True).pack(side="right", padx=(7, 0))
+        self.button(folder_row, "+ Add folder", self._code_browse_project, compact=True).pack(side="right", padx=(7, 0))
 
         brief_row = tk.Frame(creator, bg=self.c("surface"))
         brief_row.pack(fill="x", padx=10, pady=(0, 9))
@@ -5916,6 +6238,63 @@ class HelperOverlay:
         self.code_delete_button = self.button(detail_head, "Delete", self._code_delete_job, compact=True)
         self.code_delete_button.pack(side="right")
 
+        telemetry = tk.Frame(right, bg=self.c("surface"))
+        self.code_telemetry_vars = {
+            key: tk.StringVar(value=value)
+            for key, value in (
+                ("elapsed", "TIME —"),
+                ("speed", "TOK/S —"),
+                ("tokens", "TOKENS —"),
+                ("cost", "COST —"),
+                ("files", "FILES —"),
+                ("diff", "+0 / -0"),
+            )
+        }
+        for index, key in enumerate(("elapsed", "speed", "tokens", "cost", "files", "diff")):
+            tk.Label(
+                telemetry,
+                textvariable=self.code_telemetry_vars[key],
+                bg=self.c("panel2"),
+                fg=self.c("success") if key == "diff" else self.c("muted"),
+                font=self.font(7, "bold"),
+                padx=7,
+                pady=4,
+            ).pack(side="left", padx=(0 if index == 0 else 4, 0))
+
+        switch_row = tk.Frame(right, bg=self.c("surface"))
+        self.code_switch_row = switch_row
+        self.code_telemetry_row = telemetry
+        tk.Label(switch_row, text="CONTINUE WITH", bg=self.c("surface"), fg=self.c("muted"), font=self.font(7, "bold")).pack(side="left", padx=(0, 6))
+        self.code_switch_provider_var = tk.StringVar(value="codex")
+        self.code_switch_model_var = tk.StringVar(value="gpt-5.6-sol")
+        self.code_switch_reasoning_var = tk.StringVar(value="medium")
+        self.code_switch_fast_var = tk.BooleanVar(value=False)
+        self.code_switch_provider_menu = tk.OptionMenu(switch_row, self.code_switch_provider_var, *[item[0] for item in CODE_PROVIDER_CHOICES])
+        self.style_option(self.code_switch_provider_menu)
+        self.code_switch_provider_menu.configure(width=10)
+        self.code_switch_provider_menu.pack(side="left", padx=(0, 5))
+        self.code_switch_model_menu = tk.OptionMenu(switch_row, self.code_switch_model_var, "gpt-5.6-sol")
+        self.style_option(self.code_switch_model_menu)
+        self.code_switch_model_menu.configure(width=22)
+        self.code_switch_model_menu.pack(side="left", padx=(0, 5))
+        self.code_switch_reasoning_menu = tk.OptionMenu(switch_row, self.code_switch_reasoning_var, "medium")
+        self.style_option(self.code_switch_reasoning_menu)
+        self.code_switch_reasoning_menu.configure(width=8)
+        self.code_switch_reasoning_menu.pack(side="left", padx=(0, 5))
+        self.code_switch_fast_check = tk.Checkbutton(
+            switch_row,
+            text="Fast",
+            variable=self.code_switch_fast_var,
+            bg=self.c("surface"),
+            activebackground=self.c("surface"),
+            selectcolor=self.c("panel2"),
+            fg=self.c("muted"),
+            font=self.font(7),
+        )
+        self.code_switch_fast_check.pack(side="left", padx=(0, 5))
+        self.code_switch_button = self.button(switch_row, "Switch", self._code_switch_job, compact=True)
+        self.code_switch_button.pack(side="left")
+
         output_wrap = tk.Frame(right, bg=self.CODE_CHAT_BG)
         output_wrap.pack(fill="both", expand=True, padx=9)
         chat_scroll = tk.Scrollbar(output_wrap, orient="vertical", width=10)
@@ -5931,39 +6310,83 @@ class HelperOverlay:
 
         compose = tk.Frame(right, bg=self.c("surface"))
         compose.pack(fill="x", padx=9, pady=(6, 9))
-        self.code_followup = tk.Text(
-            compose,
-            height=2,
-            bg=self.c("panel2"),
-            fg=self.c("text"),
-            insertbackground=self.c("text"),
-            relief="flat",
-            padx=8,
-            pady=6,
-            wrap="word",
-            font=self.font(9),
+
+        # Context strip: which project and agent this message will go to.
+        context = tk.Frame(compose, bg=self.c("surface"))
+        context.pack(fill="x", pady=(0, 4))
+        self.code_target_var = tk.StringVar(value="New session")
+        self.code_target_button = tk.Label(
+            context,
+            textvariable=self.code_target_var,
+            bg=self.c("surface"),
+            fg=self.c("muted"),
+            font=self.font(8, "bold"),
+            anchor="w",
+            cursor="hand2",
         )
-        self.code_followup.pack(side="left", fill="x", expand=True)
-        follow_actions = tk.Frame(compose, bg=self.c("surface"))
-        follow_actions.pack(side="right", padx=(6, 0))
+        self.code_target_button.pack(side="left")
+        self.code_target_button.bind("<Button-1>", lambda _event: self._code_open_target_menu())
+        self.code_new_session_button = tk.Label(
+            context,
+            text="＋ New session",
+            bg=self.c("surface"),
+            fg=self.c("accent"),
+            font=self.font(8, "bold"),
+            cursor="hand2",
+        )
+        self.code_new_session_button.bind("<Button-1>", lambda _event: self._code_new_session())
         self.code_urgent_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(
-            follow_actions,
-            text="Urgent",
+        self.code_urgent_check = tk.Checkbutton(
+            context,
+            text="Send now",
             variable=self.code_urgent_var,
             bg=self.c("surface"),
             activebackground=self.c("surface"),
             selectcolor=self.c("panel2"),
             fg=self.c("muted"),
             font=self.font(7),
-        ).pack(anchor="w")
+        )
+        self.code_urgent_check.pack(side="right")
+
+        entry_row = tk.Frame(compose, bg=self.c("surface"))
+        entry_row.pack(fill="x")
+        self.code_followup = tk.Text(
+            entry_row,
+            height=3,
+            bg=self.c("panel2"),
+            fg=self.c("text"),
+            insertbackground=self.c("text"),
+            relief="flat",
+            padx=9,
+            pady=7,
+            wrap="word",
+            font=self.font(9),
+        )
+        self.code_followup.pack(side="left", fill="x", expand=True)
+        follow_actions = tk.Frame(entry_row, bg=self.c("surface"))
+        follow_actions.pack(side="right", padx=(6, 0), fill="y")
+        self.code_send_label = tk.StringVar(value="Send ▸")
         self.code_follow_attach_button = self.button(follow_actions, "+ File", self._code_attach_followup, compact=True)
-        self.code_follow_attach_button.pack(side="left", padx=(0, 5))
-        self.button(follow_actions, "Send", self._code_send_followup, compact=True, active=True).pack(side="left")
+        self.code_follow_attach_button.pack(fill="x", pady=(0, 4))
+        self.code_send_button = self.button(follow_actions, "Send ▸", self._code_compose_send, compact=True, active=True)
+        self.code_send_button.pack(fill="x")
+        # The composer is the only launch surface, so it must always be usable.
+        self.code_brief = self.code_followup
+
+        self.code_jump_button = self.button(
+            output_wrap, "↓ Latest", self._code_jump_to_latest, compact=True, active=True)
 
         self.code_provider_var.trace_add("write", lambda *_args: self._code_on_provider_changed())
-        self.code_model_var.trace_add("write", lambda *_args: self._code_refresh_reasoning())
+        self.code_model_var.trace_add("write", lambda *_args: (self._code_refresh_reasoning(), self._code_sync_compose_target()))
+        self.code_project_var.trace_add("write", lambda *_args: self._code_sync_compose_target())
+        self.code_project_choice_var.trace_add("write", lambda *_args: self._code_choose_project())
+        self.code_switch_provider_var.trace_add("write", lambda *_args: self._code_refresh_switch_selectors())
+        self.code_switch_model_var.trace_add("write", lambda *_args: self._code_refresh_switch_reasoning())
+        self.code_followup.bind("<Control-Return>", lambda _event: (self._code_send_followup(), "break")[1])
         self._code_sync_provider_buttons()
+        self._code_sync_compose_target()
+        self._code_recover_stranded_once()
+        self._code_refresh_projects()
         self._code_render_summary()
         self._code_render_sessions()
         self._code_refresh_all(force=False, token=token)
@@ -5972,8 +6395,87 @@ class HelperOverlay:
         """Compatibility alias for commands saved before the CODE rename."""
         self.render_code()
 
+    @staticmethod
+    def _compact_tokens(value):
+        count = int(value or 0)
+        if count >= 1_000_000_000:
+            return f"{count / 1_000_000_000:.1f}B"
+        if count >= 1_000_000:
+            return f"{count / 1_000_000:.1f}M"
+        if count >= 1_000:
+            return f"{count / 1_000:.1f}K"
+        return str(count)
+
+    def _code_refresh_usage_window(self):
+        """Trailing-28-day totals, summed from what providers actually reported."""
+        if not hasattr(self, "code_usage_var"):
+            return
+        token = self.code_view_token
+
+        def worker():
+            try:
+                import code_jobs
+
+                window = code_jobs.usage_window(28)
+            except Exception as exc:
+                window = {"error": f"{type(exc).__name__}: {exc}"}
+
+            def apply():
+                if token != self.code_view_token or not hasattr(self, "code_usage_var"):
+                    return
+                self.code_usage_window = window
+                if window.get("error"):
+                    self.code_usage_var.set("28d unavailable")
+                    return
+                usage = window.get("usage") or {}
+                tokens = int(usage.get("total_tokens") or 0)
+                cost = float(usage.get("cost_usd") or 0)
+                if not tokens and not cost:
+                    self.code_usage_var.set("28d no usage yet")
+                    return
+                self.code_usage_var.set(f"28d {self._compact_tokens(tokens)} tok · ${cost:,.2f}")
+
+            self.root.after(0, apply)
+
+        threading.Thread(target=worker, daemon=True, name="aios-code-usage").start()
+
+    def _code_show_usage_breakdown(self):
+        window = getattr(self, "code_usage_window", None)
+        if not isinstance(window, dict) or window.get("error"):
+            messagebox.showinfo("CODE usage", "28-day usage is not available yet.")
+            return
+        usage = window.get("usage") or {}
+        lines = [
+            f"Last {window.get('days', 28)} days · {window.get('sessions', 0)} sessions",
+            "",
+            f"Total tokens      {int(usage.get('total_tokens') or 0):,}",
+            f"  input           {int(usage.get('input_tokens') or 0):,}"
+            f"   (cached {int(usage.get('cached_input_tokens') or 0):,})",
+            f"  output          {int(usage.get('output_tokens') or 0):,}"
+            f"   (reasoning {int(usage.get('reasoning_tokens') or 0):,})",
+            f"Spend             ${float(usage.get('cost_usd') or 0):,.4f}",
+        ]
+        by_provider = window.get("by_provider") or {}
+        if by_provider:
+            lines += ["", "By provider"]
+            for provider, row in by_provider.items():
+                row_usage = row.get("usage") or {}
+                lines.append(
+                    f"  {provider:<12} {int(row_usage.get('total_tokens') or 0):>14,} tok"
+                    f"   ${float(row_usage.get('cost_usd') or 0):,.4f}"
+                    f"   ({row.get('sessions', 0)} sessions)"
+                )
+        missing = int(window.get("sessions_without_usage") or 0)
+        if missing:
+            lines += [
+                "",
+                f"{missing} session{'s' if missing != 1 else ''} reported no usage and are excluded.",
+                "CLI providers do not always return token counts.",
+            ]
+        messagebox.showinfo("CODE usage · last 28 days", "\n".join(lines))
+
     def _code_build_provider_picker(self, parent):
-        """Three logo buttons for Codex / Claude / Cursor instead of a dropdown."""
+        """Four logo buttons for Codex / Claude / Cursor / Ollama instead of a dropdown."""
         picker = tk.Frame(parent, bg=self.c("surface"))
         picker.pack(side="left", padx=(0, 10))
         icons = self._code_ensure_provider_icons()
@@ -6048,6 +6550,15 @@ class HelperOverlay:
 
     def _code_on_provider_changed(self):
         self._code_sync_provider_buttons()
+        provider = (self.code_provider_var.get() or "").strip().lower()
+        info = next(
+            (row for row in self.code_capabilities.get("providers") or [] if row.get("provider") == provider),
+            {},
+        )
+        if provider == "ollama" and not (info.get("models") or []):
+            self._code_refresh_capabilities(force=True, token=getattr(self, "code_view_token", 0))
+        if provider == "openrouter" and not (info.get("models") or []):
+            self._code_refresh_capabilities(force=True, token=getattr(self, "code_view_token", 0))
         self._code_refresh_selectors()
 
     def _code_sync_provider_buttons(self):
@@ -6074,6 +6585,15 @@ class HelperOverlay:
                 pass
 
     def _code_api(self, path, method="GET", payload=None, timeout=20):
+        """Call the CODE backend.
+
+        Prefer the in-process `code_jobs` module so the desktop UI always sees
+        current providers (including Ollama) even when the phone bridge process
+        is still running an older import.
+        """
+        local = self._code_api_local(path, method, payload)
+        if local is not None:
+            return local
         port = int(os.environ.get("AIOS_PHONE_BRIDGE_PORT", "5000"))
         data = json.dumps(payload).encode("utf-8") if payload is not None else None
         request = urllib.request.Request(
@@ -6093,6 +6613,118 @@ class HelperOverlay:
                 return {"ok": False, "error": raw or str(exc)}
         except Exception as exc:
             return {"ok": False, "error": f"CODE backend unavailable: {exc}"}
+
+    def _code_api_local(self, path, method="GET", payload=None):
+        """Dispatch common CODE routes to local code_jobs. Returns None to fall back."""
+        try:
+            import code_jobs
+        except Exception:
+            return None
+        method = str(method or "GET").upper()
+        raw_path = str(path or "")
+        route = raw_path.split("?", 1)[0].rstrip("/")
+        query = raw_path.split("?", 1)[1] if "?" in raw_path else ""
+        params = urllib.parse.parse_qs(query)
+        data = payload if isinstance(payload, dict) else {}
+
+        try:
+            if route in {"/api/code/capabilities", "/api/phone/code/capabilities"} and method == "GET":
+                force = str((params.get("refresh") or [""])[0]).lower() in {"1", "true", "yes"}
+                return code_jobs.capabilities(force=force)
+
+            if route.startswith("/api/code/providers/") and route.endswith("/setup") and method == "POST":
+                provider = route.split("/")[-2]
+                return code_jobs.setup_provider(provider)
+
+            if route == "/api/code/projects":
+                if method == "GET":
+                    return {"ok": True, "projects": code_jobs.list_projects()}
+                if method == "POST":
+                    return code_jobs.add_project(str(data.get("path") or ""), str(data.get("name") or ""))
+
+            if route.startswith("/api/code/projects/") and method == "DELETE":
+                return code_jobs.remove_project(route.rsplit("/", 1)[-1])
+
+            if route == "/api/code/jobs/retitle" and method == "POST":
+                try:
+                    limit = int(data.get("limit") or 250)
+                except (TypeError, ValueError):
+                    limit = 250
+                try:
+                    workers = int(data.get("workers") or 0)
+                except (TypeError, ValueError):
+                    workers = 0
+                return code_jobs.refresh_session_titles(
+                    limit=limit,
+                    force=bool(data.get("force")),
+                    project=data.get("project"),
+                    workers=workers or None,
+                    wait=bool(data.get("wait")),
+                )
+
+            if route in {"/api/code/jobs", "/api/phone/code/jobs"}:
+                if method == "GET":
+                    try:
+                        limit = int((params.get("limit") or ["100"])[0])
+                    except (TypeError, ValueError):
+                        limit = 100
+                    return {"ok": True, "jobs": code_jobs.list_jobs(limit)}
+                if method == "POST":
+                    cwd = str(data.get("cwd") or data.get("project") or "").strip()
+                    return code_jobs.create_job(
+                        str(data.get("provider") or data.get("cli") or ""),
+                        cwd,
+                        str(data.get("brief") or data.get("text") or ""),
+                        str(data.get("model") or ""),
+                        str(data.get("reasoning") or data.get("effort") or ""),
+                        fast=bool(data.get("fast")),
+                        title=str(data.get("title") or ""),
+                        attachments=data.get("attachments") or [],
+                    )
+
+            parts = route.split("/")
+            # /api/code/jobs/<id>[/messages|/stop|/handoff|/log]
+            if len(parts) >= 5 and parts[1] == "api" and parts[2] == "code" and parts[3] == "jobs":
+                job_id = parts[4]
+                action = parts[5] if len(parts) > 5 else ""
+                if method == "GET" and not action:
+                    job = code_jobs.get_job(job_id)
+                    return {"ok": True, "job": job} if job else {"ok": False, "error": "unknown CODE job"}
+                if method == "DELETE" and not action:
+                    confirmed = str(data.get("confirm") or "") == str(job_id)
+                    return code_jobs.delete_job(job_id, confirmed=confirmed)
+                if method == "POST" and action in {"messages", "continue"}:
+                    return code_jobs.send_message(
+                        job_id,
+                        str(data.get("text") or data.get("message") or ""),
+                        urgent=bool(data.get("urgent")),
+                        attachments=data.get("attachments") or [],
+                        model=str(data.get("model") or ""),
+                        reasoning=str(data.get("reasoning") or data.get("effort") or ""),
+                        fast=data.get("fast") if "fast" in data else None,
+                    )
+                if method == "POST" and action == "stop":
+                    return code_jobs.stop_job(job_id)
+                if method == "POST" and action == "compact":
+                    return code_jobs.compact_job_context(job_id, force=bool(data.get("force")))
+                if method == "POST" and action == "handoff":
+                    return code_jobs.handoff_job(
+                        job_id,
+                        str(data.get("provider") or data.get("target_provider") or ""),
+                        str(data.get("model") or data.get("target_model") or ""),
+                        str(data.get("reasoning") or data.get("effort") or data.get("target_reasoning") or ""),
+                        fast=bool(data.get("fast") if "fast" in data else data.get("target_fast")),
+                        instruction=str(data.get("instruction") or data.get("text") or ""),
+                    )
+                if method == "GET" and action in {"log", "events"}:
+                    try:
+                        since = int((params.get("since") or ["0"])[0])
+                    except (TypeError, ValueError):
+                        since = 0
+                    return code_jobs.read_events(job_id, since)
+        except Exception as exc:
+            return {"ok": False, "error": f"Local CODE backend error: {exc}"}
+        return None
 
     def _poll_code_notifications(self):
         """Relay CODE milestones even when the CODE tab is not open."""
@@ -6187,6 +6819,79 @@ class HelperOverlay:
         selected = filedialog.askdirectory(initialdir=self.code_project_var.get() or str(self.project_root))
         if selected:
             self.code_project_var.set(selected)
+            self.config["code_last_project_path"] = selected
+            save_config(self.config)
+            def worker():
+                result = self._code_api("/api/code/projects", "POST", {"path": selected}, timeout=15)
+                self.root.after(0, lambda: self._code_apply_projects(result))
+            threading.Thread(target=worker, daemon=True, name="aios-code-add-project").start()
+
+    def _code_recover_stranded_once(self):
+        """Settle sessions the previous aiOS process left mid-turn.
+
+        Local and OpenRouter turns run inside this process, so a restart strands
+        them at 'running'. This overlay owns them, so it is the one place that
+        may write the terminal state.
+        """
+        if getattr(self, "_code_recovered", False):
+            return
+        self._code_recovered = True
+
+        def worker():
+            try:
+                import code_jobs
+
+                code_jobs.recover_interrupted()
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, daemon=True, name="aios-code-recover").start()
+
+    def _code_refresh_projects(self):
+        def worker():
+            result = self._code_api("/api/code/projects", timeout=15)
+            self.root.after(0, lambda: self._code_apply_projects(result))
+        threading.Thread(target=worker, daemon=True, name="aios-code-projects").start()
+
+    def _code_apply_projects(self, result):
+        if self.active_tab != "CODE" or not hasattr(self, "code_project_menu"):
+            return
+        if result.get("ok"):
+            self.code_projects = result.get("projects") or self.code_projects
+        current_path = self.code_project_var.get().strip()
+        rows = list(self.code_projects)
+        if current_path and not any(str(row.get("path") or "").casefold() == current_path.casefold() for row in rows):
+            rows.insert(0, {"name": Path(current_path).name or current_path, "path": current_path, "exists": Path(current_path).is_dir()})
+        counts = {}
+        for row in rows:
+            name = str(row.get("name") or Path(str(row.get("path") or "")).name or row.get("path") or "Project")
+            counts[name.casefold()] = counts.get(name.casefold(), 0) + 1
+        self._code_project_labels = {}
+        for row in rows:
+            path = str(row.get("path") or "")
+            name = str(row.get("name") or Path(path).name or path)
+            label = name if counts.get(name.casefold(), 0) == 1 else f"{name} — {path}"
+            if not row.get("exists", True):
+                label += " (missing)"
+            self._code_project_labels[label] = path
+        menu = self.code_project_menu["menu"]
+        menu.delete(0, "end")
+        for label in self._code_project_labels:
+            menu.add_command(label=label, command=tk._setit(self.code_project_choice_var, label))
+        selected_label = next((label for label, path in self._code_project_labels.items() if path.casefold() == current_path.casefold()), "")
+        if selected_label:
+            self.code_project_choice_var.set(selected_label)
+        self._code_sessions_signature = None
+        self._code_render_sessions()
+
+    def _code_choose_project(self):
+        label = self.code_project_choice_var.get()
+        path = getattr(self, "_code_project_labels", {}).get(label)
+        if not path:
+            return
+        self.code_project_var.set(path)
+        self.config["code_last_project_path"] = path
+        save_config(self.config)
 
     def _code_attach_create(self):
         paths = list(filedialog.askopenfilenames(title="Attach files or images to the CODE job"))
@@ -6220,8 +6925,17 @@ class HelperOverlay:
         if force or not self.code_capabilities.get("providers"):
             self._code_refresh_capabilities(force=force, token=token)
 
+        now = time.monotonic()
+        refresh_listing = bool(
+            force
+            or not self.code_jobs
+            or now - float(getattr(self, "_code_listing_at", 0.0)) >= 1.25
+        )
+        if refresh_listing:
+            self._code_listing_at = now
+
         def worker():
-            listing = self._code_api("/api/code/jobs?limit=250", timeout=10)
+            listing = self._code_api("/api/code/jobs?limit=250", timeout=10) if refresh_listing else None
             log = self._code_api(f"/api/code/jobs/{selected}/log?since={since}", timeout=10) if selected else None
             self.root.after(
                 0,
@@ -6252,6 +6966,7 @@ class HelperOverlay:
         if caps.get("ok"):
             self.code_capabilities = caps
             self._code_refresh_selectors()
+            self._code_refresh_switch_selectors()
             self._code_render_summary()
 
     def _code_apply_refresh(self, token, request_id, selected, listing, log, requested_since):
@@ -6261,14 +6976,14 @@ class HelperOverlay:
         self._code_refresh_inflight = None
         if self.active_tab != "CODE" or token != self.code_view_token:
             return
-        if listing.get("ok"):
+        if listing and listing.get("ok"):
             self.code_jobs = listing.get("jobs") or []
             self._code_render_summary()
             self._code_render_sessions()
             current = next((job for job in self.code_jobs if job.get("id") == self.code_selected_id), None)
             if current:
                 self._code_render_detail_meta(current)
-        else:
+        elif listing:
             self.code_health_var.set(listing.get("error") or "CODE backend unavailable")
         # A click can select another session while this request is in flight.
         # Never append the old session's log to the newly selected chat.
@@ -6276,16 +6991,34 @@ class HelperOverlay:
             initial_render = bool(log.get("reset") or requested_since == 0)
             if initial_render:
                 self._code_chat_reset()
-                self.code_auto_follow = False
-            for event in log.get("events") or []:
+                self._code_set_auto_follow(False)
+            events = log.get("events") or []
+            if initial_render and len(events) > CODE_HISTORY_RENDER_LIMIT:
+                # Building thousands of widgets on the Tk thread is what made
+                # switching into a long session feel frozen. Older output is
+                # still on disk; only the tail needs to be on screen.
+                hidden = len(events) - CODE_HISTORY_RENDER_LIMIT
+                events = events[-CODE_HISTORY_RENDER_LIMIT:]
+                self._code_add_status(
+                    f"{hidden:,} earlier events hidden · showing the latest {CODE_HISTORY_RENDER_LIMIT:,}"
+                )
+            for event in events:
                 self._code_render_event(event, live=requested_since > 0)
             if initial_render:
-                self.code_auto_follow = True
+                self._code_set_auto_follow(True)
                 self._code_chat_scroll_end(force=True)
             self.code_log_size = int(log.get("size") or self.code_log_size)
             if log.get("job"):
-                self._code_render_detail_meta(log["job"])
-        self.code_poll_after = self.root.after(1500, self._code_refresh_all)
+                detail = dict(log["job"])
+                # The listing knows whether a worker is actually alive; the raw
+                # job file can still say "running" after aiOS was restarted.
+                listed = next((row for row in self.code_jobs if row.get("id") == detail.get("id")), None)
+                if listed and listed.get("status"):
+                    detail["status"] = listed["status"]
+                self._code_render_detail_meta(detail)
+        current = next((job for job in self.code_jobs if job.get("id") == self.code_selected_id), None)
+        active = bool(current and current.get("status") in {"queued", "running", "waiting_user"})
+        self.code_poll_after = self.root.after(250 if active else 900, self._code_refresh_all)
 
     def _code_render_summary(self):
         active = sum(job.get("status") in {"queued", "running"} for job in self.code_jobs)
@@ -6294,6 +7027,11 @@ class HelperOverlay:
         self.code_active_var.set(f"{active} active")
         self.code_waiting_var.set(f"{waiting} need you")
         self.code_done_var.set(f"{done} finished")
+        # Recompute the trailing window only when a session actually settles;
+        # it walks every job file and must not run on the 250ms poll.
+        if getattr(self, "_code_last_finished_count", None) != done:
+            self._code_last_finished_count = done
+            self._code_refresh_usage_window()
         health = []
         for provider in self.code_capabilities.get("providers") or []:
             health.append(f"{provider.get('provider', '').title()} {'ready' if provider.get('ready') else 'setup needed'}")
@@ -6310,27 +7048,233 @@ class HelperOverlay:
         if not self.code_jobs:
             self.muted(self.code_sessions_frame.inner, "No sessions yet. Launch one here or ask the voice agent.").pack(fill="x", padx=8, pady=20)
             return
-        colors = {"codex": "#65b8ff", "claude": "#dc795a", "cursor": "#b892ff"}
+        colors = {
+            "codex": "#65b8ff",
+            "claude": "#dc795a",
+            "cursor": "#b892ff",
+            "ollama": "#9aa0a6",
+            "openrouter": "#a78bfa",
+        }
+        grouped = {}
         for job in self.code_jobs:
+            key = str(job.get("cwd") or job.get("project_name") or "Other")
+            grouped.setdefault(key, []).append(job)
+        project_names = {str(row.get("path") or "").casefold(): str(row.get("name") or "") for row in self.code_projects}
+        ordered_groups = sorted(
+            grouped.items(),
+            key=lambda item: max(float(job.get("updated_at") or 0) for job in item[1]),
+            reverse=True,
+        )
+        if not hasattr(self, "code_collapsed"):
+            self.code_collapsed = {}
+        for project_path, jobs in ordered_groups:
+            collapsed = self.code_collapsed.get(project_path, True)
+            project_label = project_names.get(project_path.casefold()) or str(jobs[0].get("project_name") or Path(project_path).name or project_path)
+            header = tk.Frame(self.code_sessions_frame.inner, bg=self.c("surface"))
+            header.pack(fill="x", padx=8, pady=(8, 2))
+            arrow = tk.Label(
+                header,
+                text="\u25bc" if not collapsed else "\u25b6",
+                bg=self.c("surface"),
+                fg=self.c("muted"),
+                font=self.font(7, "bold"),
+                cursor="hand2",
+            )
+            arrow.pack(side="left", padx=(0, 3))
+            arrow.bind("<Button-1>", lambda _event, pp=project_path: self._code_toggle_collapse(pp))
+            arrow.bind("<Enter>", lambda _event, lbl=arrow: lbl.configure(fg=self.c("accent")))
+            arrow.bind("<Leave>", lambda _event, lbl=arrow: lbl.configure(fg=self.c("muted")))
+            tk.Label(
+                header,
+                text=project_label.upper(),
+                bg=self.c("surface"),
+                fg=self.c("muted"),
+                font=self.font(7, "bold"),
+                anchor="w",
+            ).pack(side="left")
+            plus = tk.Label(
+                header,
+                text="+",
+                bg=self.c("surface"),
+                fg=self.c("muted"),
+                font=self.font(8, "bold"),
+                cursor="hand2",
+            )
+            plus.pack(side="right", padx=(4, 0))
+            plus.bind("<Button-1>", lambda _event, pp=project_path: self._code_project_plus(pp))
+            plus.bind("<Enter>", lambda _event, lbl=plus: lbl.configure(fg=self.c("accent")))
+            plus.bind("<Leave>", lambda _event, lbl=plus: lbl.configure(fg=self.c("muted")))
+            if not collapsed:
+                for job in sorted(jobs, key=lambda row: float(row.get("updated_at") or 0), reverse=True):
+                    self._code_render_session_row(job, colors)
+
+    def _code_render_session_row(self, job, colors):
+        if True:  # keep the row construction visually grouped
             selected = job.get("id") == self.code_selected_id
+            # Selection reads from the lifted background alone; a border here
+            # made every row in a long session list look like a box.
             item = tk.Frame(
                 self.code_sessions_frame.inner,
                 bg=self.c("panel2") if selected else self.c("surface"),
-                highlightthickness=1 if selected else 0,
-                highlightbackground=self.c("accent"),
+                highlightthickness=0,
                 cursor="hand2",
             )
-            item.pack(fill="x", padx=4, pady=3)
+            item.pack(fill="x", padx=4, pady=2)
             dot = tk.Label(item, text="●", bg=item.cget("bg"), fg=colors.get(job.get("provider"), self.c("muted")), font=self.font(7))
-            dot.pack(side="left", padx=(7, 5), pady=8)
+            dot.pack(side="left", padx=(7, 5), pady=6)
             copy = tk.Frame(item, bg=item.cget("bg"))
-            copy.pack(side="left", fill="x", expand=True, pady=6)
+            copy.pack(side="left", fill="x", expand=True, pady=4)
             title = tk.Label(copy, text=str(job.get("title") or "CODE job"), bg=item.cget("bg"), fg=self.c("text"), font=self.font(8, "bold"), anchor="w")
             title.pack(fill="x")
             meta = tk.Label(copy, text=f"{job.get('project_name', '')} · {job.get('status', '')}", bg=item.cget("bg"), fg=self.c("muted"), font=self.font(7), anchor="w")
             meta.pack(fill="x")
             for widget in (item, dot, copy, title, meta):
                 widget.bind("<Button-1>", lambda _event, value=job.get("id"): self._code_select_job(value))
+
+    def _code_project_plus(self, project_path):
+        """The + beside a project heading starts a fresh session in it."""
+        self.code_project_var.set(str(project_path or ""))
+        self.code_project_choice_var.set(Path(str(project_path or "")).name or "")
+        self.config["code_last_project_path"] = str(project_path or "")
+        save_config(self.config)
+        # Without this the old transcript stays open and the composer keeps
+        # sending follow-ups to whichever session was already selected.
+        self._code_new_session()
+        self._code_refresh_projects()
+
+    def _code_toggle_collapse(self, project_path):
+        """Toggle collapse state for a project group and re-render."""
+        if not hasattr(self, "code_collapsed"):
+            self.code_collapsed = {}
+        current = self.code_collapsed.get(project_path, False)
+        self.code_collapsed[project_path] = not current
+        # Invalidate the session signature so the next render is not skipped.
+        self._code_sessions_signature = None
+        self._code_render_sessions()
+
+    def _code_compose_send(self):
+        """One button: follow up on the open session, or start a new one."""
+        if self.code_selected_id:
+            self._code_send_followup()
+        else:
+            self._code_start_job()
+
+    def _code_new_session(self):
+        self.code_selected_id = ""
+        self.code_log_size = 0
+        self._code_sessions_signature = None
+        self._code_chat_reset()
+        self._code_set_busy(False)
+        self._code_render_sessions()
+        self._code_sync_compose_target()
+        if hasattr(self, "code_detail_title_var"):
+            self.code_detail_title_var.set("New session")
+            self.code_detail_meta_var.set("Describe what you want built, then press Launch.")
+        try:
+            self.code_followup.focus_set()
+        except tk.TclError:
+            pass
+
+    def _code_show_session_chrome(self, showing):
+        """Telemetry and the handover row only make sense with a session open."""
+        for name, options in (
+            ("code_telemetry_row", {"fill": "x", "padx": 10, "pady": (0, 5)}),
+            ("code_switch_row", {"fill": "x", "padx": 10, "pady": (0, 5)}),
+        ):
+            widget = getattr(self, name, None)
+            if widget is None:
+                continue
+            try:
+                if showing:
+                    if not widget.winfo_ismapped():
+                        widget.pack(before=self.code_chat.master, **options)
+                else:
+                    widget.pack_forget()
+            except tk.TclError:
+                pass
+
+    def _code_sync_compose_target(self, job=None):
+        """Keep the composer strip describing exactly where a message will go."""
+        if not hasattr(self, "code_target_var"):
+            return
+        self._code_show_session_chrome(bool(self.code_selected_id and job))
+        if self.code_selected_id and job:
+            provider = str(job.get("provider") or "").title()
+            model = str(job.get("model") or "")
+            name = str(job.get("project_name") or Path(str(job.get("cwd") or "")).name or "")
+            self.code_target_var.set(f"↩ {name} · {provider} {model}")
+            self.code_send_label.set("Send ▸")
+            try:
+                self.code_new_session_button.pack(side="left", padx=(12, 0))
+                self.code_urgent_check.pack(side="right")
+            except tk.TclError:
+                pass
+        else:
+            project = Path(self.code_project_var.get().strip() or ".").name or self.code_project_var.get()
+            provider = self.code_provider_var.get()
+            model = self.code_model_var.get()
+            self.code_target_var.set(f"▸ New session in {project} · {provider} {model}")
+            self.code_send_label.set("Launch ▸")
+            try:
+                self.code_new_session_button.pack_forget()
+                self.code_urgent_check.pack_forget()
+            except tk.TclError:
+                pass
+        try:
+            self.code_send_button.configure(text=self.code_send_label.get())
+        except tk.TclError:
+            pass
+
+    def _code_open_target_menu(self):
+        """Pick the project and agent for the next message, in one place."""
+        menu = tk.Menu(self.root, tearoff=0, bg=self.c("panel"), fg=self.c("text"),
+                       activebackground=self.c("accent"), activeforeground="#ffffff",
+                       bd=0, font=self.font(9))
+        projects = tk.Menu(menu, tearoff=0, bg=self.c("panel"), fg=self.c("text"),
+                           activebackground=self.c("accent"), activeforeground="#ffffff", bd=0)
+        for row in getattr(self, "code_projects", []) or []:
+            path = str(row.get("path") or "")
+            projects.add_command(
+                label=f"{row.get('name') or Path(path).name}   {path}",
+                command=lambda p=path: self._code_pick_project(p),
+            )
+        projects.add_separator()
+        projects.add_command(label="Add folder…", command=self._code_browse_project)
+        menu.add_cascade(label="Project", menu=projects)
+
+        agents = tk.Menu(menu, tearoff=0, bg=self.c("panel"), fg=self.c("text"),
+                         activebackground=self.c("accent"), activeforeground="#ffffff", bd=0)
+        for provider, _icon, label in CODE_PROVIDER_CHOICES:
+            agents.add_command(label=label, command=lambda p=provider: self.code_provider_var.set(p))
+        menu.add_cascade(label="Agent", menu=agents)
+
+        models = tk.Menu(menu, tearoff=0, bg=self.c("panel"), fg=self.c("text"),
+                         activebackground=self.c("accent"), activeforeground="#ffffff", bd=0)
+        info = next((row for row in self.code_capabilities.get("providers") or []
+                     if row.get("provider") == self.code_provider_var.get()), {})
+        for model in info.get("models") or []:
+            model_id = str(model.get("id") or "")
+            if not model_id:
+                continue
+            models.add_command(
+                label=str(model.get("short_label") or model.get("label") or model_id),
+                command=lambda m=model_id: self.code_model_var.set(m),
+            )
+        menu.add_cascade(label="Model", menu=models)
+        menu.add_separator()
+        menu.add_command(label="Open project folder", command=self._code_browse_project)
+        try:
+            menu.tk_popup(self.code_target_button.winfo_rootx(),
+                          self.code_target_button.winfo_rooty() - 8)
+        finally:
+            menu.grab_release()
+
+    def _code_pick_project(self, path):
+        self.code_project_var.set(str(path))
+        self.code_project_choice_var.set(Path(str(path)).name or str(path))
+        self.config["code_last_project_path"] = str(path)
+        save_config(self.config)
+        self._code_sync_compose_target()
 
     def _code_select_job(self, job_id):
         self.code_selected_id = str(job_id or "")
@@ -6341,6 +7285,7 @@ class HelperOverlay:
         self._code_refresh_all()
 
     def _code_render_detail_meta(self, job):
+        self._code_sync_compose_target(job)
         self.code_detail_title_var.set(str(job.get("title") or "CODE job"))
         fast = " · fast" if job.get("fast") else ""
         self.code_detail_meta_var.set(
@@ -6349,10 +7294,109 @@ class HelperOverlay:
         active = job.get("status") in {"queued", "running", "waiting_user"}
         self.code_stop_button.configure(state="normal" if active else "disabled")
         self.code_delete_button.configure(state="disabled" if active else "normal")
+        if hasattr(self, "code_telemetry_vars"):
+            started = float(job.get("started_at") or job.get("created_at") or 0)
+            if active and started:
+                elapsed = max(0, int(time.time() - started))
+            else:
+                elapsed = max(0, int(job.get("elapsed_seconds") or ((float(job.get("completed_at") or 0) - started) if started else 0)))
+            usage = job.get("usage") if isinstance(job.get("usage"), dict) else {}
+            total_tokens = int(usage.get("total_tokens") or 0)
+            speed = job.get("tokens_per_second")
+            cost = float(job.get("estimated_cost_usd") or usage.get("cost_usd") or 0)
+            self.code_telemetry_vars["elapsed"].set(f"TIME {format_duration(elapsed)}")
+            self.code_telemetry_vars["speed"].set(f"TOK/S {float(speed):.1f}" if speed is not None else "TOK/S —")
+            self.code_telemetry_vars["tokens"].set(f"TOKENS {total_tokens:,}" if total_tokens else "TOKENS —")
+            self.code_telemetry_vars["cost"].set(f"COST ${cost:.4f}" if cost > 0 else "COST —")
+            self.code_telemetry_vars["files"].set(f"FILES {int(job.get('files_edited') or 0)}")
+            self.code_telemetry_vars["diff"].set(f"+{int(job.get('lines_added') or 0):,} / -{int(job.get('lines_deleted') or 0):,}")
+        if hasattr(self, "code_switch_provider_var") and getattr(self, "_code_switch_bound_job", None) != str(job.get("id") or ""):
+            self._code_switch_bound_job = str(job.get("id") or "")
+            self.code_switch_provider_var.set(str(job.get("provider") or "codex"))
+            self._code_refresh_switch_selectors(preferred_model=str(job.get("model") or ""))
+            self.code_switch_reasoning_var.set(str(job.get("reasoning") or "medium"))
+            self.code_switch_fast_var.set(bool(job.get("fast")))
+            self._code_refresh_switch_reasoning()
+        if hasattr(self, "code_switch_button"):
+            self.code_switch_button.configure(state="normal" if self.code_selected_id else "disabled")
         self._code_set_busy(
             job.get("status") in {"queued", "running"},
             f"{str(job.get('provider') or 'Agent').title()} is working",
         )
+
+    def _code_refresh_switch_selectors(self, preferred_model=""):
+        if not hasattr(self, "code_switch_model_menu"):
+            return
+        provider = self.code_switch_provider_var.get().strip().lower()
+        info = next((row for row in self.code_capabilities.get("providers") or [] if row.get("provider") == provider), {})
+        models = info.get("models") or []
+        ids = [str(row.get("id")) for row in models if row.get("id")]
+        if not ids:
+            ids = {
+                "codex": ["gpt-5.6-sol"],
+                "claude": ["sonnet"],
+                "cursor": ["auto"],
+                "ollama": ["qwen3.6-agent:27b"],
+                "openrouter": ["deepseek/deepseek-v4-flash"],
+            }.get(provider, [])
+        labels = {str(row.get("id")): str(row.get("short_label") or row.get("label") or row.get("id")) for row in models}
+        menu = self.code_switch_model_menu["menu"]
+        menu.delete(0, "end")
+        for model_id in ids:
+            menu.add_command(label=labels.get(model_id, model_id), command=tk._setit(self.code_switch_model_var, model_id))
+        choice = str(preferred_model or self.code_switch_model_var.get())
+        if choice not in ids and ids:
+            default = next((row for row in models if row.get("default")), {})
+            choice = str(default.get("id") or ids[0])
+        if choice:
+            self.code_switch_model_var.set(choice)
+        self._code_refresh_switch_reasoning()
+
+    def _code_refresh_switch_reasoning(self):
+        if not hasattr(self, "code_switch_reasoning_menu"):
+            return
+        provider = self.code_switch_provider_var.get().strip().lower()
+        info = next((row for row in self.code_capabilities.get("providers") or [] if row.get("provider") == provider), {})
+        model = next((row for row in info.get("models") or [] if str(row.get("id")) == self.code_switch_model_var.get()), {})
+        efforts = [str(value) for value in model.get("reasoning") or ["medium"]]
+        menu = self.code_switch_reasoning_menu["menu"]
+        menu.delete(0, "end")
+        for effort in efforts:
+            menu.add_command(label=effort, command=tk._setit(self.code_switch_reasoning_var, effort))
+        if self.code_switch_reasoning_var.get() not in efforts:
+            preferred = str(model.get("default_reasoning") or "medium")
+            self.code_switch_reasoning_var.set(preferred if preferred in efforts else efforts[0])
+        fast_supported = bool(model.get("fast"))
+        self.code_switch_fast_check.configure(state="normal" if fast_supported else "disabled")
+        if not fast_supported:
+            self.code_switch_fast_var.set(False)
+
+    def _code_switch_job(self):
+        if not self.code_selected_id:
+            return
+        job_id = self.code_selected_id
+        payload = {
+            "provider": self.code_switch_provider_var.get(),
+            "model": self.code_switch_model_var.get(),
+            "reasoning": self.code_switch_reasoning_var.get(),
+            "fast": self.code_switch_fast_var.get(),
+        }
+        self.code_health_var.set(f"Handing off to {payload['provider'].title()} · {payload['model']}…")
+        self.code_switch_button.configure(state="disabled")
+
+        def worker():
+            result = self._code_api(f"/api/code/jobs/{job_id}/handoff", "POST", payload, timeout=45)
+            self.root.after(0, lambda: self._code_switched(result))
+
+        threading.Thread(target=worker, daemon=True, name="aios-code-handoff").start()
+
+    def _code_switched(self, result):
+        if not result.get("ok"):
+            self.code_switch_button.configure(state="normal")
+            messagebox.showerror("CODE model switch", result.get("error") or "Could not switch this session.")
+            return
+        self._code_sessions_signature = None
+        self._code_refresh_all(force=True)
 
     # ---- CODE session chat -------------------------------------------------
 
@@ -6366,9 +7410,25 @@ class HelperOverlay:
             return False
 
     def _code_chat_reset(self):
+        pending_scroll = getattr(self, "code_scroll_after", None)
+        if pending_scroll is not None:
+            try:
+                self.root.after_cancel(pending_scroll)
+            except (AttributeError, tk.TclError):
+                pass
+        self.code_scroll_after = None
+        pending_restore = getattr(self, "code_restore_after", None)
+        if pending_restore is not None:
+            try:
+                self.root.after_cancel(pending_restore)
+            except (AttributeError, tk.TclError):
+                pass
+        self.code_restore_after = None
+        self.code_restore_y = None
         self.code_last_rendered_kind = ""
         self.code_activity_cards = {}
         self.code_stream = None
+        self.code_thinking = None
         self.code_turn_assistant_text = ""
         self.code_busy_row = None
         self.code_busy_label = None
@@ -6413,20 +7473,70 @@ class HelperOverlay:
         if not self._code_chat_live():
             return True
         try:
-            _first, last = self.code_chat.canvas.yview()
-            return float(last) >= 0.999
+            canvas = self.code_chat.canvas
+            bounds = canvas.bbox("all")
+            if not bounds:
+                return True
+            viewport_bottom = float(canvas.canvasy(canvas.winfo_height()))
+            return float(bounds[3]) - viewport_bottom <= 56.0
         except (tk.TclError, TypeError, ValueError):
             return True
+
+    def _code_set_auto_follow(self, following):
+        """Single source of truth for whether the chat tracks new output."""
+        following = bool(following)
+        self.code_auto_follow = following
+        chat = getattr(self, "code_chat", None)
+        if chat is not None:
+            try:
+                chat.stick_to_bottom = following
+            except tk.TclError:
+                pass
+        self._code_update_jump_button()
+
+    def _code_update_jump_button(self):
+        button = getattr(self, "code_jump_button", None)
+        if button is None:
+            return
+        try:
+            if getattr(self, "code_auto_follow", True):
+                button.place_forget()
+            else:
+                button.place(relx=0.5, rely=1.0, anchor="s", y=-10)
+                button.lift()
+        except tk.TclError:
+            pass
+
+    def _code_jump_to_latest(self):
+        self._code_set_auto_follow(True)
+        if self._code_chat_live():
+            self.code_chat.pin_to_bottom()
 
     def _code_chat_user_scrolled(self, wheel_delta=None):
         # Freeze following immediately; otherwise a streaming event arriving
         # before after_idle can snap the user back to the bottom.
-        self.code_auto_follow = False
+        self._code_set_auto_follow(False)
+        pending_scroll = getattr(self, "code_scroll_after", None)
+        if pending_scroll is not None:
+            try:
+                self.root.after_cancel(pending_scroll)
+            except (AttributeError, tk.TclError):
+                pass
+            self.code_scroll_after = None
+        pending_restore = getattr(self, "code_restore_after", None)
+        if pending_restore is not None:
+            try:
+                self.root.after_cancel(pending_restore)
+            except (AttributeError, tk.TclError):
+                pass
+            self.code_restore_after = None
+            self.code_restore_y = None
+        # Scrolling up is always a deliberate "stop following" gesture.
         if wheel_delta is not None and float(wheel_delta or 0) > 0:
             return
 
         def update():
-            self.code_auto_follow = self._code_chat_near_bottom()
+            self._code_set_auto_follow(self._code_chat_near_bottom())
         try:
             self.root.after_idle(update)
         except tk.TclError:
@@ -6441,25 +7551,58 @@ class HelperOverlay:
     def _code_chat_scroll_end(self, force=False):
         if not self._code_chat_live() or (not force and not getattr(self, "code_auto_follow", True)):
             return
+        if getattr(self, "code_scroll_after", None) is not None:
+            return
 
         def apply():
+            self.code_scroll_after = None
             try:
                 if not force and not getattr(self, "code_auto_follow", True):
                     return
-                self.code_chat.canvas.update_idletasks()
-                bounds = self.code_chat.canvas.bbox("all")
-                if bounds:
-                    self.code_chat.canvas.configure(scrollregion=bounds)
-                self.code_chat.canvas.yview_moveto(1.0)
-                self.code_auto_follow = True
+                if force:
+                    self._code_set_auto_follow(True)
+                self.code_chat.pin_to_bottom()
             except tk.TclError:
                 pass
 
-        apply()
         try:
-            self.root.after_idle(apply)
+            self.code_scroll_after = self.root.after_idle(apply)
         except tk.TclError:
-            pass
+            self.code_scroll_after = None
+
+    def _code_chat_preserve_view(self):
+        """Remember a user's reading position while content grows below it."""
+        if not self._code_chat_live() or getattr(self, "code_auto_follow", True):
+            return
+        try:
+            self.code_restore_y = float(self.code_chat.canvas.canvasy(0))
+        except (tk.TclError, TypeError, ValueError):
+            return
+        if getattr(self, "code_restore_after", None) is not None:
+            return
+
+        def restore():
+            self.code_restore_after = None
+            target = self.code_restore_y
+            self.code_restore_y = None
+            if target is None or getattr(self, "code_auto_follow", True):
+                return
+            try:
+                canvas = self.code_chat.canvas
+                canvas.update_idletasks()
+                bounds = canvas.bbox("all")
+                if not bounds:
+                    return
+                canvas.configure(scrollregion=bounds)
+                height = max(1.0, float(bounds[3] - bounds[1]))
+                canvas.yview_moveto(max(0.0, min(1.0, (float(target) - float(bounds[1])) / height)))
+            except (tk.TclError, TypeError, ValueError):
+                pass
+
+        try:
+            self.code_restore_after = self.root.after_idle(restore)
+        except tk.TclError:
+            self.code_restore_after = None
 
     def _code_chat_row(self):
         """One transcript row, always kept above the live spinner line."""
@@ -6636,11 +7779,54 @@ class HelperOverlay:
         widget.configure(state="disabled")
         self._code_fit_text(widget)
 
+    def _code_rounded_card(self, parent, bg, *, radius=10, side="left", anchor="w", padx=(2, 40)):
+        """Borderless card with rounded corners.
+
+        Tk frames cannot round their corners, so the card body sits on a canvas
+        whose rounded background is redrawn whenever the content resizes.
+        """
+        canvas = tk.Canvas(
+            parent,
+            bg=self.CODE_CHAT_BG,
+            highlightthickness=0,
+            bd=0,
+            height=1,
+            takefocus=0,
+        )
+        # Full-width cards stretch; a right-aligned bubble hugs its content.
+        stretch = side == "left"
+        canvas.pack(side=side, anchor=anchor, fill="x" if stretch else "none",
+                    expand=stretch, padx=padx)
+        shape = rounded_rect(canvas, 0, 0, 1, 1, radius, fill=bg, outline=bg)
+        inner = tk.Frame(canvas, bg=bg)
+        window = canvas.create_window(0, 0, window=inner, anchor="nw")
+        sizes = {"w": 0, "h": 0}
+
+        def redraw(_event=None):
+            try:
+                width = max(1, canvas.winfo_width() if stretch else inner.winfo_reqwidth())
+                height = max(1, inner.winfo_reqheight())
+                if (width, height) == (sizes["w"], sizes["h"]):
+                    return
+                sizes["w"], sizes["h"] = width, height
+                if stretch:
+                    canvas.configure(height=height)
+                else:
+                    canvas.configure(width=width, height=height)
+                canvas.itemconfigure(window, width=width)
+                canvas.coords(shape, *rounded_rect_points(0, 0, width, height, radius))
+            except tk.TclError:
+                pass
+
+        canvas.bind("<Configure>", redraw)
+        inner.bind("<Configure>", redraw)
+        canvas.after_idle(redraw)
+        return canvas, inner
+
     def _code_add_user_bubble(self, text):
         row = self._code_chat_row()
         bg = self.blend_color(self.CODE_CHAT_BG, self.c("accent"), 0.26)
-        bubble = tk.Frame(row, bg=bg, highlightthickness=1, highlightbackground=self.blend_color(bg, "#ffffff", 0.12))
-        bubble.pack(side="right", anchor="e", padx=(60, 2))
+        _canvas, bubble = self._code_rounded_card(row, bg, radius=11, side="right", anchor="e", padx=(60, 2))
         tk.Label(
             bubble,
             text=str(text or "").strip(),
@@ -6650,8 +7836,8 @@ class HelperOverlay:
             justify="left",
             anchor="w",
             wraplength=max(160, int(self._code_chat_width() * 0.72)),
-            padx=11,
-            pady=8,
+            padx=10,
+            pady=6,
         ).pack(anchor="w")
         self._code_chat_scroll_end()
 
@@ -6703,13 +7889,7 @@ class HelperOverlay:
     def _code_add_handoff(self, event):
         row = self._code_chat_row()
         bg = self.blend_color(self.CODE_CHAT_BG, "#8f72d8", 0.16)
-        card = tk.Frame(
-            row,
-            bg=bg,
-            highlightthickness=1,
-            highlightbackground=self.blend_color(bg, "#b892ff", 0.34),
-        )
-        card.pack(fill="x", padx=(2, 20))
+        _canvas, card = self._code_rounded_card(row, bg, radius=10, padx=(2, 20))
         tk.Label(
             card,
             text="PROVIDER HANDOFF",
@@ -6717,7 +7897,7 @@ class HelperOverlay:
             fg="#d9c6ff",
             font=self.font(7, "bold"),
             anchor="w",
-        ).pack(fill="x", padx=11, pady=(8, 2))
+        ).pack(fill="x", padx=10, pady=(5, 1))
         tk.Label(
             card,
             text=str(event.get("text") or "CODE provider switched"),
@@ -6727,7 +7907,7 @@ class HelperOverlay:
             anchor="w",
             justify="left",
             wraplength=self._code_chat_width() - 70,
-        ).pack(fill="x", padx=11)
+        ).pack(fill="x", padx=10)
         tk.Label(
             card,
             text="New native provider session · aiOS transferred context and working-tree state",
@@ -6737,7 +7917,7 @@ class HelperOverlay:
             anchor="w",
             justify="left",
             wraplength=self._code_chat_width() - 70,
-        ).pack(fill="x", padx=11, pady=(2, 8))
+        ).pack(fill="x", padx=10, pady=(1, 5))
         self._code_chat_scroll_end()
 
     def _code_stream_assistant(self, delta):
@@ -6749,11 +7929,60 @@ class HelperOverlay:
         addition = str(delta or "")
         stream["text"] += addition
         self.code_turn_assistant_text = f"{getattr(self, 'code_turn_assistant_text', '')}{addition}"
+        self._code_chat_preserve_view()
         self._code_write_markdown(stream["widget"], stream["text"])
         self._code_chat_scroll_end()
 
     def _code_close_stream(self):
         self.code_stream = None
+
+    def _code_close_thinking(self):
+        self.code_thinking = None
+
+    def _code_stream_thinking(self, activity):
+        """Quiet italic narration; no card, no border, one growing paragraph."""
+        text = " ".join(str(
+            activity.get("delta") or activity.get("summary") or activity.get("detail") or ""
+        ).split())
+        phase = str(activity.get("phase") or "update")
+        stream = getattr(self, "code_thinking", None)
+        if stream is not None and not self._widget_alive(stream.get("label")):
+            stream = None
+        if stream is None:
+            if not text:
+                return
+            self._code_close_stream()
+            row = self._code_chat_row()
+            label = tk.Label(
+                row,
+                text="",
+                bg=self.CODE_CHAT_BG,
+                fg=self.blend_color(self.CODE_CHAT_BG, self.c("muted"), 0.72),
+                font=self.font(8, "italic"),
+                anchor="w",
+                justify="left",
+                wraplength=max(200, self._code_chat_width() - 60),
+            )
+            label.pack(fill="x", padx=(14, 40), pady=(1, 1))
+            stream = {"label": label, "text": ""}
+            self.code_thinking = stream
+        if text and text not in stream["text"]:
+            stream["text"] = f"{stream['text']} {text}".strip() if stream["text"] else text
+            try:
+                stream["label"].configure(text=stream["text"])
+            except tk.TclError:
+                self.code_thinking = None
+                return
+        if phase in {"completed", "failed"}:
+            self.code_thinking = None
+        self._code_chat_scroll_end()
+
+    @staticmethod
+    def _widget_alive(widget):
+        try:
+            return bool(widget) and widget.winfo_exists()
+        except (AttributeError, tk.TclError):
+            return False
 
     # ---- activity cards ----------------------------------------------------
 
@@ -6797,10 +8026,13 @@ class HelperOverlay:
             "error": "failed", "declined": "failed", "cancelled": "failed", "canceled": "failed",
             "in_progress": "started", "running": "started", "pending": "started",
         }.get(phase, phase if phase in {"started", "update", "completed", "failed"} else "completed")
-        for field in ("activity_type", "title", "detail", "command", "cwd", "output", "summary", "diff", "error"):
+        for field in ("activity_type", "title", "detail", "command", "cwd", "output", "summary", "diff", "error", "agent_name", "objective"):
             value = event.get(field)
             if value not in (None, ""):
                 state[field] = str(value)
+        for field in ("lines_added", "lines_deleted"):
+            if event.get(field) is not None:
+                state[field] = event[field]
         if event.get("delta"):
             stream = str(event.get("stream") or "output")
             target = {"summary": "summary", "plan": "detail"}.get(stream, "output")
@@ -6827,31 +8059,47 @@ class HelperOverlay:
 
     def _code_build_activity_card(self, key):
         row = self._code_chat_row()
-        bg = self.blend_color(self.CODE_CHAT_BG, "#ffffff", 0.05)
-        frame = tk.Frame(row, bg=bg, highlightthickness=1, highlightbackground=self.blend_color(bg, "#ffffff", 0.09))
-        frame.pack(fill="x", anchor="w", padx=(2, 40))
-        header = tk.Frame(frame, bg=bg, cursor="hand2")
-        header.pack(fill="x", padx=9, pady=7)
+        # Slightly lifted from the chat background so the rounded silhouette
+        # reads on its own — the card no longer has a border to define it.
+        bg = self.blend_color(self.CODE_CHAT_BG, "#ffffff", 0.075)
+        frame, inner = self._code_rounded_card(row, bg, radius=9, padx=(2, 40))
+        # One dense line per tool call: glyph, title, inline preview, meta.
+        header = tk.Frame(inner, bg=bg, cursor="hand2")
+        header.pack(fill="x", padx=8, pady=3)
         icon_var = tk.StringVar(master=self.root, value=CODE_SPINNER_FRAMES[0])
         title_var = tk.StringVar(master=self.root, value="Working")
         preview_var = tk.StringVar(master=self.root, value="")
         meta_var = tk.StringVar(master=self.root, value="")
-        chevron = tk.Label(header, text="▸", bg=bg, fg=self.c("muted"), font=self.font(8, "bold"), cursor="hand2")
+        chevron = tk.Label(header, text="▸", bg=bg, fg=self.c("muted"), font=self.font(7), cursor="hand2")
         chevron.pack(side="left")
-        icon = tk.Label(header, textvariable=icon_var, bg=bg, fg=self.c("muted"), font=self.font(9, "bold"), width=2, cursor="hand2")
-        icon.pack(side="left", padx=(5, 6))
-        copy = tk.Frame(header, bg=bg, cursor="hand2")
-        copy.pack(side="left", fill="x", expand=True)
-        title = tk.Label(copy, textvariable=title_var, bg=bg, fg=self.c("text"), font=self.font(8, "bold"), anchor="w", cursor="hand2")
-        title.pack(fill="x")
-        preview = tk.Label(copy, textvariable=preview_var, bg=bg, fg=self.c("muted"), font=("Cascadia Code", max(7, int(self.c("font_size")) - 3)), anchor="w", cursor="hand2")
-        preview.pack(fill="x")
+        icon = tk.Label(header, textvariable=icon_var, bg=bg, fg=self.c("muted"), font=self.font(8, "bold"), width=2, cursor="hand2")
+        icon.pack(side="left", padx=(3, 4))
+        title = tk.Label(header, textvariable=title_var, bg=bg, fg=self.c("text"), font=self.font(8, "bold"), anchor="w", cursor="hand2")
+        title.pack(side="left")
         meta = tk.Label(header, textvariable=meta_var, bg=bg, fg=self.c("muted"), font=self.font(7), cursor="hand2")
-        meta.pack(side="right")
-        body = tk.Frame(frame, bg=bg)
+        meta.pack(side="right", padx=(6, 0))
+        # Per-edit line counts sit next to the meta chip: +added green, -deleted red.
+        minus_var = tk.StringVar(master=self.root, value="")
+        plus_var = tk.StringVar(master=self.root, value="")
+        minus = tk.Label(header, textvariable=minus_var, bg=bg, fg=self.c("danger"), font=self.font(7, "bold"), cursor="hand2")
+        minus.pack(side="right", padx=(4, 0))
+        plus = tk.Label(header, textvariable=plus_var, bg=bg, fg=self.c("success"), font=self.font(7, "bold"), cursor="hand2")
+        plus.pack(side="right", padx=(6, 0))
+        preview = tk.Label(
+            header,
+            textvariable=preview_var,
+            bg=bg,
+            fg=self.c("muted"),
+            font=("Cascadia Code", max(7, int(self.c("font_size")) - 3)),
+            anchor="w",
+            cursor="hand2",
+        )
+        preview.pack(side="left", fill="x", expand=True, padx=(7, 0))
+        body = tk.Frame(inner, bg=bg)
         card = {
             "key": key,
             "frame": frame,
+            "inner": inner,
             "header": header,
             "bg": bg,
             "icon": icon,
@@ -6859,12 +8107,16 @@ class HelperOverlay:
             "title_var": title_var,
             "preview_var": preview_var,
             "meta_var": meta_var,
+            "plus_var": plus_var,
+            "minus_var": minus_var,
+            "plus": plus,
+            "minus": minus,
             "chevron": chevron,
             "body": body,
             "open": False,
             "state": {"phase": "started", "activity_type": "tool", "title": "Working", "files": [], "steps": []},
         }
-        for widget in (header, chevron, icon, copy, title, preview, meta):
+        for widget in (header, chevron, icon, title, preview, meta, plus, minus):
             widget.bind("<Button-1>", lambda _event, item=card: self._code_toggle_activity(item))
         return card
 
@@ -6879,7 +8131,7 @@ class HelperOverlay:
         card["chevron"].configure(text="▾" if card["open"] else "▸")
         if card["open"]:
             self._code_fill_activity_body(card)
-            card["body"].pack(fill="x", padx=9, pady=(0, 8))
+            card["body"].pack(fill="x", padx=8, pady=(0, 6))
         else:
             card["body"].pack_forget()
         # Expanding details is a reading action. Preserve the viewport instead
@@ -6907,16 +8159,74 @@ class HelperOverlay:
         preview = state.get("command") or state.get("detail") or ", ".join(state.get("files") or []) or state.get("summary") or ""
         preview = re.sub(r"\s+", " ", str(preview)).strip()
         card["preview_var"].set(preview[:110] + ("…" if len(preview) > 110 else ""))
-        label = {"command": "terminal", "files": "file edit", "thinking": "reasoning"}.get(state.get("activity_type"), state.get("activity_type") or "tool")
+        added = state.get("lines_added")
+        deleted = state.get("lines_deleted")
+        card["plus_var"].set(f"+{int(added):,}" if added not in (None, "") and int(added) else "")
+        card["minus_var"].set(f"-{int(deleted):,}" if deleted not in (None, "") and int(deleted) else "")
+        label = {
+            "command": "terminal", "files": "file edit", "thinking": "reasoning",
+            "subagent": "subagent", "question": "waiting on you",
+        }.get(state.get("activity_type"), state.get("activity_type") or "tool")
         bits = []
         if state.get("duration_ms") is not None:
             bits.append(f"{max(0, int(state['duration_ms'])) / 1000:.1f}s")
-        if state.get("exit_code") is not None:
+        if state.get("exit_code") not in (None, 0, "0"):
             bits.append(f"exit {state['exit_code']}")
         bits.append(label)
         card["meta_var"].set(" · ".join(bits))
         if card["open"]:
             self._code_fill_activity_body(card)
+
+    def _code_fill_subagent_body(self, card):
+        """Drill-down for one spawned agent: its brief, its steps, its report."""
+        body = card["body"]
+        state = card["state"]
+        bg = card["bg"]
+        accent = self.blend_color(bg, "#7fd0ff", 0.5)
+
+        def heading(text, color=None):
+            tk.Label(
+                body, text=text.upper(), bg=bg, fg=color or self.c("muted"),
+                font=self.font(7, "bold"), anchor="w",
+            ).pack(fill="x", pady=(4, 1))
+
+        objective = str(state.get("objective") or state.get("detail") or "").strip()
+        if objective:
+            heading("Brief", accent)
+            tk.Label(
+                body, text=objective, bg=bg, fg=self.c("text"), font=self.font(8),
+                anchor="w", justify="left", wraplength=max(200, self._code_chat_width() - 90),
+            ).pack(fill="x")
+
+        steps = [line for line in str(state.get("output") or "").splitlines() if line.strip()]
+        if steps:
+            heading(f"Steps · {len(steps)}")
+            for index, line in enumerate(steps, 1):
+                tk.Label(
+                    body, text=f"{index:>2}. {line}", bg=bg, fg=self.c("muted"),
+                    font=("Cascadia Code", max(7, int(self.c("font_size")) - 3)),
+                    anchor="w", justify="left", wraplength=max(200, self._code_chat_width() - 90),
+                ).pack(fill="x")
+
+        report = str(state.get("summary") or "").strip()
+        if report:
+            heading("Report", accent)
+            widget = self._code_text_widget(body, bg=self.blend_color(bg, "#000000", 0.35), fg=self.c("text"))
+            widget.configure(padx=7, pady=4)
+            widget.pack(fill="x")
+            self._code_write_markdown(widget, report)
+        error = str(state.get("error") or "").strip()
+        if error:
+            heading("Error", self.c("danger"))
+            tk.Label(
+                body, text=error, bg=bg, fg=self.c("danger"), font=self.font(8),
+                anchor="w", justify="left", wraplength=max(200, self._code_chat_width() - 90),
+            ).pack(fill="x")
+        if not (objective or steps or report or error):
+            tk.Label(
+                body, text="This agent has not reported yet.", bg=bg, fg=self.c("muted"),
+                font=self.font(7), anchor="w",
+            ).pack(fill="x", pady=(4, 2))
 
     def _code_fill_activity_body(self, card):
         body = card["body"]
@@ -6927,6 +8237,9 @@ class HelperOverlay:
                 pass
         state = card["state"]
         bg = card["bg"]
+        if state.get("activity_type") == "subagent":
+            self._code_fill_subagent_body(card)
+            return
         sections = [
             ("Command", state.get("command"), True),
             ("Folder", state.get("cwd"), True),
@@ -6942,12 +8255,12 @@ class HelperOverlay:
             if not text:
                 continue
             shown += 1
-            tk.Label(body, text=label.upper(), bg=bg, fg=self.c("muted"), font=self.font(7, "bold"), anchor="w").pack(fill="x", pady=(6, 2))
+            tk.Label(body, text=label.upper(), bg=bg, fg=self.c("muted"), font=self.font(7, "bold"), anchor="w").pack(fill="x", pady=(4, 1))
             if len(text) > 8000:
                 text = "…\n" + text[-8000:]
             block_bg = self.blend_color(bg, "#000000", 0.35)
             widget = self._code_text_widget(body, bg=block_bg, fg="#d3dee6" if mono else self.c("text"), mono=mono)
-            widget.configure(padx=8, pady=6)
+            widget.configure(padx=7, pady=4)
             widget.pack(fill="x")
             if mono:
                 widget.configure(state="normal")
@@ -7052,8 +8365,16 @@ class HelperOverlay:
             kind = "assistant"
 
         if kind in {"activity", "tool", "thinking", "approval"}:
+            normalized = self._code_activity_from_event(event)
+            # Reasoning is narration, not an action. It reads as quiet inline
+            # prose rather than yet another card in the tool stream.
+            if str(normalized.get("activity_type") or "") == "thinking":
+                self._code_stream_thinking(normalized)
+                self.code_last_rendered_kind = "thinking"
+                return
             self._code_close_stream()
-            self._code_upsert_activity(self._code_activity_from_event(event))
+            self._code_close_thinking()
+            self._code_upsert_activity(normalized)
             self.code_last_rendered_kind = "activity"
             return
         if kind == "provider_switch":
@@ -7070,6 +8391,10 @@ class HelperOverlay:
         if kind == "user":
             self.code_turn_assistant_text = ""
             self._code_add_user_bubble(text)
+        elif kind == "status" and text.strip().casefold() in {"working", "queued"}:
+            # The live spinner and run strip already communicate this state.
+            # Avoid a new transcript row for every turn lifecycle transition.
+            pass
         elif kind == "status":
             self._code_add_status(text)
         else:
@@ -7087,14 +8412,51 @@ class HelperOverlay:
         info = next((row for row in self.code_capabilities.get("providers") or [] if row.get("provider") == provider), {})
         models = info.get("models") or []
         ids = [str(model.get("id")) for model in models if model.get("id")]
+        labels = {
+            str(model.get("id")): str(
+                model.get("short_label") or model.get("label") or model.get("id")
+            )
+            for model in models
+            if model.get("id")
+        }
         if not ids:
-            ids = {"codex": ["gpt-5.6-sol"], "claude": ["sonnet"], "cursor": ["composer-2.5"]}.get(provider, [])
+            ids = {
+                "codex": ["gpt-5.6-sol"],
+                "claude": ["sonnet"],
+                "cursor": ["composer-2.5"],
+                "ollama": ["qwen3:14b"],
+                "openrouter": ["deepseek/deepseek-v4-flash"],
+            }.get(provider, [])
+            labels = {model_id: model_id for model_id in ids}
+            # Stale capabilities (e.g. phone bridge without Ollama) leave the
+            # picker empty. Force a local refresh so installed models appear.
+            if provider == "ollama" and not getattr(self, "_code_ollama_refresh_attempted", False):
+                self._code_ollama_refresh_attempted = True
+                self._code_refresh_capabilities(force=True, token=getattr(self, "code_view_token", 0))
+            if provider == "openrouter" and not getattr(self, "_code_openrouter_refresh_attempted", False):
+                self._code_openrouter_refresh_attempted = True
+                self._code_refresh_capabilities(force=True, token=getattr(self, "code_view_token", 0))
         menu = self.code_model_menu["menu"]
         menu.delete(0, "end")
         for model_id in ids:
-            menu.add_command(label=model_id, command=tk._setit(self.code_model_var, model_id))
+            menu.add_command(
+                label=labels.get(model_id, model_id),
+                command=tk._setit(self.code_model_var, model_id),
+            )
         if self.code_model_var.get() not in ids and ids:
-            self.code_model_var.set(ids[0])
+            default = next((row for row in models if row.get("default")), None)
+            self.code_model_var.set(str((default or {}).get("id") or ids[0]))
+        try:
+            self.code_model_menu.configure(width=36 if provider in {"ollama", "openrouter"} else 18)
+        except tk.TclError:
+            pass
+        # Show the friendly short label on the closed menu when possible.
+        current = self.code_model_var.get()
+        if provider in {"ollama", "openrouter"} and current in labels:
+            try:
+                self.code_model_menu.configure(text=labels[current])
+            except tk.TclError:
+                pass
         self._code_refresh_reasoning()
 
     def _code_refresh_reasoning(self):
@@ -7115,8 +8477,14 @@ class HelperOverlay:
         if not model.get("fast"):
             self.code_fast_var.set(False)
         if hasattr(self, "code_setup_button"):
+            if provider == "ollama":
+                setup_text = "Ready" if info.get("ready") else "Start Ollama"
+            elif provider == "openrouter":
+                setup_text = "Ready" if info.get("ready") else "Add OpenRouter key"
+            else:
+                setup_text = "Ready" if info.get("ready") else f"Sign in {provider.title()}"
             self.code_setup_button.configure(
-                text="Ready" if info.get("ready") else f"Sign in {provider.title()}",
+                text=setup_text,
                 state="disabled" if info.get("ready") else "normal",
             )
 
@@ -7130,6 +8498,13 @@ class HelperOverlay:
         if info and not info.get("ready"):
             messagebox.showerror("CODE", info.get("message") or f"{provider.title()} is not ready.")
             return
+        # Clear and disable immediately so the composer never looks frozen while
+        # the provider handshake happens on the worker thread.
+        try:
+            self.code_brief.delete("1.0", "end")
+            self.code_send_button.configure(state="disabled", text="Launching…")
+        except tk.TclError:
+            pass
         attachments = [{"path": path, "label": Path(path).name} for path in self.code_create_attachments]
         attachments.extend({"url": url, "label": url} for url in re.findall(r"https?://[^\s)]+", brief))
         payload = {
@@ -7141,6 +8516,8 @@ class HelperOverlay:
             "fast": self.code_fast_var.get(),
             "attachments": attachments,
         }
+        self.config["code_last_project_path"] = payload["cwd"]
+        save_config(self.config)
         self.code_health_var.set(f"Launching {provider.title()}…")
 
         def worker():
@@ -7150,15 +8527,21 @@ class HelperOverlay:
         threading.Thread(target=worker, daemon=True, name="aios-code-start").start()
 
     def _code_started(self, result):
+        try:
+            self.code_send_button.configure(state="normal", text=self.code_send_label.get())
+        except tk.TclError:
+            pass
         if not result.get("ok"):
+            # Hand the text back so a failed launch never loses what was typed.
             messagebox.showerror("CODE", result.get("error") or "Could not start the CODE job.")
             return
-        self.code_brief.delete("1.0", "end")
         self.code_create_attachments = []
-        self.code_attach_button.configure(text="Attach")
+        if hasattr(self, "code_attach_button"):
+            self.code_attach_button.configure(text="Attach")
         self.code_selected_id = str((result.get("job") or {}).get("id") or "")
         self.code_log_size = 0
         self._code_sessions_signature = None
+        self._code_refresh_projects()
         self._code_refresh_all()
 
     def _code_send_followup(self):
@@ -10045,6 +11428,77 @@ class HelperOverlay:
         voice_cfg = self._voice_cfg()
         group = self.settings_group(
             body,
+            "Model",
+            "What answers the Agent chat and spoken turns. Cloud models need an OpenAI key; "
+            "Ollama models run locally and stay free.",
+        )
+        cloud = ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"]
+        try:
+            import ollama_client
+
+            local_choices = [
+                f"ollama:{row['id']}  ·  {row.get('description') or 'local'}"
+                for row in ollama_client.list_installed_models(use_cache=True)
+            ]
+        except Exception:
+            local_choices = []
+        choice_map = {name: name for name in cloud}
+        for row in local_choices:
+            value = row.split("  ·  ", 1)[0].strip()
+            choice_map[row] = value
+        current = str(voice_cfg.get("agent_model") or DEFAULT_VOICE_DICTATION.get("agent_model") or "gpt-5.6-luna")
+        display = current
+        for label, value in choice_map.items():
+            if value == current:
+                display = label
+                break
+        else:
+            if current.startswith("ollama:"):
+                try:
+                    import ollama_client
+
+                    display = f"{current}  ·  {ollama_client.describe_model(ollama_client.strip_ollama_prefix(current))}"
+                    choice_map[display] = current
+                except Exception:
+                    choice_map[current] = current
+                    display = current
+            else:
+                choice_map[current] = current
+        options = list(cloud) + local_choices
+        if display not in options:
+            options.insert(0, display)
+        self.agent_model_var = tk.StringVar(value=display)
+
+        def commit_agent_model():
+            selected = choice_map.get(self.agent_model_var.get(), self.agent_model_var.get())
+            # Strip the decorative blurb if a raw label slipped through.
+            if "  ·  " in selected and selected.startswith("ollama:"):
+                selected = selected.split("  ·  ", 1)[0].strip()
+            self._commit_voice_text("agent_model", selected)
+            self.refresh_chat_account()
+            self._reload_voice_dictation()
+
+        self.auto_option(
+            group,
+            "Agent model",
+            self.agent_model_var,
+            options,
+            commit_agent_model,
+            hint="Luna is the cheap cloud default. Pick any Ollama:… entry to run the Agent chat locally.",
+        )
+        reasoning = str(voice_cfg.get("agent_reasoning") or "low")
+        self.agent_reasoning_var = tk.StringVar(value=reasoning)
+        self.auto_option(
+            group,
+            "Thinking",
+            self.agent_reasoning_var,
+            ("off", "minimal", "low", "medium", "high"),
+            lambda: self._commit_voice_var("agent_reasoning", self.agent_reasoning_var),
+            hint="For local Ollama models, off/low skips thinking (much faster). Medium/high enable it.",
+        )
+
+        group = self.settings_group(
+            body,
             "Tools",
             "Each switch adds or removes a capability. Off means the tool is never offered to the model.",
         )
@@ -10283,6 +11737,127 @@ class HelperOverlay:
             ),
         )
 
+        group = self.settings_group(body, "CODE default", "Default provider and model for new CODE sessions.")
+        self.auto_entry(
+            group,
+            "Provider",
+            self.config.get("code_default_provider", "openrouter"),
+            lambda text: self._commit_config("code_default_provider", text),
+            hint="codex, claude, cursor, ollama, or openrouter",
+        )
+        self.auto_entry(
+            group,
+            "Model",
+            self.config.get("code_default_model", "deepseek/deepseek-v4-flash"),
+            lambda text: self._commit_config("code_default_model", text),
+            hint="Full model ID as shown in the CODE model picker",
+        )
+
+        self._settings_openrouter(body)
+
+    def _settings_openrouter(self, body):
+        import openrouter_client
+
+        env_key = str(os.environ.get("OPENROUTER_API_KEY") or "").strip()
+        stored_key = str(self.config.get("openrouter_api_key") or "").strip()
+        group = self.settings_group(
+            body,
+            "OpenRouter",
+            "CODE provider for hosted models (DeepSeek and more). Enable which models appear in the CODE picker.",
+        )
+        self.openrouter_key_settings_entry = self.auto_entry(
+            group,
+            "API key",
+            stored_key,
+            self._commit_openrouter_key,
+            hint=(
+                "Currently using the OPENROUTER_API_KEY environment variable — leave empty to keep it."
+                if env_key and not stored_key
+                else "Stored in helper_config.json, which is git-ignored."
+            ),
+        )
+
+        enabled = set(openrouter_client.enabled_model_ids(config=self.config))
+        models_wrap = tk.Frame(group, bg=self.c("surface"))
+        models_wrap.pack(fill="x", pady=(4, 0))
+        tk.Label(
+            models_wrap,
+            text="Models in CODE",
+            bg=self.c("surface"),
+            fg=self.c("text"),
+            font=self.font(9, "bold"),
+            anchor="w",
+        ).pack(side="left", pady=(0, 6))
+        self.button(
+            models_wrap,
+            "Refresh tool models",
+            self._refresh_openrouter_models,
+            compact=True,
+        ).pack(side="right", pady=(0, 6))
+        list_wrap = tk.Frame(group, bg=self.c("surface"))
+        list_wrap.pack(fill="x")
+        self.openrouter_model_vars = {}
+        for row in openrouter_client.catalog_models():
+            model_id = str(row["id"])
+            var = tk.BooleanVar(value=model_id in enabled)
+            self.openrouter_model_vars[model_id] = var
+            row_frame = tk.Frame(list_wrap, bg=self.c("surface"))
+            row_frame.pack(fill="x", pady=(0, 4))
+            tk.Checkbutton(
+                row_frame,
+                variable=var,
+                command=self._commit_openrouter_enabled_models,
+                bg=self.c("surface"),
+                activebackground=self.c("surface"),
+                fg=self.c("text"),
+                selectcolor=self.c("panel2"),
+                highlightthickness=0,
+                bd=0,
+            ).pack(side="left")
+            copy = tk.Frame(row_frame, bg=self.c("surface"))
+            copy.pack(side="left", fill="x", expand=True)
+            tk.Label(
+                copy,
+                text=str(row.get("label") or model_id),
+                bg=self.c("surface"),
+                fg=self.c("text"),
+                font=self.font(9, "bold"),
+                anchor="w",
+            ).pack(fill="x")
+            tk.Label(
+                copy,
+                text=f"{model_id} · {row.get('description') or ''}".rstrip(" ·"),
+                bg=self.c("surface"),
+                fg=self.c("muted"),
+                font=self.font(8),
+                anchor="w",
+            ).pack(fill="x")
+
+    def _refresh_openrouter_models(self):
+        self.settings_saved("Refreshing OpenRouter tool models…")
+
+        def worker():
+            try:
+                import openrouter_client
+                import code_jobs
+
+                rows = openrouter_client.catalog_models(refresh=True, limit=250)
+                code_jobs.capabilities(force=True)
+                result = {"ok": True, "count": len(rows)}
+            except Exception as exc:
+                result = {"ok": False, "error": str(exc)}
+            self.root.after(0, lambda: self._openrouter_models_refreshed(result))
+
+        threading.Thread(target=worker, daemon=True, name="aios-openrouter-models").start()
+
+    def _openrouter_models_refreshed(self, result):
+        if not result.get("ok"):
+            messagebox.showerror("OpenRouter models", result.get("error") or "Could not refresh models.")
+            return
+        self.settings_saved(f"Loaded {result.get('count', 0)} tool-capable OpenRouter models")
+        if self.active_tab == "Settings":
+            self.render_tab("Settings")
+
     def _settings_macro_pad(self, body):
         group = self.settings_group(
             body,
@@ -10367,6 +11942,41 @@ class HelperOverlay:
         save_config(self.config)
         self.refresh_chat_account()
 
+    def _commit_openrouter_key(self, text):
+        if text.startswith("(using OPENROUTER_API_KEY"):
+            return
+        self.config["openrouter_api_key"] = text
+        save_config(self.config)
+        try:
+            import openrouter_client
+            import code_jobs
+
+            openrouter_client.invalidate_cache()
+            code_jobs.capabilities(force=True)
+        except Exception:
+            pass
+
+    def _commit_openrouter_enabled_models(self):
+        vars_map = getattr(self, "openrouter_model_vars", {}) or {}
+        enabled = [model_id for model_id, var in vars_map.items() if var.get()]
+        if not enabled:
+            # Keep at least the default so CODE still has something to select.
+            enabled = list(DEFAULT_CONFIG["openrouter_enabled_models"])
+            for model_id in enabled:
+                var = vars_map.get(model_id)
+                if var is not None:
+                    var.set(True)
+        self.config["openrouter_enabled_models"] = enabled
+        save_config(self.config)
+        try:
+            import openrouter_client
+            import code_jobs
+
+            openrouter_client.invalidate_cache()
+            code_jobs.capabilities(force=True)
+        except Exception:
+            pass
+        self.settings_saved("OpenRouter models")
     def _commit_project_root(self, text):
         if not text:
             return
@@ -12725,8 +14335,19 @@ class HelperOverlay:
             return
         voice_cfg = self.config.get("voice_dictation") or {}
         model_label = voice_cfg.get("agent_model") or DEFAULT_VOICE_DICTATION.get("agent_model") or "gpt-5.6-luna"
+        try:
+            import ollama_client
+
+            model_label = ollama_client.agent_model_display(model_label)
+        except Exception:
+            pass
         key_ok = bool(self.get_openai_api_key())
-        auth_label = "API key ready" if key_ok else "No API key"
+        local_model = str(voice_cfg.get("agent_model") or "").lower().startswith("ollama:")
+        if local_model:
+            auth_label = "Local Ollama"
+            key_ok = True
+        else:
+            auth_label = "API key ready" if key_ok else "No API key"
         try:
             self.chat_account_label.configure(
                 text=f"{model_label} · {auth_label}",
@@ -12734,6 +14355,132 @@ class HelperOverlay:
             )
         except tk.TclError:
             pass
+
+    def _open_agent_model_picker(self):
+        """Lightweight model switcher for the Agent sidebar — avoids a full Settings redraw."""
+        existing = getattr(self, "_agent_model_picker", None)
+        if existing is not None:
+            try:
+                if existing.winfo_exists():
+                    existing.lift()
+                    existing.focus_force()
+                    return
+            except tk.TclError:
+                pass
+
+        popup = tk.Toplevel(self.root)
+        popup.title("Agent model")
+        popup.configure(bg=self.c("surface"))
+        popup.transient(self.root)
+        popup.resizable(False, True)
+        self._agent_model_picker = popup
+        popup.protocol("WM_DELETE_WINDOW", popup.destroy)
+
+        tk.Label(
+            popup,
+            text="Agent model",
+            bg=self.c("surface"),
+            fg=self.c("text"),
+            font=self.font(11, "bold"),
+        ).pack(anchor="w", padx=14, pady=(12, 4))
+        status = tk.Label(
+            popup,
+            text="Loading local models…",
+            bg=self.c("surface"),
+            fg=self.c("muted"),
+            font=self.font(8),
+        )
+        status.pack(anchor="w", padx=14, pady=(0, 8))
+
+        list_frame = tk.Frame(popup, bg=self.c("surface"))
+        list_frame.pack(fill="both", expand=True, padx=10, pady=(0, 12))
+        canvas = tk.Canvas(list_frame, bg=self.c("surface"), highlightthickness=0, width=360, height=320)
+        scroll = tk.Scrollbar(list_frame, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scroll.set)
+        scroll.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        inner = tk.Frame(canvas, bg=self.c("surface"))
+        window_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+        inner.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(window_id, width=e.width))
+
+        current = str((self._voice_cfg() or {}).get("agent_model") or "gpt-5.6-luna")
+
+        def choose(value):
+            self._commit_voice_text("agent_model", value)
+            self.refresh_chat_account()
+            try:
+                popup.destroy()
+            except tk.TclError:
+                pass
+
+        def add_choice(value, label, note=""):
+            row = tk.Frame(inner, bg=self.c("panel2") if value == current else self.c("surface"), cursor="hand2")
+            row.pack(fill="x", pady=2)
+            title = tk.Label(
+                row,
+                text=label,
+                bg=row.cget("bg"),
+                fg=self.c("text"),
+                font=self.font(9, "bold"),
+                anchor="w",
+            )
+            title.pack(fill="x", padx=10, pady=(8, 0 if note else 8))
+            widgets = [row, title]
+            if note:
+                sub = tk.Label(
+                    row,
+                    text=note,
+                    bg=row.cget("bg"),
+                    fg=self.c("muted"),
+                    font=self.font(8),
+                    anchor="w",
+                )
+                sub.pack(fill="x", padx=10, pady=(2, 8))
+                widgets.append(sub)
+            for widget in widgets:
+                widget.bind("<Button-1>", lambda _e, choice=value: choose(choice))
+
+        for name, note in (
+            ("gpt-5.6-luna", "Cloud · fast / cheap default"),
+            ("gpt-5.6-terra", "Cloud · stronger"),
+            ("gpt-5.6-sol", "Cloud · strongest"),
+        ):
+            add_choice(name, name, note)
+
+        def finish_local(rows):
+            if not popup.winfo_exists():
+                return
+            if not rows:
+                status.configure(text="No local Ollama models found. Start Ollama and pull a model.")
+                return
+            status.configure(text=f"{len(rows)} local Ollama model{'s' if len(rows) != 1 else ''}")
+            for row in rows:
+                model_id = str(row.get("id") or "")
+                if not model_id:
+                    continue
+                add_choice(
+                    f"ollama:{model_id}",
+                    str(row.get("short_label") or row.get("label") or model_id),
+                    "Local · free",
+                )
+
+        def worker():
+            try:
+                import ollama_client
+
+                rows = ollama_client.list_installed_models(use_cache=True)
+            except Exception:
+                rows = []
+            self.root.after(0, lambda: finish_local(rows))
+
+        threading.Thread(target=worker, daemon=True, name="aios-agent-model-picker").start()
+
+        try:
+            popup.geometry("+%d+%d" % (self.root.winfo_rootx() + 80, self.root.winfo_rooty() + 80))
+        except tk.TclError:
+            pass
+        popup.focus_force()
 
     def reset_chat(self):
         if self.quick_process and self.quick_process.poll() is None:
@@ -13367,7 +15114,7 @@ class HelperOverlay:
                 self.agent_operator_loop.stop()
         except Exception:
             pass
-        self.root.after(900, lambda: aios_updater.restart_aios())
+        self.root.after(900, lambda: (release_single_instance(), aios_updater.restart_aios()))
 
     def pick_color(self, key):
         color = colorchooser.askcolor(color=self.c(key))[1]
@@ -13459,28 +15206,64 @@ class HelperOverlay:
         self.hide_thinking()
 
     def restart_application(self):
-        self._dash_flush_notes()
-        self._stop_background_work()
-        self._stop_voice_server()
-        self.config["window"] = self.root.geometry()
-        save_config(self.config)
-        script = Path(__file__).resolve()
-        try:
-            subprocess.Popen(
-                [sys.executable, str(script)],
-                cwd=str(script.parent),
-                close_fds=True,
-            )
-        except OSError as exc:
-            self.local_reply(f"Could not restart aiOS: {exc}")
+        if getattr(self, "_restarting", False):
             return
-        self._delete_tray_icon()
-        self.root.quit()
+        self._restarting = True
+        try:
+            self._dash_flush_notes()
+        except Exception:
+            pass
+        try:
+            self._stop_background_work()
+        except Exception:
+            pass
+        try:
+            self._stop_voice_server(quick=True)
+        except Exception:
+            pass
+        try:
+            self.config["window"] = self.root.geometry()
+            save_config(self.config)
+        except Exception:
+            pass
+        try:
+            self._delete_tray_icon()
+        except Exception:
+            pass
+        # Release the singleton before the next instance starts. The relauncher
+        # also waits for this PID to exit so the mutex handoff cannot race.
+        release_single_instance()
+        try:
+            import aios_updater
+
+            spawned = aios_updater.spawn_relaunch(os.getpid(), ["--fast-start"])
+        except Exception:
+            spawned = False
+        if not spawned:
+            script = Path(__file__).resolve().parent / "launch_aios.py"
+            try:
+                kwargs = {"cwd": str(script.parent), "close_fds": True}
+                if os.name == "nt":
+                    kwargs["creationflags"] = 0x00000008 | 0x00000200 | CREATE_NO_WINDOW
+                subprocess.Popen([sys.executable, str(script)], **kwargs)
+            except OSError as exc:
+                self._restarting = False
+                try:
+                    self.local_reply(f"Could not restart aiOS: {exc}")
+                except Exception:
+                    pass
+                return
+        try:
+            self.root.quit()
+        except Exception:
+            pass
         os._exit(0)
 
-    def _stop_voice_server(self):
+    def _stop_voice_server(self, *, quick: bool = False):
         script = Path(__file__).resolve().parent / "voice_dictation.py"
         python = Path(sys.executable)
+        quit_timeout = 0.7 if quick else 2.0
+        poll_budget = 0.35 if quick else 1.5
         try:
             subprocess.run(
                 [str(python), str(script), "--quit"],
@@ -13488,22 +15271,22 @@ class HelperOverlay:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 stdin=subprocess.DEVNULL,
-                timeout=2,
+                timeout=quit_timeout,
                 creationflags=CREATE_NO_WINDOW,
             )
         except (OSError, subprocess.TimeoutExpired):
             pass
-        deadline = time.perf_counter() + 1.5
+        deadline = time.perf_counter() + poll_budget
         while time.perf_counter() < deadline:
             try:
-                with socket.create_connection(("127.0.0.1", 48737), timeout=0.15):
-                    time.sleep(0.1)
+                with socket.create_connection(("127.0.0.1", 48737), timeout=0.1):
+                    time.sleep(0.05)
                     continue
             except OSError:
                 return
-        self._force_stop_voice_processes()
+        self._force_stop_voice_processes(timeout=1.0 if quick else 4.0)
 
-    def _force_stop_voice_processes(self):
+    def _force_stop_voice_processes(self, *, timeout: float = 4.0):
         if not sys.platform.startswith("win"):
             return
         command = (
@@ -13518,7 +15301,7 @@ class HelperOverlay:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 stdin=subprocess.DEVNULL,
-                timeout=4,
+                timeout=max(0.5, float(timeout)),
                 creationflags=CREATE_NO_WINDOW,
             )
         except (OSError, subprocess.TimeoutExpired):
@@ -13630,10 +15413,12 @@ class HelperOverlay:
             self.subtitle.configure(text=self._status_subtitle() + "  |  " + " · ".join(tooltip))
 
     def show(self):
+        suppress_tk_monitor_windows()
         self.root.overrideredirect(True)
         self.root.deiconify()
         self.root.lift()
         self.root.focus_force()
+        suppress_tk_monitor_windows()
         if hasattr(self, "input"):
             self.input.focus_set()
 
@@ -13744,7 +15529,7 @@ class HelperOverlay:
             user32.AppendMenuW(menu, MF_STRING, TRAY_START_VOICE, "Start Voice")
             user32.AppendMenuW(menu, MF_STRING, TRAY_RESTART_VOICE, "Restart Voice")
             user32.AppendMenuW(menu, MF_STRING, TRAY_RESTART_MACROS, "Restart Macros")
-            user32.AppendMenuW(menu, MF_STRING, TRAY_RESTART_APP, "Restart aiOS")
+            user32.AppendMenuW(menu, MF_STRING, TRAY_RESTART_APP, "Restart aiOS (GUI + backend)")
             user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
             user32.AppendMenuW(menu, MF_STRING, TRAY_QUIT, "Quit")
             point = POINT()
@@ -13808,7 +15593,8 @@ class HelperOverlay:
             self.show()
             return
         self._launch_startup_splash()
-        self.root.after(2600, self.show)
+        # Keep the brand moment short — long artificial delays made restart feel broken.
+        self.root.after(1200, self.show)
 
     def _launch_startup_splash(self):
         script = BASE_DIR / "startup_splash.py"
@@ -13988,10 +15774,58 @@ class HelperOverlay:
         self.root.withdraw()
 
     def toggle(self):
+        if self._toggle_webview_shell():
+            return
         if self.root.state() == "withdrawn":
             self.show()
         else:
             self.hide()
+
+    def _webview_shell_hwnd(self):
+        """HWND of the WebView2 aiOS window, or 0 if it is not running."""
+        if not sys.platform.startswith("win"):
+            return 0
+        try:
+            user32 = ctypes.windll.user32
+            # Exact title set in aios_ui.app.create_window("aiOS", ...)
+            return int(user32.FindWindowW(None, "aiOS") or 0)
+        except (AttributeError, OSError, ValueError):
+            return 0
+
+    def _show_webview_shell(self) -> bool:
+        hwnd = self._webview_shell_hwnd()
+        if not hwnd:
+            return False
+        try:
+            user32 = ctypes.windll.user32
+            SW_RESTORE = 9
+            user32.ShowWindow(hwnd, SW_RESTORE)
+            user32.SetForegroundWindow(hwnd)
+            return True
+        except (AttributeError, OSError):
+            return False
+
+    def _hide_webview_shell(self) -> bool:
+        hwnd = self._webview_shell_hwnd()
+        if not hwnd:
+            return False
+        try:
+            ctypes.windll.user32.ShowWindow(hwnd, 0)  # SW_HIDE
+            return True
+        except (AttributeError, OSError):
+            return False
+
+    def _toggle_webview_shell(self) -> bool:
+        hwnd = self._webview_shell_hwnd()
+        if not hwnd:
+            return False
+        try:
+            user32 = ctypes.windll.user32
+            if user32.IsWindowVisible(hwnd):
+                return self._hide_webview_shell()
+            return self._show_webview_shell()
+        except (AttributeError, OSError):
+            return False
 
     def _bind_keys(self):
         self.root.bind("<Escape>", lambda _event: self.hide())
@@ -14101,7 +15935,7 @@ class HelperOverlay:
         except (OSError, subprocess.TimeoutExpired):
             pass
 
-    def _ensure_hotkeys(self):
+    def _ensure_hotkeys(self, wait_healthy=True):
         """Spawn autocorrect.ahk (macro / dictate hotkeys) if it is not healthy."""
         if not self._hotkeys_script().exists():
             return False
@@ -14110,8 +15944,8 @@ class HelperOverlay:
         if self._hotkeys_running():
             # Process exists but heartbeat is stale — hard restart.
             self._stop_hotkeys()
-            time.sleep(0.25)
-        return self._start_hotkeys(wait_healthy=True)
+            time.sleep(0.15 if not wait_healthy else 0.25)
+        return self._start_hotkeys(wait_healthy=wait_healthy)
 
     def _start_hotkeys(self, wait_healthy=False):
         script = self._hotkeys_script()
@@ -14134,11 +15968,11 @@ class HelperOverlay:
             return False
         if not wait_healthy:
             return True
-        deadline = time.perf_counter() + 4.0
+        deadline = time.perf_counter() + 2.5
         while time.perf_counter() < deadline:
             if self._hotkeys_healthy(max_age_sec=30):
                 return True
-            time.sleep(0.2)
+            time.sleep(0.15)
         return self._hotkeys_running()
 
     def _restart_hotkeys(self):
@@ -14239,17 +16073,48 @@ class HelperOverlay:
                     command = b"".join(chunks).decode("utf-8", "ignore").strip()
                 self._handle_remote_command(command)
 
+    def _forward_to_webview_control(self, command: str) -> bool:
+        """Hand pad / quick-tools words to the WebView2 shell on its own port."""
+        try:
+            with socket.create_connection(("127.0.0.1", 48739), timeout=0.2) as client:
+                client.sendall(str(command or "").encode("utf-8"))
+            return True
+        except OSError:
+            return False
+
     def _handle_remote_command(self, command):
         if not command:
             return
+        if command in {
+            "pad_tap",
+            "pad_down",
+            "pad_up",
+            "pad_cancel",
+            "quick_tools",
+            "quicktools",
+            "quick_tools_hide",
+            "quicktools_hide",
+        } or command.startswith("qt:") or command.startswith("qt_key:"):
+            self._forward_to_webview_control(command)
+            return
         if command == "toggle":
-            self.root.after(0, self.toggle)
+            # Prefer the WebView2 shell when it is the live aiOS window.
+            if self._forward_to_webview_control("toggle"):
+                return
+            if not self._toggle_webview_shell():
+                self.root.after(0, self.toggle)
             return
         if command == "show":
-            self.root.after(0, self.show)
+            if self._forward_to_webview_control("show"):
+                return
+            if not self._show_webview_shell():
+                self.root.after(0, self.show)
             return
         if command == "hide":
-            self.root.after(0, self.hide)
+            if self._forward_to_webview_control("hide"):
+                return
+            if not self._hide_webview_shell():
+                self.root.after(0, self.hide)
             return
         if command == "quit":
             self.root.after(0, self.root.destroy)
@@ -14769,6 +16634,10 @@ class HelperOverlay:
         disk_config = load_config()
         if "openai_api_key" in disk_config:
             self.config["openai_api_key"] = disk_config.get("openai_api_key") or ""
+        if "openrouter_api_key" in disk_config:
+            self.config["openrouter_api_key"] = disk_config.get("openrouter_api_key") or ""
+        if isinstance(disk_config.get("openrouter_enabled_models"), list):
+            self.config["openrouter_enabled_models"] = list(disk_config.get("openrouter_enabled_models") or [])
         self.config["ai_operator"] = merge_dict(DEFAULT_CONFIG["ai_operator"], settings)
         self._sync_agent_operator_api_key(force_config=True)
         try:
@@ -15379,6 +17248,37 @@ def send_command(command):
         return False
 
 
+def _find_pythonw() -> str:
+    candidates = [
+        BASE_DIR / ".venv" / "Scripts" / "pythonw.exe",
+        Path(sys.executable).with_name("pythonw.exe"),
+    ]
+    for path in candidates:
+        if path.exists():
+            return str(path)
+    return shutil.which("pythonw.exe") or sys.executable
+
+
+def _start_webview_shell() -> bool:
+    """Launch aios_shell.py with no console window."""
+    script = BASE_DIR / "aios_shell.py"
+    if not script.exists():
+        return False
+    flags = 0
+    if os.name == "nt":
+        flags = CREATE_NO_WINDOW | 0x00000008 | 0x00000200  # detached + new group
+    try:
+        subprocess.Popen(
+            [_find_pythonw(), str(script)],
+            cwd=str(BASE_DIR),
+            close_fds=True,
+            creationflags=flags,
+        )
+        return True
+    except OSError:
+        return False
+
+
 def main():
     enable_per_monitor_dpi_awareness()
     set_windows_app_id()
@@ -15388,24 +17288,47 @@ def main():
     parser.add_argument("--hide", action="store_true")
     parser.add_argument("--quit", action="store_true")
     parser.add_argument("--background", action="store_true")
+    parser.add_argument(
+        "--fast-start",
+        action="store_true",
+        help="Skip splash and claim the singleton with a short retry (used after Restart).",
+    )
+    parser.add_argument(
+        "--tk",
+        action="store_true",
+        help="Force the legacy Tk overlay instead of the WebView2 shell.",
+    )
     args = parser.parse_args()
 
+    # Hotkey / tray control words: talk to whoever owns the control socket,
+    # then fall back to starting the WebView shell (never a visible terminal).
     if args.quit:
         send_command("quit")
         return
     if args.hide:
         send_command("hide")
         return
-    if args.show and send_command("show"):
-        return
-    if args.toggle and send_command("toggle"):
+    if args.show:
+        if send_command("show") or _start_webview_shell():
+            return
+    if args.toggle:
+        if send_command("toggle") or _start_webview_shell():
+            return
+
+    # Default entry: the WebView2 shell is aiOS. Legacy Tk only with --tk.
+    if not args.tk and not args.background and (BASE_DIR / "aios_shell.py").exists():
+        if send_command("toggle"):
+            return
+        _start_webview_shell()
         return
 
-    if not claim_single_instance():
-        send_command("show" if args.show else "toggle")
+    wait_seconds = 2.5 if args.fast_start else 0.0
+    if not claim_single_instance(wait_seconds=wait_seconds):
+        # Another live instance owns the mutex — talk to it instead of vanishing.
+        send_command("show" if (args.show or args.fast_start) else "toggle")
         return
 
-    app = HelperOverlay(background=args.background)
+    app = HelperOverlay(background=args.background, fast_start=args.fast_start)
     app.run()
 
 

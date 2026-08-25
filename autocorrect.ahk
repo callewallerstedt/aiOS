@@ -28,9 +28,15 @@ global VoiceHotkeyRegistered := ""      ; fingerprint of last registration
 global VoiceHotkeyDown := ""
 global VoiceHotkeyUp := ""
 global AiosHotkeyDown := ""
+global AiosHotkeyUp := ""
+global AiosTapCount := 0
 global DictationActive := false
 global AiosToggleAt := 0
 global DictateDownAt := 0
+global AiosPadDown := false
+global AiosPadLongFired := false
+global AiosPadNeedsLaunch := false
+global AiosQuickToolsMs := 200   ; hold ≥ this opens Quick Tools; shorter toggles aiOS
 
 AiosLog(msg) {
     try FileAppend(FormatTime(, "HH:mm:ss") "  " msg "`n", A_ScriptDir "\.aios-ahk-log.txt", "UTF-8")
@@ -42,29 +48,69 @@ AiosHeartbeat() {
     try FileAppend(A_NowUTC, path, "UTF-8")
 }
 
-; --- Combined mode: short tap opens aiOS, hold starts dictation ---
+; --- Combined mode ---
+; Key-down starts a Python timer. Nothing opens yet.
+; Release under 200ms → full aiOS. Still down at 200ms → Quick Tools only.
+; Keep holding past voice hold_ms → cancel Quick Tools and start dictation.
+; Macro Deck: bind Pressed→aios_pad_down.bat and Released→aios_pad_up.bat
+; (a one-shot toggle only does the short-press / full aiOS path).
 
 CombinedHotkeyDown(*) {
-    global InsertHoldActive, InsertLongFired, VoiceHoldMs, VoiceHotkey
+    global InsertHoldActive, InsertLongFired, VoiceHoldMs, AiosPadNeedsLaunch, AiosQuickToolsMs
     if (InsertHoldActive) {
         return
     }
     InsertHoldActive := true
     InsertLongFired := false
-    timeoutSec := Max(0.15, Min(0.80, VoiceHoldMs / 1000.0))
-    if KeyWait(VoiceHotkey, "T" . timeoutSec) {
-        InsertHoldActive := false
+    AiosPadNeedsLaunch := false
+    AiosLog("aios pad_down")
+    if !SendToHelper("pad_down") {
+        ; Shell not up yet — decide on release / 200ms timer locally.
+        AiosPadNeedsLaunch := true
+        SetTimer(AiosPadColdLong, -AiosQuickToolsMs)
+    }
+    holdMs := Max(150, Min(800, VoiceHoldMs))
+    SetTimer(CombinedDictateFire, -holdMs)
+}
+
+CombinedHotkeyUp(*) {
+    global InsertHoldActive, InsertLongFired, AiosPadNeedsLaunch
+    SetTimer(CombinedDictateFire, 0)
+    SetTimer(AiosPadColdLong, 0)
+    if (!InsertHoldActive) {
+        return
+    }
+    InsertHoldActive := false
+    if (InsertLongFired) {
+        AiosLog("aios dictate release")
+        VoiceStopFast()
+        DiscordMuteStop()
+        InsertLongFired := false
+        AiosPadNeedsLaunch := false
+        return
+    }
+    if (AiosPadNeedsLaunch) {
+        AiosPadNeedsLaunch := false
+        AiosLog("aios cold short → aiOS")
         AiosToggleNow()
         return
     }
+    AiosLog("aios pad_up")
+    AiosPadUpNow()
+}
+
+CombinedDictateFire(*) {
+    global InsertHoldActive, InsertLongFired, AiosPadNeedsLaunch
+    if (!InsertHoldActive || InsertLongFired) {
+        return
+    }
     InsertLongFired := true
+    AiosPadNeedsLaunch := false
+    SetTimer(AiosPadColdLong, 0)
+    AiosLog("aios pad_cancel → dictate")
+    SendToHelper("pad_cancel")
     VoiceStartFast()
     DiscordMuteStart(false)
-    KeyWait(VoiceHotkey)
-    VoiceStopFast()
-    DiscordMuteStop()
-    InsertHoldActive := false
-    InsertLongFired := false
 }
 
 ; --- Separate mode ---
@@ -132,14 +178,94 @@ DeferDiscordMuteStart() {
     DiscordMuteStart(false)
 }
 
+; --- Dedicated aiOS button (separate hotkeys mode) ---
+; Same pad_down / pad_up contract as combined mode (timing lives in Python).
+
 SeparateAiosDown(*) {
-    global AiosHotkey, AiosToggleAt
-    now := A_TickCount
-    if (now - AiosToggleAt < 220) {
+    global AiosPadDown, AiosPadNeedsLaunch, AiosQuickToolsMs
+    if (AiosPadDown) {
         return
     }
-    AiosToggleAt := now
-    AiosLog("aios toggle via " AiosHotkey)
+    AiosPadDown := true
+    AiosPadNeedsLaunch := false
+    AiosLog("aios pad_down (separate)")
+    if !SendToHelper("pad_down") {
+        AiosPadNeedsLaunch := true
+        SetTimer(AiosPadColdLong, -AiosQuickToolsMs)
+    }
+}
+
+SeparateAiosUp(*) {
+    global AiosPadDown, AiosPadNeedsLaunch
+    SetTimer(AiosPadColdLong, 0)
+    if (!AiosPadDown) {
+        return
+    }
+    AiosPadDown := false
+    if (AiosPadNeedsLaunch) {
+        AiosPadNeedsLaunch := false
+        AiosLog("aios cold short → aiOS")
+        AiosToggleNow()
+        return
+    }
+    AiosLog("aios pad_up (separate)")
+    AiosPadUpNow()
+}
+
+AiosPadColdLong(*) {
+    global AiosPadNeedsLaunch
+    if (!AiosPadNeedsLaunch) {
+        return
+    }
+    AiosPadNeedsLaunch := false
+    AiosLog("aios cold hold → quick tools")
+    AiosQuickToolsNow()
+}
+
+AiosPadUpNow() {
+    global AiosTapCount
+    AiosTapCount += 1
+    if (AiosTapCount >= 3) {
+        AiosTapCount := 0
+        SetTimer(AiosTapReset, 0)
+        AiosLog("aios triple-tap restart")
+        SendToHelper("pad_cancel")
+        AiosRestartNow()
+        return
+    }
+    SendToHelper("pad_up")
+    SetTimer(AiosTapReset, -500)
+}
+
+AiosButtonTap() {
+    ; Kept for older call sites / triple-tap helpers.
+    AiosPadUpNow()
+}
+
+AiosTapReset(*) {
+    global AiosTapCount
+    AiosTapCount := 0
+}
+
+AiosRestartNow() {
+    if (SendToHelper("restart")) {
+        return
+    }
+    pythonw := A_ScriptDir "\.venv\Scripts\pythonw.exe"
+    if !FileExist(pythonw) {
+        pythonw := "C:\Python313\pythonw.exe"
+    }
+    if !FileExist(pythonw) {
+        pythonw := "C:\Program Files\Python314\pythonw.exe"
+    }
+    if !FileExist(pythonw) {
+        pythonw := "pythonw.exe"
+    }
+    launcher := A_ScriptDir "\launch_aios.py"
+    if FileExist(launcher) {
+        Run('"' pythonw '" "' launcher '"', A_ScriptDir, "Hide")
+        return
+    }
     AiosToggleNow()
 }
 
@@ -175,7 +301,7 @@ NormalizeVoiceHotkeyKey(keyName) {
 }
 
 UnregisterAllVoiceHotkeys() {
-    global VoiceHotkeyDown, VoiceHotkeyUp, AiosHotkeyDown
+    global VoiceHotkeyDown, VoiceHotkeyUp, AiosHotkeyDown, AiosHotkeyUp
     if (VoiceHotkeyDown != "") {
         try Hotkey VoiceHotkeyDown, "Off"
     }
@@ -185,9 +311,13 @@ UnregisterAllVoiceHotkeys() {
     if (AiosHotkeyDown != "") {
         try Hotkey AiosHotkeyDown, "Off"
     }
+    if (AiosHotkeyUp != "") {
+        try Hotkey AiosHotkeyUp, "Off"
+    }
     VoiceHotkeyDown := ""
     VoiceHotkeyUp := ""
     AiosHotkeyDown := ""
+    AiosHotkeyUp := ""
 }
 
 BindHotkey(name, callback) {
@@ -208,14 +338,14 @@ BindHotkey(name, callback) {
 
 RegisterHotkeys() {
     global SeparateHotkeys, VoiceHotkey, AiosHotkey, VoiceHotkeyRegistered
-    global VoiceHotkeyDown, VoiceHotkeyUp, AiosHotkeyDown
+    global VoiceHotkeyDown, VoiceHotkeyUp, AiosHotkeyDown, AiosHotkeyUp
 
     voiceKey := NormalizeVoiceHotkeyKey(VoiceHotkey = "" ? "Insert" : VoiceHotkey)
     aiosKey := NormalizeVoiceHotkeyKey(AiosHotkey = "" ? "Insert" : AiosHotkey)
     VoiceHotkey := voiceKey
     AiosHotkey := aiosKey
 
-    fingerprint := (SeparateHotkeys ? "sep|" : "comb|") . voiceKey . "|" . aiosKey . "|v4"
+    fingerprint := (SeparateHotkeys ? "sep|" : "comb|") . voiceKey . "|" . aiosKey . "|v6"
     if (VoiceHotkeyRegistered = fingerprint) {
         return
     }
@@ -227,21 +357,24 @@ RegisterHotkeys() {
     if (SeparateHotkeys) {
         if (voiceKey = aiosKey) {
             VoiceHotkeyDown := BindHotkey(voiceKey, CombinedHotkeyDown)
-            ok := (VoiceHotkeyDown != "")
+            VoiceHotkeyUp := BindHotkey(voiceKey . " up", CombinedHotkeyUp)
+            ok := (VoiceHotkeyDown != "" && VoiceHotkeyUp != "")
         } else {
             VoiceHotkeyDown := BindHotkey(voiceKey, SeparateDictationDown)
             VoiceHotkeyUp := BindHotkey(voiceKey . " up", SeparateDictationUp)
             AiosHotkeyDown := BindHotkey(aiosKey, SeparateAiosDown)
-            ok := (VoiceHotkeyDown != "" && VoiceHotkeyUp != "" && AiosHotkeyDown != "")
+            AiosHotkeyUp := BindHotkey(aiosKey . " up", SeparateAiosUp)
+            ok := (VoiceHotkeyDown != "" && VoiceHotkeyUp != "" && AiosHotkeyDown != "" && AiosHotkeyUp != "")
         }
     } else {
         VoiceHotkeyDown := BindHotkey(voiceKey, CombinedHotkeyDown)
-        ok := (VoiceHotkeyDown != "")
+        VoiceHotkeyUp := BindHotkey(voiceKey . " up", CombinedHotkeyUp)
+        ok := (VoiceHotkeyDown != "" && VoiceHotkeyUp != "")
     }
 
     if (ok) {
         VoiceHotkeyRegistered := fingerprint
-        AiosLog("registered " fingerprint " down=" VoiceHotkeyDown " up=" VoiceHotkeyUp " aios=" AiosHotkeyDown)
+        AiosLog("registered " fingerprint " down=" VoiceHotkeyDown " up=" VoiceHotkeyUp " aios=" AiosHotkeyDown " aiosUp=" AiosHotkeyUp)
     } else {
         AiosLog("registration incomplete for " fingerprint)
     }
@@ -442,8 +575,30 @@ DiscordMuteStop() {
     DiscordMutedByUs := false
 }
 
+AiosQuickToolsNow() {
+    if (SendToHelper("quick_tools")) {
+        return
+    }
+    pythonw := A_ScriptDir "\.venv\Scripts\pythonw.exe"
+    if !FileExist(pythonw) {
+        pythonw := "C:\Python313\pythonw.exe"
+    }
+    if !FileExist(pythonw) {
+        pythonw := "C:\Program Files\Python314\pythonw.exe"
+    }
+    if !FileExist(pythonw) {
+        pythonw := "pythonw.exe"
+    }
+    shell := A_ScriptDir "\aios_shell.py"
+    if FileExist(shell) {
+        Run('"' pythonw '" "' shell '" --quick-tools', A_ScriptDir, "Hide")
+        return
+    }
+    AiosToggleNow()
+}
+
 AiosToggleNow() {
-    ; Fast path: talk to the already-running helper over TCP (same as voice).
+    ; Short press / one-shot → full aiOS shell.
     if (SendToHelper("toggle")) {
         return
     }
@@ -452,12 +607,28 @@ AiosToggleNow() {
         pythonw := "C:\Python313\pythonw.exe"
     }
     if !FileExist(pythonw) {
+        pythonw := "C:\Program Files\Python314\pythonw.exe"
+    }
+    if !FileExist(pythonw) {
         pythonw := "pythonw.exe"
     }
-    Run('"' pythonw '" "' A_ScriptDir '\helper_overlay.py" --toggle', A_ScriptDir)
+    shell := A_ScriptDir "\aios_shell.py"
+    if FileExist(shell) {
+        Run('"' pythonw '" "' shell '"', A_ScriptDir, "Hide")
+        return
+    }
+    Run('"' pythonw '" "' A_ScriptDir '\helper_overlay.py" --toggle', A_ScriptDir, "Hide")
 }
 
 SendToHelper(msg) {
+    ; Prefer the WebView2 control port (survives when the Tk helper owns 48736).
+    if SendToPort(msg, 48739) {
+        return true
+    }
+    return SendToPort(msg, 48736)
+}
+
+SendToPort(msg, port) {
     if !EnsureWSA() {
         return false
     }
@@ -467,7 +638,7 @@ SendToHelper(msg) {
     }
     addr := Buffer(16, 0)
     NumPut("UShort", 2, addr, 0)
-    NumPut("UShort", DllCall("ws2_32\htons", "UShort", 48736, "UShort"), addr, 2)
+    NumPut("UShort", DllCall("ws2_32\htons", "UShort", port, "UShort"), addr, 2)
     NumPut("UInt", 0x0100007F, addr, 4)   ; 127.0.0.1
     res := DllCall("ws2_32\connect", "Ptr", sock, "Ptr", addr.Ptr, "Int", 16, "Int")
     if (res != 0) {

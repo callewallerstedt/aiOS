@@ -387,19 +387,87 @@ def add_message(thread_id: str, role: str, content: str, meta: dict | None = Non
 
 
 def list_messages(thread_id: str, *, limit: int = 5000,
-                  after_sequence: int = 0, through_sequence: int = 0) -> list[dict]:
+                  after_sequence: int = 0, through_sequence: int = 0,
+                  newest: bool = False) -> list[dict]:
     where = ["thread_id = ?", "rowid > ?"]
     params: list[Any] = [thread_id, int(after_sequence or 0)]
     if through_sequence:
         where.append("rowid <= ?")
         params.append(int(through_sequence))
     params.append(limit)
-    rows = _rows(
-        f"SELECT rowid AS sequence, * FROM messages WHERE {' AND '.join(where)}"
-        " ORDER BY rowid LIMIT ?", params)
+    select = f"SELECT rowid AS sequence, * FROM messages WHERE {' AND '.join(where)}"
+    if newest:
+        # Keep the newest bounded window but return it chronologically. This is
+        # what persistent chats and model snapshots need once a task passes the
+        # ordinary 5,000-row safety limit.
+        sql = f"SELECT * FROM ({select} ORDER BY rowid DESC LIMIT ?) ORDER BY sequence"
+    else:
+        sql = select + " ORDER BY rowid LIMIT ?"
+    rows = _rows(sql, params)
     for row in rows:
         row["meta"] = _loads(row.get("meta"), {})
     return rows
+
+
+def count_messages_through(thread_id: str, through_sequence: int) -> int:
+    """Count the exact compacted prefix without materializing transcript rows."""
+    through = max(0, int(through_sequence or 0))
+    if not through:
+        return 0
+    row = _row(
+        "SELECT COUNT(*) AS count FROM messages WHERE thread_id = ? AND rowid <= ?",
+        (thread_id, through),
+    )
+    return int(row.get("count") or 0) if row else 0
+
+
+def list_role_messages(thread_id: str, roles: set[str] | tuple[str, ...] | list[str], *,
+                       limit: int = 5000, after_sequence: int = 0,
+                       through_sequence: int = 0, newest: bool = False) -> list[dict]:
+    """Read selected transcript roles without scanning unrelated tool traffic."""
+    chosen = tuple(dict.fromkeys(str(role) for role in roles if str(role)))
+    if not chosen:
+        return []
+    placeholders = ",".join("?" for _ in chosen)
+    where = ["thread_id = ?", "rowid > ?", f"role IN ({placeholders})"]
+    params: list[Any] = [thread_id, int(after_sequence or 0), *chosen]
+    if through_sequence:
+        where.append("rowid <= ?")
+        params.append(int(through_sequence))
+    params.append(max(1, int(limit or 1)))
+    select = f"SELECT rowid AS sequence, * FROM messages WHERE {' AND '.join(where)}"
+    if newest:
+        sql = f"SELECT * FROM ({select} ORDER BY rowid DESC LIMIT ?) ORDER BY sequence"
+    else:
+        sql = select + " ORDER BY rowid LIMIT ?"
+    rows = _rows(sql, params)
+    for row in rows:
+        row["meta"] = _loads(row.get("meta"), {})
+    return rows
+
+
+def has_tool_result(thread_id: str, call_id: str, *, after_sequence: int = 0,
+                    through_sequence: int = 0) -> bool:
+    """Find a matching result across arbitrary interleaving without a row cap."""
+    wanted = str(call_id or "")
+    if not wanted:
+        return False
+    cursor = max(0, int(after_sequence or 0))
+    ceiling = int(through_sequence or 0)
+    while not ceiling or cursor < ceiling:
+        batch = list_role_messages(
+            thread_id, {"tool_result"}, after_sequence=cursor,
+            through_sequence=ceiling, limit=1000)
+        if not batch:
+            return False
+        for row in batch:
+            if str((row.get("meta") or {}).get("call_id") or "") == wanted:
+                return True
+        next_cursor = int(batch[-1].get("sequence") or cursor)
+        if next_cursor <= cursor:
+            return False
+        cursor = next_cursor
+    return False
 
 
 def search_messages(query: str, *, limit: int = 20) -> list[dict]:

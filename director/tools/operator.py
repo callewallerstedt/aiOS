@@ -47,15 +47,24 @@ async def operator(ctx: ToolContext, task: str = "", review_every: int = 0,
     # — two runs started three minutes apart and both stalled.
     live = ctx.hub.live_jobs("operator")
     if live:
-        busy = live[0]
-        running = str((busy.get("request") or {}).get("task") or "")[:200]
+        owner = live[0]
+        same_thread = str(owner.get("thread_id") or "") == ctx.thread_id
+        if same_thread:
+            running_task = str((owner.get("request") or {}).get("task") or "Operator task")
+            message = (
+                f"operator job {owner['id']} is already running: {running_task}. "
+                "This was not started; send the new instruction with operator_say."
+            )
+        else:
+            message = (
+                "the Operator computer is already being driven from another task. "
+                "There is only one screen, so this was not started. Return to the "
+                "task that owns the run to steer or stop it, or wait for it to finish."
+            )
         return ToolResult(
-            error=f"the operator is already running job {busy['id']}: {running!r}. "
-                  "There is only one screen, so this was not started. Steer that "
-                  "run with `operator_say`, wait for it to report back, or stop "
-                  "it with `stop_job` if it is doing the wrong thing.",
+            error=message,
             card={"title": "operator", "preview": goal[:90], "meta": "already busy",
-                  "tone": "danger", "job_id": busy["id"]})
+                  "tone": "danger"})
 
     # The checkpoint cadence is a user setting, not a planning choice. Ignore
     # legacy generated review_every/max_steps arguments so a coordinator cannot
@@ -117,18 +126,23 @@ async def operator_say(ctx: ToolContext, text: str = "", job_id: str = "") -> To
     note = str(text or "").strip()
     if not note:
         return ToolResult(error="nothing to say")
-    live = ctx.hub.live_jobs("operator")
+    live = ctx.hub.live_jobs("operator", thread_id=ctx.thread_id)
     target = job_id.strip() or (live[0]["id"] if live else "")
     if not target:
         return ToolResult(error="no operator run is going right now — dispatch one "
                                 "with `operator` instead")
+    row = next((job for job in live if str(job.get("id") or "") == target), None)
+    row = row or store.get_job(target)
+    if (not row or row.get("kind") != "operator"
+            or str(row.get("thread_id") or "") != ctx.thread_id):
+        return ToolResult(error="that Operator job belongs to a different task")
     if not ctx.hub.note_job(target, note):
         return ToolResult(error=f"operator job {target} is not running any more")
     await ctx.emit("operator.note", {"job_id": target, "text": note})
     return ToolResult(
         output=f"passed to operator job {target}; it picks this up on its next step",
         card={"title": "operator", "preview": note[:90], "meta": "steered",
-              "tone": "accent", "job_id": target},
+              "tone": "accent", "job_id": target, "job_kind": "operator"},
     )
 
 
@@ -145,13 +159,14 @@ async def operator_say(ctx: ToolContext, text: str = "", job_id: str = "") -> To
     },
 )
 async def operator_stop(ctx: ToolContext, job_id: str = "") -> ToolResult:
-    live = ctx.hub.live_jobs("operator")
+    live = ctx.hub.live_jobs("operator", thread_id=ctx.thread_id)
     target = str(job_id or "").strip() or (live[0]["id"] if live else "")
     if not target:
         return ToolResult(error="no operator run is going right now")
     row = next((job for job in live if job.get("id") == target), None)
     row = row or store.get_job(target)
-    if not row or row.get("kind") != "operator":
+    if (not row or row.get("kind") != "operator"
+            or str(row.get("thread_id") or "") != ctx.thread_id):
         return ToolResult(error=f"no such operator job: {target}")
     result = await ctx.hub.stop_job(target)
     if not result.get("ok"):
@@ -159,7 +174,7 @@ async def operator_stop(ctx: ToolContext, job_id: str = "") -> ToolResult:
     return ToolResult(
         output=f"Stopped operator job {target}.",
         card={"title": "operator", "preview": target, "meta": "stopped",
-              "tone": "ok", "job_id": target, "job_kind": "operator"},
+              "tone": "danger", "job_id": target, "job_kind": "operator"},
     )
 
 

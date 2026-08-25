@@ -39,7 +39,6 @@ const TODO_HEAD_CHECK_ICON = '<svg class="todoHeadCheck" viewBox="0 0 24 24" wid
 const TODO_CHECK_ICON = '<svg class="todoIcon" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M9 12.75 11.25 15 15 9.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" /></svg>';
 const TODO_ARROW_ICON = '<svg class="todoIcon strong" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="m12.75 15 3-3m0 0-3-3m3 3h-7.5M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" /></svg>';
 const TODO_DASHED_ICON = '<svg class="todoIcon" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.8" stroke-dasharray="1.8 3.6" stroke-linecap="round" /></svg>';
-const CODE_FILE_ICON = '<svg class="diffIcon" viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="M17.25 6.75 22.5 12l-5.25 5.25m-10.5 0L1.5 12l5.25-5.25m7.5-3-4.5 16.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>';
 
 const TOOL_ICONS = {
   think: '<path d="M12 2l2.4 7.2L22 12l-7.6 2.8L12 22l-2.4-7.2L2 12l7.6-2.8z" />',
@@ -85,54 +84,103 @@ export function fileDiffSummary(change) {
   };
 }
 
-function normalizeReasoningText(value) {
-  return String(value || "")
-    .replace(/\r\n?/g, "\n")
+/** Split an aggregated unified diff into the live per-file chips it describes. */
+export function fileDiffsFromUnifiedDiff(value) {
+  const text = String(value || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  if (!text.trim()) return [];
+  const lines = text.split("\n");
+  const chunks = [];
+  let current = [];
+  let sawGitHeader = false;
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const startsGitFile = line.startsWith("diff --git ");
+    const startsPlainFile = !sawGitHeader && line.startsWith("--- ") && lines[index + 1]?.startsWith("+++ ");
+    if ((startsGitFile || startsPlainFile) && current.length) {
+      chunks.push(current);
+      current = [];
+    }
+    if (startsGitFile) sawGitHeader = true;
+    current.push(line);
+  }
+  if (current.length) chunks.push(current);
+
+  const headerPath = (line, prefix) => {
+    let path = String(line || "").slice(prefix.length).split("\t", 1)[0].trim();
+    if (path.startsWith('"') && path.endsWith('"')) path = path.slice(1, -1);
+    return path.replace(/^[ab]\//, "");
+  };
+  const rows = [];
+  for (const chunk of chunks) {
+    const oldLine = chunk.find((line) => line.startsWith("--- ")) || "";
+    const newLine = chunk.find((line) => line.startsWith("+++ ")) || "";
+    const oldPath = headerPath(oldLine, "--- ");
+    const newPath = headerPath(newLine, "+++ ");
+    const gitLine = chunk.find((line) => line.startsWith("diff --git ")) || "";
+    const gitMatch = /^diff --git (?:"?a\/)(.+?)"? (?:"?b\/)(.+?)"?$/.exec(gitLine);
+    const path = newPath && newPath !== "/dev/null"
+      ? newPath
+      : oldPath && oldPath !== "/dev/null"
+        ? oldPath
+        : String(gitMatch?.[2] || gitMatch?.[1] || "");
+    if (!path) continue;
+    rows.push(fileDiffSummary({
+      path,
+      change_kind: oldPath === "/dev/null" ? "add" : newPath === "/dev/null" ? "delete" : "update",
+      diff: chunk.join("\n"),
+    }));
+  }
+  return rows;
+}
+
+export function normalizeReasoningText(value) {
+  const text = String(value || "").replace(/\r\n?/g, "\n");
+  const lines = text.split("\n");
+  let normalized = "";
+  let fenced = false;
+  let trimTransportIndent = false;
+  for (let index = 0; index < lines.length; index += 1) {
+    let line = lines[index];
+    if (trimTransportIndent) line = line.replace(/^[ \t]+/, "");
+    trimTransportIndent = false;
+    normalized += line;
+    if (index === lines.length - 1) break;
+
+    const trimmed = line.trim();
+    const next = lines[index + 1];
+    const nextTrimmed = next.trimStart();
+    const fenceBoundary = trimmed.startsWith("```");
+    if (fenceBoundary) fenced = !fenced;
+    const structuralLine = /^(?:```|#{1,6}\s|[-*+]\s|\d+[.)]\s|>|\|)/.test(nextTrimmed);
+    const hardBreak = /\s{2}$/.test(line) || /^\t|^ {4}/.test(next);
+    const preserve = fenced || fenceBoundary || !trimmed || !nextTrimmed || structuralLine || hardBreak;
+    if (preserve) {
+      normalized += "\n";
+      continue;
+    }
+
+    // Ox-Alpha's transport can put a newline before nearly every token. A
+    // leading space on the next chunk is the provider's word boundary; no
+    // leading space means it is a continuation such as "struct" + "urally".
+    const transportSpace = /^[ \t]/.test(next);
+    const sentenceBoundary = /[.!?:;]$/.test(line.trimEnd());
+    normalized += transportSpace || sentenceBoundary ? " " : "";
+    trimTransportIndent = transportSpace;
+  }
+  return normalized.replace(/[ \t]{2,}/g, " ")
     // Old sessions can contain a provider transport separator between almost
     // every token. Keep normal paragraphs, but turn 3+ blank lines into one
     // space so the archived trace is readable on phone and desktop.
     .replace(/\n(?:[ \t]*\n){2,}[ \t]*/g, " ");
 }
 
-function diffRows(change) {
-  const source = String(change?.diff || "").replace(/\r\n?/g, "\n");
-  const lines = source.split("\n");
-  const rows = [];
-  let oldLine = 1;
-  let newLine = 1;
-  let sawHunk = false;
-  for (const line of lines) {
-    const hunk = line.match(/^@@\s+-(\d+)(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s+@@/);
-    if (hunk) {
-      oldLine = Number(hunk[1]);
-      newLine = Number(hunk[2]);
-      sawHunk = true;
-      continue;
-    }
-    if (/^(?:---|\+\+\+)\s/.test(line) || line === "\\ No newline at end of file") continue;
-    if (!sawHunk && !line) continue;
-    if (line.startsWith("+")) {
-      rows.push({ old: null, cur: newLine++, type: "add", text: line.slice(1) });
-    } else if (line.startsWith("-")) {
-      rows.push({ old: oldLine++, cur: null, type: "del", text: line.slice(1) });
-    } else {
-      rows.push({ old: oldLine++, cur: newLine++, type: "ctx", text: line.startsWith(" ") ? line.slice(1) : line });
-    }
-  }
-  return rows.slice(0, 240);
-}
-
-function fileDiffMarkup(change) {
-  const rows = diffRows(change);
-  const added = rows.filter((row) => row.type === "add").length;
-  const removed = rows.filter((row) => row.type === "del").length;
-  return `<div class="aicss-diff diff" data-reveal="${escapeHtml(change.path)}" title="${escapeHtml(change.path)}">
-    <div class="diffHead">
-      <span class="diffFileWrap">${CODE_FILE_ICON}<span class="diffFile">${escapeHtml(change.name)}</span></span>
-      <span class="diffStat"><span class="add">+${added.toLocaleString()}</span><span class="del">-${removed.toLocaleString()}</span></span>
-    </div>
-    <div class="diffBody">${rows.map((row) => `<div class="diffRow ${row.type}"><span class="ln old">${row.old ?? ""}</span><span class="ln new">${row.cur ?? ""}</span><span class="sign">${row.type === "add" ? "+" : row.type === "del" ? "-" : ""}</span><code>${escapeHtml(row.text)}</code></div>`).join("")}</div>
-  </div>`;
+function fileDiffMarkup(change, className = "tool-run-diff") {
+  const added = Number(change?.add || 0);
+  const removed = Number(change?.del || 0);
+  return `<button type="button" class="${className}" data-reveal="${escapeHtml(change.path)}" title="Open ${escapeHtml(change.path)}">
+    <span class="turn-diff-file">${escapeHtml(change.name)}</span>
+    <span class="add">+${added.toLocaleString()}</span><span class="del">-${removed.toLocaleString()}</span>
+  </button>`;
 }
 
 function updateRollingCount(node, value) {
@@ -238,6 +286,30 @@ function normaliseActivity(event) {
 }
 
 /** Port of format_duration() -- compact h/m/s. */
+function rateLabel(roundRate, turnRate) {
+  // The last completed round, plus the turn average when it differs, so a
+  // running turn shows both what it just did and how it has gone overall.
+  const shown = roundRate || turnRate;
+  if (!shown) return "";
+  let text = shown.toFixed(1) + " tok/s";
+  if (turnRate && roundRate && Math.abs(turnRate - roundRate) >= 0.05) {
+    text += " (avg " + turnRate.toFixed(1) + ")";
+  }
+  return text;
+}
+
+function shortConfigName(row) {
+  // Prefer what the operator actually chose the configuration by. Fall back to
+  // the model tag with the registry path and quant suffix stripped, so a local
+  // model still reads as a name rather than a URL.
+  const name = String((row && row.configName) || "").trim();
+  if (name) return name;
+  const model = String((row && row.model) || "").trim();
+  if (!model) return String((row && row.provider) || "");
+  const tail = model.split("/").pop() || model;
+  return tail.replace(/-GGUF(?=:|$)/i, "").replace(/:.*$/, "");
+}
+
 export function formatDuration(seconds) {
   const total = Math.max(0, Math.floor(Number(seconds) || 0));
   if (total < 60) return `${total}s`;
@@ -262,6 +334,13 @@ export function relativeTime(value) {
   return `${Math.floor(seconds / 86400)}d ago`;
 }
 
+function rawJson(value) {
+  if (value == null || value === "") return "";
+  if (typeof value === "string") return value;
+  try { return JSON.stringify(value, null, 2); }
+  catch { return String(value); }
+}
+
 export class Transcript {
   /**
    * @param root       the scrolling element the rows are written into
@@ -280,6 +359,13 @@ export class Transcript {
     this.onAnswer = options.onAnswer || null;
 
     this.queue = [];
+    this.eventHistory = [];
+    this.rawMode = false;
+    this.rawBlocks = new Map();
+    this.rawSerial = 0;
+    this.rawAssistantKey = null;
+    this.rawProviderTurn = false;
+    this.rawProviderStreams = new Set();
     this.frame = null;
     this.fallback = null;
     this.follow = true;
@@ -295,11 +381,16 @@ export class Transcript {
     this.turnText = "";
     this.turnFileDiffs = new Map();
     this.turnDiffParts = new Map();
+    this.turnDiffEl = null;
     this.turnUsage = new Map();
+    this.turnUsageEl = null;
     this.suppressHarnessOutput = false;
     this.thinkingEl = null;
+    this.thinkingRun = null;
     this.thinkingKey = null;
     this.thinkingText = "";
+    this.thinkingEpisodes = new Map();
+    this.providerContentEpisodes = new Map();
     this.thinkingStartedAt = 0;
     this.toolRun = null;
     this.questionCards = new Map();
@@ -309,30 +400,8 @@ export class Transcript {
     this.workingTimer = null;
     this.workingStartedAt = 0;
     this.currentTurnStartedAt = 0;
-    this.showThinking = true;
-    this.showReasoning = true;
-    try {
-      this.showThinking = window.localStorage.getItem("aiosShowThinking") !== "0";
-      this.showReasoning = window.localStorage.getItem("aiosShowReasoning") !== "0";
-    } catch (_) { /* storage can be unavailable in a locked-down WebView */ }
-
     this.abort = new AbortController();
-    this.mountControls();
     this.bind();
-  }
-
-  mountControls() {
-    const node = document.createElement("div");
-    node.className = "transcript-controls";
-    node.innerHTML = `
-      <span class="transcript-controls-label">Show</span>
-      <button class="transcript-toggle" type="button" data-transcript-toggle="thinking" aria-pressed="${this.showThinking}">Thinking</button>
-      <button class="transcript-toggle" type="button" data-transcript-toggle="reasoning" aria-pressed="${this.showReasoning}">Reasoning</button>
-    `;
-    this.transcript.prepend(node);
-    this.transcript.classList.toggle("hide-live-thinking", !this.showThinking);
-    this.transcript.classList.toggle("hide-reasoning", !this.showReasoning);
-    this.controlsEl = node;
   }
 
   destroy() {
@@ -353,23 +422,6 @@ export class Transcript {
       target.addEventListener(type, handler, { signal: this.abort.signal, ...extra });
 
     on(this.transcript, "click", (event) => {
-      const displayToggle = event.target.closest("[data-transcript-toggle]");
-      if (displayToggle) {
-        const option = displayToggle.dataset.transcriptToggle;
-        if (option === "thinking") this.showThinking = !this.showThinking;
-        if (option === "reasoning") this.showReasoning = !this.showReasoning;
-        try {
-          window.localStorage.setItem("aiosShowThinking", this.showThinking ? "1" : "0");
-          window.localStorage.setItem("aiosShowReasoning", this.showReasoning ? "1" : "0");
-        } catch (_) { /* keep the in-memory choice */ }
-        this.transcript.classList.toggle("hide-live-thinking", !this.showThinking);
-        this.transcript.classList.toggle("hide-reasoning", !this.showReasoning);
-        this.controlsEl?.querySelector('[data-transcript-toggle="thinking"]')
-          ?.setAttribute("aria-pressed", String(this.showThinking));
-        this.controlsEl?.querySelector('[data-transcript-toggle="reasoning"]')
-          ?.setAttribute("aria-pressed", String(this.showReasoning));
-        return;
-      }
       const fix = event.target.closest("[data-review-fix]");
       if (fix) {
         const cardNode = fix.closest(".tool-card");
@@ -404,9 +456,7 @@ export class Transcript {
       if (event.target.closest(".agent-tool-call")) return;
       const toolRunHead = event.target.closest(".tool-run-head");
       if (toolRunHead) {
-        const run = toolRunHead.closest(".tool-run");
-        run?.classList.toggle("expanded");
-        toolRunHead.setAttribute("aria-expanded", String(!!run?.classList.contains("expanded")));
+        this.toggleDisclosure(toolRunHead, ".tool-run");
         return;
       }
       const card = event.target.closest(".tool-card");
@@ -441,8 +491,7 @@ export class Transcript {
       if (thinking) {
         const block = thinking.closest(".thinking");
         block.dataset.manual = "true";
-        block.classList.toggle("expanded");
-        thinking.setAttribute("aria-expanded", String(block.classList.contains("expanded")));
+        this.toggleDisclosure(thinking, ".thinking");
       }
     });
 
@@ -466,6 +515,19 @@ export class Transcript {
       const atBottom = distance < 40;
       if (this.follow !== atBottom) this.setFollow(atBottom, true);
     });
+
+    // Usage summaries are intentionally one line. While the pointer is over
+    // one, a normal wheel gesture reveals the clipped metrics horizontally;
+    // the transcript keeps its normal vertical wheel behavior everywhere
+    // else. This also works with a trackpad's native horizontal delta.
+    on(this.transcript, "wheel", (event) => {
+      const row = event.target.closest(".turn-usage-row");
+      if (!row || row.scrollWidth <= row.clientWidth) return;
+      const delta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
+      if (!delta) return;
+      row.scrollLeft += delta;
+      event.preventDefault();
+    }, { passive: false });
 
     // While you are working the scrollbar, nothing writes scrollTop.
     //
@@ -492,15 +554,44 @@ export class Transcript {
 
   /** Feed a batch of events in. One call per SSE frame. */
   push(events) {
-    for (const event of events || []) this.queue.push(event);
+    for (const event of events || []) {
+      this.eventHistory.push(event);
+      this.queue.push(event);
+    }
     this.schedule();
+  }
+
+  setRawMode(enabled) {
+    const next = !!enabled;
+    if (next === this.rawMode) return this.rawMode;
+    const history = [...this.eventHistory];
+    if (this.frame !== null) cancelAnimationFrame(this.frame);
+    this.frame = null;
+    this.clearFallback();
+    this.rawMode = next;
+    this.reset();
+    this.eventHistory = history;
+    this.transcript.classList.toggle("raw-mode", next);
+    for (const event of history) this.applyEvent(event);
+    this.pinToEnd();
+    return this.rawMode;
+  }
+
+  toggleRawMode() {
+    return this.setRawMode(!this.rawMode);
   }
 
   reset() {
     // The jump button is a sibling of the transcript, not a child, so emptying
     // the transcript no longer takes it with it.
     this.transcript.innerHTML = "";
-    this.mountControls();
+    this.transcript.classList.toggle("raw-mode", this.rawMode);
+    this.eventHistory = [];
+    this.rawBlocks.clear();
+    this.rawSerial = 0;
+    this.rawAssistantKey = null;
+    this.rawProviderTurn = false;
+    this.rawProviderStreams.clear();
     this.wroteTop = -1;
     this.wroteHeight = -1;
     this.cards.clear();
@@ -509,11 +600,16 @@ export class Transcript {
     this.turnText = "";
     this.turnFileDiffs.clear();
     this.turnDiffParts.clear();
+    this.turnDiffEl = null;
     this.turnUsage.clear();
+    this.turnUsageEl = null;
     this.suppressHarnessOutput = false;
     this.thinkingEl = null;
+    this.thinkingRun = null;
     this.thinkingKey = null;
     this.thinkingText = "";
+    this.thinkingEpisodes.clear();
+    this.providerContentEpisodes.clear();
     this.thinkingStartedAt = 0;
     this.toolRun = null;
     this.clearWorking();
@@ -523,7 +619,157 @@ export class Transcript {
     if (this.jumpEl) this.jumpEl.classList.remove("show");
   }
 
+  ensureRawBlock(key, label, meta = "", type = "model") {
+    let block = this.rawBlocks.get(key);
+    if (block) return block;
+    const node = document.createElement("section");
+    node.className = `raw-block raw-${type}`;
+    const head = document.createElement("div");
+    head.className = "raw-block-head";
+    const name = document.createElement("span");
+    name.className = "raw-block-label";
+    name.textContent = label;
+    const details = document.createElement("span");
+    details.className = "raw-block-meta";
+    details.textContent = meta;
+    const body = document.createElement("pre");
+    body.className = "raw-block-body";
+    head.append(name, details);
+    node.append(head, body);
+    this.transcript.appendChild(node);
+    block = { node, body, name, details, text: "" };
+    this.rawBlocks.set(key, block);
+    return block;
+  }
+
+  writeRawBlock(key, label, meta, type, text, append = false) {
+    const block = this.ensureRawBlock(key, label, meta, type);
+    block.name.textContent = label;
+    block.details.textContent = meta;
+    const next = String(text || "");
+    block.text = append ? block.text + next : next;
+    block.body.textContent = block.text;
+    return block;
+  }
+
+  applyRawEvent(event) {
+    const kind = String(event.kind || "status");
+    const text = String(event.delta || event.text || "");
+    if (kind === "user") {
+      this.rawAssistantKey = null;
+      this.rawProviderTurn = false;
+      this.rawProviderStreams.clear();
+      this.writeRawBlock(`user:${++this.rawSerial}`, "USER", "", "user", text);
+      return;
+    }
+    if (kind === "raw_model_delta") {
+      const streamName = String(event.raw_stream || "content");
+      const request = String(event.request_id || event.request_sequence || ++this.rawSerial);
+      const meta = [
+        event.provider || "", event.model || "",
+        event.round_index ? `round ${event.round_index}` : "",
+        Number(event.attempt || 0) > 1 ? `attempt ${event.attempt}` : "",
+      ].filter(Boolean).join(" · ");
+      this.rawProviderTurn = true;
+      this.rawProviderStreams.add(streamName);
+      this.rawAssistantKey = null;
+      this.writeRawBlock(
+        `provider:${request}:${streamName}`,
+        streamName === "thinking" ? "THINKING" : "MODEL",
+        meta,
+        streamName === "thinking" ? "thinking" : "model",
+        text,
+        true,
+      );
+      return;
+    }
+    if (kind === "raw_model_tool") {
+      const request = String(event.request_id || event.request_sequence || ++this.rawSerial);
+      const meta = [event.provider || "", event.model || "", event.round_index ? `round ${event.round_index}` : ""]
+        .filter(Boolean).join(" · ");
+      this.rawProviderTurn = true;
+      this.rawAssistantKey = null;
+      this.writeRawBlock(
+        `provider-tool:${request}`,
+        "MODEL TOOL",
+        meta,
+        "tool",
+        String(event.raw || text || rawJson(event.tool_calls)),
+      );
+      return;
+    }
+    if (kind === "assistant" || kind === "assistant_delta" || kind === "result") {
+      if (this.rawProviderTurn) return;
+      if (!this.rawAssistantKey) this.rawAssistantKey = `assistant:${++this.rawSerial}`;
+      const existing = this.rawBlocks.get(this.rawAssistantKey);
+      if (kind === "result" && existing) {
+        const current = existing.text.replace(/\s+/g, "");
+        const settled = text.replace(/\s+/g, "");
+        if (current && settled && (current === settled || current.includes(settled) || settled.includes(current))) {
+          if (settled.length > current.length) this.writeRawBlock(this.rawAssistantKey, "MODEL", "stored transcript", "model", text);
+          return;
+        }
+      }
+      this.writeRawBlock(this.rawAssistantKey, "MODEL", "stored transcript", "model", text, true);
+      return;
+    }
+    if (kind === "activity" || kind === "tool" || kind === "thinking" || kind === "approval") {
+      const type = String(event.activity_type || (kind === "thinking" ? "thinking" : "tool"));
+      if (type === "stage") return;
+      if (type === "thinking" && this.rawProviderStreams.has("thinking")) return;
+      this.rawAssistantKey = null;
+      const id = String(event.activity_id || `${type}:${++this.rawSerial}`);
+      const isThinking = type === "thinking";
+      const label = isThinking
+        ? "THINKING"
+        : `TOOL · ${String(event.tool || event.title || type).toUpperCase()}`;
+      const meta = [event.phase || "", event.stream || ""].filter(Boolean).join(" · ");
+      const pieces = [
+        event.command || event.detail || "",
+        event.arguments ? rawJson(event.arguments) : "",
+        event.delta || "",
+        event.output || event.error || "",
+      ].filter((part, index, rows) => part && rows.indexOf(part) === index);
+      const body = pieces.join(pieces.length > 1 ? "\n\n" : "") || text;
+      const append = String(event.phase || "") === "update" && !!event.delta;
+      this.writeRawBlock(`activity:${id}`, label, meta, isThinking ? "thinking" : "tool", body, append);
+      return;
+    }
+    if (kind === "question") {
+      this.rawAssistantKey = null;
+      this.writeRawBlock(`question:${++this.rawSerial}`, "QUESTION", "", "system", text);
+      return;
+    }
+    if (kind === "provider_switch" || kind === "error") {
+      this.rawAssistantKey = null;
+      this.writeRawBlock(`${kind}:${++this.rawSerial}`, kind === "error" ? "ERROR" : "PROVIDER", "", "system", text);
+    }
+  }
+
   // ----------------------------------------------------------------- scroll
+
+  /**
+   * Flip an inline disclosure (tool-run "Activity", thinking block) while
+   * keeping the viewport contract: a follower snaps to the latest line and
+   * keeps sticking there; a reader who scrolled up stays anchored on exactly
+   * what they were reading instead of watching it jump.
+   */
+  toggleDisclosure(head, selector) {
+    const block = head.closest(selector);
+    if (!block) return;
+    const beforeTop = block.getBoundingClientRect().top;
+    const beforeScroll = this.transcript.scrollTop;
+    block.classList.toggle("expanded");
+    head.setAttribute("aria-expanded", String(block.classList.contains("expanded")));
+    requestAnimationFrame(() => {
+      if (!block.isConnected) return;
+      if (this.follow) {
+        this.scrollToEnd(true);
+        return;
+      }
+      this.transcript.scrollTop = beforeScroll + (block.getBoundingClientRect().top - beforeTop);
+    });
+  }
 
   setFollow(value, fromScroll = false) {
     this.follow = value;
@@ -614,6 +860,22 @@ export class Transcript {
 
   applyEvent(event) {
     let kind = String(event.kind || "status");
+    if (this.rawMode) {
+      this.applyRawEvent(event);
+      return;
+    }
+    // Provider content emitted before a native tool call is useful live
+    // reasoning, even though Ollama reports it through the ordinary content
+    // field. Show it provisionally as Reasoning. If the round turns out to be
+    // the final answer, the matching assistant event replaces this block.
+    if (kind === "raw_model_delta") {
+      if (String(event.raw_stream || "content") === "content") this.streamProviderContent(event);
+      return;
+    }
+    if (kind === "raw_model_tool") {
+      this.settleProviderContent(String(event.request_id || event.request_sequence || ""));
+      return;
+    }
     const terminalResult = kind === "result";
     const text = String(event.text || kind);
     const harnessAction = String(event.harness_action || "");
@@ -628,6 +890,7 @@ export class Transcript {
       this.suppressHarnessOutput = true;
     } else if (kind === "user") {
       this.suppressHarnessOutput = false;
+      this.providerContentEpisodes.clear();
       if (event.answer_to_question) {
         this.settleQuestion(String(event.answer_to_question), event.question_answers || {});
       } else {
@@ -704,6 +967,7 @@ export class Transcript {
       return;
     }
     if (kind === "assistant" || kind === "assistant_delta") {
+      this.discardMatchingProviderContent(String(event.delta || text));
       this.closeToolRun();
       this.streamAssistant(String(event.delta || text));
       if (terminalResult) {
@@ -743,7 +1007,11 @@ export class Transcript {
     const node = document.createElement("div");
     node.className = `${className} row-new`;
     node.innerHTML = html;
-    if (parent === this.transcript && this.workingEl?.isConnected) {
+    if (parent === this.transcript && this.turnUsageEl?.isConnected) {
+      // A live usage summary owns the bottom slot. New activity lands above
+      // it so the summary never disappears into an earlier tool dropdown.
+      this.transcript.insertBefore(node, this.turnUsageEl);
+    } else if (parent === this.transcript && this.workingEl?.isConnected) {
       this.transcript.insertBefore(node, this.workingEl);
     } else {
       parent.appendChild(node);
@@ -972,10 +1240,6 @@ export class Transcript {
       </button>
       <div class="tool-run-expand">
         <div class="tool-run-clip">
-          <section class="tool-run-reasoning" hidden>
-            <div class="tool-run-reasoning-head"><span aria-hidden="true">${SPARK_ICON}</span><span>Reasoning</span><span class="tool-run-reasoning-count"></span></div>
-            <div class="tool-run-reasoning-content"></div>
-          </section>
           <div class="tool-run-rows"></div>
           <div class="tool-run-diffs" hidden></div>
         </div>
@@ -986,6 +1250,9 @@ export class Transcript {
       body: node.querySelector(".tool-run-rows"),
       cards: new Set(),
       fileDiffs: new Map(),
+      // Each thinking episode gets its own inline block inside .tool-run-rows,
+      // keyed by activity_id so resumed streams update their own block.
+      thoughts: new Map(),
       reasoningKeys: new Set(),
       reasoningParts: new Map(),
       reasoningActive: false,
@@ -1055,43 +1322,65 @@ export class Transcript {
       total.diff = part.diff || total.diff;
     }
     this.turnFileDiffs.set(path, total);
+    this.paintTurnDiffs();
+  }
+
+  paintTurnDiffs() {
+    if (!this.turnFileDiffs.size) return;
+    if (!this.turnDiffEl?.isConnected) this.turnDiffEl = this.addRow("turn-diffs", "");
+    const rows = [...this.turnFileDiffs.values()];
+    this.turnDiffEl.innerHTML = `
+      <span class="turn-diffs-label">Files changed</span>
+      ${rows.map((change) => fileDiffMarkup(change, "turn-diff")).join("")}
+    `;
   }
 
   finishTurnDiffs() {
-    if (!this.turnFileDiffs.size) return;
-    // The exact file-diff cards already live in the turn's compact Activity
-    // disclosure. A second summary row after the answer duplicated every file.
+    if (this.turnFileDiffs.size) this.paintTurnDiffs();
     this.turnFileDiffs.clear();
     this.turnDiffParts.clear();
+    this.turnDiffEl = null;
   }
 
-  finishTurnUsage() {
+  paintTurnUsage() {
     if (!this.turnUsage.size) return;
     const rows = [...this.turnUsage.values()];
-    this.turnUsage.clear();
-    this.addRow("turn-usage", rows.map((row) => {
+    if (!this.turnUsageEl?.isConnected) this.turnUsageEl = this.addRow("turn-usage live", "");
+    this.turnUsageEl.innerHTML = rows.map((row) => {
       const usage = row.usage || {};
+      const roundRate = Number(row.roundRate || 0);
+      const turnRate = Number(row.turnRate || 0);
       const bits = [
-        row.provider || "",
-        row.model || "",
-        `${Number(usage.input_tokens || 0).toLocaleString()} input`,
+        // The saved configuration's name, not provider + a 60-character tag.
+        shortConfigName(row),
+        `${Number(usage.input_tokens || 0).toLocaleString()} in`,
         `${Number(usage.cached_input_tokens || 0).toLocaleString()} cached`,
-        `${Number(usage.output_tokens || 0).toLocaleString()} output`,
+        `${Number(usage.output_tokens || 0).toLocaleString()} out`,
         `${Number(usage.reasoning_tokens || 0).toLocaleString()} reasoning`,
         `${Number(usage.total_tokens || 0).toLocaleString()} total`,
+        // Measured generation rate. The round figure is the last completed
+        // round; the average is every round in this turn, so a turn that is
+        // still running shows both what it just did and how it has gone.
+        rateLabel(roundRate, turnRate),
         `$${Number(usage.cost_usd || 0).toFixed(6)}`,
         formatDuration(row.seconds || 0),
       ].filter(Boolean);
       return `
         <div class="turn-usage-row">
-          <span class="turn-usage-role">${escapeHtml(row.label || "Coder")}</span>
           <span class="turn-usage-detail">${escapeHtml(bits.join(" · "))}</span>
         </div>
       `;
-    }).join(""));
+    }).join("");
   }
 
-  setWorking(active, detail = "", startedAt = 0) {
+  finishTurnUsage() {
+    if (this.turnUsage.size) this.paintTurnUsage();
+    this.turnUsageEl?.classList.remove("live");
+    this.turnUsage.clear();
+    this.turnUsageEl = null;
+  }
+
+  setWorking(active, detail = "", startedAt = 0, label = "Generating") {
     if (!active) {
       this.clearWorking();
       return;
@@ -1113,6 +1402,7 @@ export class Transcript {
       this.transcript.appendChild(this.workingEl);
       this.scheduleWorkingClock();
     }
+    this.workingEl.querySelector(".working-label").textContent = String(label || "Generating");
     this.workingEl.querySelector(".working-detail").textContent = String(detail || "The agent is working.");
     // appendChild on an already-attached node removes and re-inserts it,
     // restarting the CSS animation. Only append when it is not in the tree.
@@ -1221,18 +1511,39 @@ export class Transcript {
   streamThinking(activity, raw = {}) {
     const key = String(activity.activity_id || activityKey(activity));
     this.closeAssistant();
-    const run = this.ensureToolRun();
-    const reasoning = run.node.querySelector(".tool-run-reasoning");
+    // A terminal packet may arrive after another event has closed the visible
+    // tool group. Reuse the group where this episode first appeared, so an
+    // update can never move reasoning past later tool calls.
+    const previousEpisode = this.thinkingEpisodes.get(key);
+    const run = previousEpisode?.run || this.ensureToolRun();
 
     if (this.thinkingKey !== key) {
       this.thinkingKey = key;
-      this.thinkingText = "";
+      // A stage/tool event can end the live indicator before the provider's
+      // terminal thinking event arrives. Resume the already-rendered text for
+      // that activity instead of replacing it with an empty completed event.
+      this.thinkingText = String(run.reasoningParts.get(key) || "");
       this.thinkingStartedAt = Date.now();
       run.reasoningKeys.add(key);
-      run.reasoningParts.set(key, "");
+      if (!run.reasoningParts.has(key)) run.reasoningParts.set(key, "");
+      if (!run.thoughts.has(key)) {
+        // Each reasoning episode is its own block, appended to the tool rows
+        // in arrival order so it sits between the tool calls it preceded.
+        const wrap = document.createElement("section");
+        wrap.className = "tool-run-thought-block";
+        wrap.innerHTML = `
+          <div class="tool-run-reasoning-head"><span aria-hidden="true">${SPARK_ICON}</span><span>Reasoning</span></div>
+          <div class="tool-run-reasoning-content"><div class="tool-run-thought"></div></div>
+        `;
+        run.body.appendChild(wrap);
+        run.thoughts.set(key, wrap);
+        this.thinkingEpisodes.set(key, { run, block: wrap });
+      }
     }
-    if (raw.delta) this.thinkingText += normalizeReasoningText(raw.delta);
-    else if (activity.summary) this.thinkingText = normalizeReasoningText(activity.summary);
+    // Keep the provider stream lossless. Normalization belongs at render time;
+    // doing it after every token made early newline decisions irreversible.
+    if (raw.delta) this.thinkingText += String(raw.delta);
+    else if (activity.summary && !this.thinkingText) this.thinkingText = String(activity.summary);
     run.reasoningParts.set(key, this.thinkingText);
 
     const phase = String(raw.phase || activity.phase || "").toLowerCase();
@@ -1240,27 +1551,92 @@ export class Transcript {
     run.reasoningActive = !done;
     run.reasoningTitle = String(activity.title || "Thinking");
     run.reasoningOrder = ++run.sequence;
-    reasoning.hidden = false;
-    reasoning.classList.toggle("live", !done);
-    reasoning.querySelector(".tool-run-reasoning-count").textContent =
-      `${run.reasoningKeys.size} thought${run.reasoningKeys.size === 1 ? "" : "s"}`;
-    reasoning.querySelector(".tool-run-reasoning-content").innerHTML = [...run.reasoningParts.values()]
-      .map((part) => String(part || "").trim())
-      .filter(Boolean)
-      .map((part) => `<div class="tool-run-thought">${renderMarkdown(part)}</div>`)
-      .join("");
-    this.thinkingEl = reasoning;
+
+    const block = run.thoughts.get(key);
+    if (block) {
+      block.classList.toggle("live", !done);
+      this.thinkingEl = block;
+      this.thinkingRun = run;
+      const text = normalizeReasoningText(this.thinkingText).trim();
+      block.querySelector(".tool-run-thought").innerHTML =
+        text ? renderMarkdown(text) : "";
+    }
     this.updateToolRun(run);
     if (done) this.closeThinking();
   }
 
+  /** Show Ollama/OpenRouter pre-tool content live, then settle or replace it. */
+  streamProviderContent(event = {}) {
+    const request = String(event.request_id || event.request_sequence || `content:${event.round_index || 0}:${event.attempt || 1}`);
+    const key = `provider-content:${request}`;
+    this.providerContentEpisodes.set(request, key);
+    if (this.thinkingKey && this.thinkingKey !== key) this.closeThinking();
+    this.streamThinking({
+      activity_id: key,
+      activity_type: "thinking",
+      title: "Reasoning",
+      phase: "update",
+    }, {
+      delta: String(event.delta || event.text || ""),
+      phase: "update",
+    });
+  }
+
+  settleProviderContent(request, discard = false) {
+    const key = this.providerContentEpisodes.get(String(request || ""));
+    const episode = key ? this.thinkingEpisodes.get(key) : null;
+    if (!key || !episode) return false;
+    const { run, block } = episode;
+    block?.classList.remove("live");
+    run.reasoningActive = false;
+    if (discard) {
+      block?.remove();
+      run.thoughts.delete(key);
+      run.reasoningKeys.delete(key);
+      run.reasoningParts.delete(key);
+      this.thinkingEpisodes.delete(key);
+      this.providerContentEpisodes.delete(String(request || ""));
+      if (!run.cards.size && !run.reasoningKeys.size) {
+        run.node.remove();
+        if (this.toolRun === run) this.toolRun = null;
+      } else {
+        this.updateToolRun(run);
+      }
+    } else {
+      this.updateToolRun(run);
+    }
+    if (this.thinkingKey === key) {
+      this.thinkingEl = null;
+      this.thinkingRun = null;
+      this.thinkingKey = null;
+      this.thinkingText = "";
+      this.thinkingStartedAt = 0;
+    }
+    return true;
+  }
+
+  discardMatchingProviderContent(text) {
+    const settled = String(text || "").replace(/\s+/g, "");
+    if (!settled) return false;
+    const episodes = [...this.providerContentEpisodes.entries()].reverse();
+    for (const [request, key] of episodes) {
+      const episode = this.thinkingEpisodes.get(key);
+      const provisional = String(episode?.run?.reasoningParts?.get(key) || "").replace(/\s+/g, "");
+      if (provisional && (provisional === settled || provisional.includes(settled) || settled.includes(provisional))) {
+        return this.settleProviderContent(request, true);
+      }
+    }
+    return false;
+  }
+
   closeThinking() {
     if (this.thinkingEl) this.thinkingEl.classList.remove("live");
-    if (this.toolRun) {
-      this.toolRun.reasoningActive = false;
-      this.updateToolRun(this.toolRun);
+    if (this.thinkingRun) {
+      this.thinkingRun.reasoningActive = false;
+      this.updateToolRun(this.thinkingRun);
     }
     this.thinkingEl = null;
+    this.thinkingRun = null;
     this.thinkingKey = null;
     this.thinkingText = "";
     this.thinkingStartedAt = 0;
@@ -1366,17 +1742,20 @@ export class Transcript {
     row.node.classList.toggle("expandable", expandable);
     row.node.querySelector(".stage-head")
       .setAttribute("aria-expanded", String(row.node.classList.contains("expanded")));
-    if (stage === "coder" && phase === "completed") {
+    if (stage === "coder") {
       this.turnUsage.set(key, {
         label: meta,
         provider: state.provider || "",
         model: state.model || "",
+        configName: state.config_name || "",
+        roundRate: Number(state.round_tokens_per_second || 0),
+        turnRate: Number(state.turn_tokens_per_second || 0),
         usage: { ...(state.usage || {}) },
         seconds: Number(state.seconds || 0),
       });
-      // Settled Coder data belongs in the single end-of-turn footer.
-    } else {
-      if (stage === "coder") this.turnUsage.delete(key);
+      // Keep one summary outside the hidden lifecycle card and update it from
+      // the first running event through the final settled metrics.
+      this.paintTurnUsage();
     }
   }
 
@@ -1454,6 +1833,9 @@ export class Transcript {
       state.files = event.changes.map((change) => String(change.path || "")).filter(Boolean);
       state.diff = event.changes.map((change) => String(change.diff || "")).filter(Boolean).join("\n");
       state.fileDiffs = event.changes.map(fileDiffSummary).filter((change) => change.path);
+    }
+    if (String(state.activity_type || "") === "diff" && state.diff) {
+      state.fileDiffs = fileDiffsFromUnifiedDiff(state.diff);
     }
     for (const field of ["files", "steps", "findings", "unmet", "suggestions", "tool_calls", "transcript"]) {
       if (Array.isArray(event[field]) && event[field].length) state[field] = event[field];

@@ -2463,10 +2463,18 @@ class Dictation:
         if kind in {"reply_start", "reply_delta", "reply_done", "status"}:
             mirror_phone_event(kind, payload if isinstance(payload, str) else "")
         elif kind in {"tool_start", "tool_done"} and isinstance(payload, dict):
+            extra = {
+                "tool": str(payload.get("name") or ""),
+                "ok": bool(payload.get("ok", True)),
+            }
+            if isinstance(payload.get("arguments"), dict):
+                extra["arguments"] = payload["arguments"]
+                if str(payload.get("name") or "") == "update_plan":
+                    extra["steps"] = payload["arguments"].get("steps") or []
             mirror_phone_event(
                 kind,
                 str(payload.get("label") or payload.get("name") or "tool"),
-                {"tool": str(payload.get("name") or ""), "ok": bool(payload.get("ok", True))},
+                extra,
             )
         if kind == "tool":
             # Legacy notification emitted immediately before tool_start.  The
@@ -2539,7 +2547,7 @@ class Dictation:
                 {"kind": "reply_done", "echo_user": echo_user},
             )
 
-    def ask_text(self, text, echo_user=True, *, reasoning="", speak_reply=True):
+    def ask_text(self, text, echo_user=True, *, reasoning="", speak_reply=True, model=""):
         """Typed (or otherwise finished) text → same agent path as a spoken turn."""
         text = str(text or "").strip()
         if not text:
@@ -2580,6 +2588,7 @@ class Dictation:
             kwargs={
                 "echo_user": bool(echo_user),
                 "reasoning": str(reasoning or "").strip().lower(),
+                "model": str(model or "").strip(),
             },
             daemon=True,
         ).start()
@@ -2608,7 +2617,7 @@ class Dictation:
             transported.append(json.loads(json.dumps(item, ensure_ascii=False, default=str)))
         return transported
 
-    def _send_to_agent(self, text, turn, echo_user=True, reasoning=""):
+    def _send_to_agent(self, text, turn, echo_user=True, reasoning="", model=""):
         started = time.monotonic()
         self._agent_echo_user = bool(echo_user)
         reply = ""
@@ -2616,8 +2625,12 @@ class Dictation:
         details = []
         tools = []
         try:
-            overrides = {"agent_reasoning": reasoning} if reasoning else None
-            result = self._ensure_agent().run(text, overrides=overrides)
+            overrides = {}
+            if reasoning:
+                overrides["agent_reasoning"] = str(reasoning).strip().lower()
+            if model:
+                overrides["agent_model"] = str(model).strip()
+            result = self._ensure_agent().run(text, overrides=overrides or None)
         except Exception as exc:
             log_event(f"agent failed to start: {exc}")
             result = None
@@ -3098,14 +3111,16 @@ def run_command_server(dictation):
                         echo_user = bool(payload.get("echo_user", True))
                         reasoning = str(payload.get("reasoning") or "").strip().lower()
                         speak_reply = bool(payload.get("speak_reply", True))
+                        model = str(payload.get("model") or "").strip()
                         log_event(f"voice command: ask ({len(text)} chars)")
                         dictation.overlay.root.after(
                             0,
-                            lambda value=text, echo=echo_user, effort=reasoning, speak=speak_reply: dictation.ask_text(
+                            lambda value=text, echo=echo_user, effort=reasoning, speak=speak_reply, picked=model: dictation.ask_text(
                                 value,
                                 echo_user=echo,
                                 reasoning=effort,
                                 speak_reply=speak,
+                                model=picked,
                             ),
                         )
                         continue

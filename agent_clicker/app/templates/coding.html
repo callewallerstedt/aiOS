@@ -17,6 +17,7 @@
     <a class="brand" href="/phone" aria-label="Back to aiOS"><span class="brand-mark">ai</span><span>CODE</span></a>
     <div id="provider-health" class="provider-health" aria-live="polite"></div>
     <button id="refresh" class="icon-btn" type="button" title="Refresh capabilities">↻</button>
+    <a href="/code/settings" class="icon-btn" title="CODE settings" style="text-decoration:none; display:inline-flex; align-items:center; justify-content:center;">⚙</a>
     <button id="new-job" class="primary compact" type="button">+ New job</button>
   </header>
 
@@ -93,9 +94,11 @@
   <form id="create-form" method="dialog">
     <div class="dialog-head"><div><div class="eyebrow">NEW CODE JOB</div><h2>What should it build?</h2></div><button id="close-create" class="icon-btn" type="button">×</button></div>
     <div class="provider-picker" id="provider-picker">
-      <label class="provider-card codex"><input type="radio" name="provider" value="codex" checked /><b>Codex</b><span>OpenAI coding agent</span><i data-health="codex">checking</i></label>
+      <label class="provider-card codex"><input type="radio" name="provider" value="codex" /><b>Codex</b><span>OpenAI coding agent</span><i data-health="codex">checking</i></label>
       <label class="provider-card claude"><input type="radio" name="provider" value="claude" /><b>Claude</b><span>Anthropic Claude Code</span><i data-health="claude">checking</i></label>
       <label class="provider-card cursor"><input type="radio" name="provider" value="cursor" /><b>Cursor</b><span>Cursor Agent in WSL</span><i data-health="cursor">checking</i></label>
+      <label class="provider-card ollama"><input type="radio" name="provider" value="ollama" /><b>Ollama</b><span>Local models on this PC</span><i data-health="ollama">checking</i></label>
+      <label class="provider-card openrouter"><input type="radio" name="provider" value="openrouter" checked /><b>OpenRouter</b><span>Hosted models via API key</span><i data-health="openrouter">checking</i></label>
     </div>
     <div class="form-grid">
       <label class="wide">Project folder<input id="cwd" type="text" value="C:\aiOS" spellcheck="false" required /></label>

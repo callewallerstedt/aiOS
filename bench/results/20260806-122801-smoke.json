@@ -1,0 +1,58 @@
+{
+  "summary": {
+    "label": "smoke",
+    "provider": "openrouter",
+    "model": "deepseek/deepseek-v4-flash",
+    "reasoning": "off",
+    "tasks": 2,
+    "passed": 2,
+    "pass_rate": 1.0,
+    "total_tokens": 27964,
+    "tokens_per_task": 13982,
+    "tokens_per_pass": 13982,
+    "cost_usd": 0.0015,
+    "total_seconds": 83.5,
+    "seconds_per_task": 41.8,
+    "tool_calls": 37
+  },
+  "records": [
+    {
+      "task": "HumanEval/0",
+      "passed": true,
+      "error": "",
+      "status": "completed",
+      "seconds": 42.9,
+      "usage": {
+        "input_tokens": 13822,
+        "cached_input_tokens": 9472,
+        "output_tokens": 609,
+        "reasoning_tokens": 261,
+        "total_tokens": 14431,
+        "cost_usd": 0.0006571389
+      },
+      "events": 26,
+      "tool_calls": 20,
+      "review": "pass",
+      "workspace": "C:\\Users\\calle\\AppData\\Local\\Temp\\aios-bench-xpwjxueh"
+    },
+    {
+      "task": "HumanEval/7",
+      "passed": true,
+      "error": "",
+      "status": "completed",
+      "seconds": 40.6,
+      "usage": {
+        "input_tokens": 13133,
+        "cached_input_tokens": 6208,
+        "output_tokens": 400,
+        "reasoning_tokens": 50,
+        "total_tokens": 13533,
+        "cost_usd": 0.0007960528
+      },
+      "events": 22,
+      "tool_calls": 17,
+      "review": "pass",
+      "workspace": "C:\\Users\\calle\\AppData\\Local\\Temp\\aios-bench-_jnoroa9"
+    }
+  ]
+}

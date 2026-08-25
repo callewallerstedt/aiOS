@@ -79,6 +79,267 @@ def _tool_names(tools: list[dict]) -> set[str]:
     }
 
 
+def test_optional_tools_are_loaded_through_one_authoritative_gateway(harness_job):
+    job, project = harness_job
+    job._configure_turn_policy("Implement the requested repository change", strategy="auto")
+    job.reset_turn_discipline("coder_led")
+
+    initial_tools = job._ollama_tools("Implement the requested repository change")
+    initial = _tool_names(initial_tools)
+    selector = next(
+        tool["function"] for tool in initial_tools
+        if tool["function"]["name"] == code_jobs.TOOL_SELECTOR_NAME
+    )
+    available = set(selector["parameters"]["properties"]["names"]["items"]["enum"])
+
+    assert {"read_file", "search_text", "edit_file", "run_shell", "select_tools"} <= initial
+    assert {"web_search", "repo_map", "spawn_agent"}.isdisjoint(initial)
+    assert {"web_search", "repo_map", "spawn_agent"} <= available
+    assert "consult" not in available
+    denied = json.loads(job._guard_before_tool("web_search", {"query": "docs"}))
+    assert denied["guardrail"] == "tool_not_enabled"
+
+    receipt = job._execute_tool_calls(
+        project,
+        [_call("select_tools", names=["web_search", "repo_map"])],
+        "test",
+    )[0]
+    assert json.loads(receipt["result"])["loaded"] == ["web_search", "repo_map"]
+
+    expanded = _tool_names(job._ollama_tools("Implement the requested repository change"))
+    assert {"web_search", "repo_map"} <= expanded
+    assert job._guard_before_tool("web_search", {"query": "docs"}) == ""
+
+
+def test_dynamic_tool_loading_has_a_full_schema_ablation_switch(harness_job, monkeypatch):
+    job, _project = harness_job
+    job._configure_turn_policy("Implement the requested repository change", strategy="auto")
+    job.reset_turn_discipline("coder_led")
+    monkeypatch.setattr(code_jobs, "DYNAMIC_TOOL_LOADING", False)
+
+    names = _tool_names(job._ollama_tools("Implement the requested repository change"))
+
+    assert {"web_search", "repo_map", "spawn_agent"} <= names
+    assert "select_tools" not in names
+
+
+def test_openrouter_refreshes_schemas_after_select_tools(harness_job, monkeypatch):
+    import openrouter_client
+
+    job, _project = harness_job
+    job._configure_turn_policy("Research the implementation docs", strategy="auto")
+    job.reset_turn_discipline("coder_led")
+    monkeypatch.setattr(openrouter_client, "provider_status", lambda **_kwargs: (True, "ready"))
+    offered = []
+
+    def fake_stream(_messages, _model, **kwargs):
+        names = _tool_names(kwargs.get("tools") or [])
+        offered.append(names)
+        if len(offered) == 1:
+            yield _terminal_message(
+                "",
+                finish_reason="tool_calls",
+                tool_calls=[_call("select_tools", names=["web_search"])],
+            )
+        else:
+            yield _terminal_message("Capability loaded.")
+
+    monkeypatch.setattr(openrouter_client, "stream_chat", fake_stream)
+    outcome, summary = job._run_openrouter("Research the implementation docs", [])
+
+    assert outcome == "completed"
+    assert summary == "Capability loaded."
+    assert "web_search" not in offered[0]
+    assert "select_tools" in offered[0]
+    assert "web_search" in offered[1]
+
+
+def test_dense_mutating_turn_gets_one_same_coder_acceptance_audit(harness_job, monkeypatch):
+    import openrouter_client
+
+    job, _project = harness_job
+    job._edits_applied = 1
+    monkeypatch.setattr(openrouter_client, "provider_status", lambda **_kwargs: (True, "ready"))
+    requests = []
+    request = (
+        "Build the release artifact exactly as specified.\n\nInputs:\n\n"
+        "* Read package metadata from the existing project manifest.\n"
+        "* Keep source ordering deterministic across operating systems.\n"
+        "* Report invalid configuration through the documented exception.\n"
+        "* Isolate concurrent build directories from one another.\n"
+        "* Run the focused packaging check and leave its fixture unchanged.\n\n"
+        + "The resulting archive format and command output are part of the public interface. " * 8
+    )
+
+    def fake_stream(messages, _model, **_kwargs):
+        requests.append([dict(row) for row in messages])
+        yield _terminal_message("Initial conclusion." if len(requests) == 1 else "Audited and fixed.")
+
+    monkeypatch.setattr(openrouter_client, "stream_chat", fake_stream)
+    outcome, summary = job._run_openrouter(request, [])
+
+    assert outcome == "completed"
+    assert summary == "Audited and fixed."
+    assert len(requests) == 2
+    assert "one allowed acceptance audit" in requests[1][-1]["content"]
+    assert sum(
+        "one allowed acceptance audit" in str(row.get("content") or "")
+        for row in requests[1]
+    ) == 1
+
+
+def test_small_edit_does_not_pay_for_acceptance_audit(harness_job, monkeypatch):
+    import openrouter_client
+
+    job, _project = harness_job
+    job._edits_applied = 1
+    monkeypatch.setattr(openrouter_client, "provider_status", lambda **_kwargs: (True, "ready"))
+    calls = 0
+
+    def fake_stream(_messages, _model, **_kwargs):
+        nonlocal calls
+        calls += 1
+        yield _terminal_message("Done.")
+
+    monkeypatch.setattr(openrouter_client, "stream_chat", fake_stream)
+    outcome, summary = job._run_openrouter("Change one CSS colour in app.css.", [])
+
+    assert (outcome, summary) == ("completed", "Done.")
+    assert calls == 1
+
+
+def test_acceptance_audit_sees_tracked_shell_mutations(harness_job):
+    job, _project = harness_job
+    request = (
+        "Implement the release workflow.\n\nInputs:\n"
+        "1. Read the declared package version.\n"
+        "2. Produce a deterministic archive.\n"
+        "3. Reject an invalid destination.\n"
+        "4. Preserve executable metadata.\n\n"
+        + "The command output and archive layout are public behavior. " * 10
+    )
+    job._edits_applied = 0
+    job._verification_ledger.mark_mutation("build.ps1", "after", previous_hash="before")
+    history = []
+
+    assert job._queue_acceptance_audit(history, request) is True
+    assert history[-1]["role"] == "user"
+
+
+def test_acceptance_audit_eligibility_uses_pre_injection_operator_request(harness_job):
+    job, _project = harness_job
+    operator_request = "Change the status label in the named template. Do not run tests or probes."
+    job._configure_turn_policy(operator_request, strategy="auto")
+    job.reset_turn_discipline("coder_led")
+    job._edits_applied = 1
+    injected_payload = (
+        operator_request
+        + "\n\n<plan>\nInputs:\n"
+        + "\n".join(f"- Generated navigation clause {index}." for index in range(12))
+        + "\n"
+        + "Generated plan detail that is not an operator acceptance clause. " * 12
+        + "\n</plan>"
+    )
+
+    assert job._acceptance_contract_density(injected_payload)["dense"] is True
+    assert job._queue_acceptance_audit([], injected_payload) is False
+
+
+def test_acceptance_audit_quotes_and_enforces_original_operator_constraints(harness_job):
+    job, _project = harness_job
+    operator_request = (
+        "Implement the bounded release workflow.\n\nAcceptance:\n"
+        "1. Read the existing manifest without replacing it.\n"
+        "2. Preserve deterministic source ordering.\n"
+        "3. Reject invalid destinations through the documented exception.\n"
+        "4. Keep concurrent output directories isolated.\n"
+        "5. Leave all fixtures byte-for-byte unchanged.\n\n"
+        "Do not run or create any tests, checks, or probes during this task. "
+        + "Use only the implementation and evidence already supplied by the operator. " * 8
+    )
+    job._configure_turn_policy(operator_request, strategy="auto")
+    job.reset_turn_discipline("coder_led")
+    job._edits_applied = 1
+    history = []
+
+    assert job._queue_acceptance_audit(
+        history,
+        operator_request + "\n\n<named_file_metadata>\n- generated-only.py\n</named_file_metadata>",
+    ) is True
+
+    instruction = history[-1]["content"]
+    assert operator_request in instruction
+    assert "Do not run or create tests, checks, probes" in instruction
+    assert "use only the changed implementation and evidence already available" in instruction
+    assert "run the smallest missing probes" not in instruction
+
+
+def test_acceptance_audit_has_real_round_and_tool_boundaries(harness_job, monkeypatch):
+    job, _project = harness_job
+    job.reset_turn_discipline("coder_led")
+    job._edits_applied = 1
+    monkeypatch.setattr(code_jobs, "ACCEPTANCE_AUDIT_MAX_ROUNDS", 1)
+    monkeypatch.setattr(code_jobs, "ACCEPTANCE_AUDIT_MAX_TOOL_CALLS", 1)
+    request = (
+        "Implement the release workflow.\n\nInputs:\n"
+        "1. Read the package version.\n2. Build a deterministic archive.\n"
+        "3. Reject invalid output.\n4. Preserve executable metadata.\n\n"
+        + "The archive and command output are public behavior. " * 12
+    )
+
+    assert job._queue_acceptance_audit([], request) is True
+    job._begin_acceptance_audit_round()
+    assert job._turn_force_finalize is False
+    job._begin_acceptance_audit_round()
+    assert job._turn_force_finalize is True
+
+    job._turn_force_finalize = False
+    assert job._guard_before_tool("read_file", {"relative_path": "one.py"}) == ""
+    blocked = json.loads(job._guard_before_tool("read_file", {"relative_path": "two.py"}))
+    assert blocked["guardrail"] == "acceptance_audit_tool_cap"
+    assert job._turn_force_finalize is True
+
+
+@pytest.mark.parametrize("terminal_outcome", ["incomplete", "stopped"])
+def test_noncompleted_turn_persists_final_harness_counters(
+    harness_job,
+    monkeypatch,
+    terminal_outcome,
+):
+    job, _project = harness_job
+    monkeypatch.setattr(job, "_runtime_warnings", lambda *_args: None)
+
+    def fake_run(_payload, _attachments):
+        job._turn_model_tokens = 500
+        job._turn_model_token_budget = 500
+        job._turn_tool_calls = 9
+        job._no_progress_calls = 3
+        job._progress_state = "blocked"
+        job._progress_blocked_reason = "bounded test stop"
+        job._completion_acceptance_audit_rounds = 2
+        return terminal_outcome, "Bounded handoff."
+
+    monkeypatch.setattr(job, "_run_openrouter", fake_run)
+
+    job._run_locked("Implement the requested bounded change.", planned=False, strategy="direct")
+
+    meta = job.load()
+    assert meta["status"] == terminal_outcome
+    assert meta["progress"] == {
+        "state": "blocked",
+        "no_progress_calls": 3,
+        "productive_calls": 0,
+        "objective_progress_calls": 0,
+        "tool_calls": 9,
+        "empty_search_run": 0,
+        "redirects": 0,
+        "blocked_reason": "bounded test stop",
+        "model_tokens": 500,
+        "model_token_budget": 500,
+        "acceptance_audit_rounds": 2,
+    }
+
+
 def test_openrouter_text_length_is_never_reported_complete(harness_job, monkeypatch):
     import openrouter_client
 
@@ -402,6 +663,63 @@ def test_ollama_reasoning_only_eof_retries_then_executes_complete_edit(
     assert any("Ollama stream ended" in event.get("text", "") for event in events)
 
 
+def test_ollama_narration_then_eof_retries_before_any_tool_executes(
+    harness_job, monkeypatch,
+):
+    import ollama_client
+
+    job, project = harness_job
+    job.save(provider="ollama", model="test/local-model")
+    monkeypatch.setattr(ollama_client, "provider_status", lambda **_kwargs: (True, "ready"))
+    monkeypatch.setattr(code_jobs, "PROVIDER_INCOMPLETE_STREAM_RETRIES", 1)
+    monkeypatch.setattr(code_jobs.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(job, "_completion_verification_gate", lambda _project: {"allowed": True})
+    requests: list[list[dict]] = []
+
+    def fake_stream(messages, _model, **_kwargs):
+        requests.append(json.loads(json.dumps(messages)))
+        if len(requests) == 1:
+            yield {
+                "message": {"content": "I'll build the full calculator now."},
+                "done": False,
+            }
+        elif len(requests) == 2:
+            yield {
+                "message": {
+                    "content": "",
+                    "tool_calls": [_call(
+                        "write_file",
+                        relative_path="calculator.html",
+                        content="<main>ready</main>\n",
+                        mode="overwrite",
+                    )],
+                },
+                "done": True,
+                "done_reason": "stop",
+                "prompt_eval_count": 12,
+                "eval_count": 4,
+            }
+        else:
+            yield {
+                "message": {"content": "Created the calculator."},
+                "done": True,
+                "done_reason": "stop",
+                "prompt_eval_count": 10,
+                "eval_count": 3,
+            }
+
+    monkeypatch.setattr(ollama_client, "stream_chat", fake_stream)
+
+    outcome, summary = job._run_ollama("Create calculator.html", [])
+
+    assert outcome == "completed"
+    assert summary == "Created the calculator."
+    assert (project / "calculator.html").read_text(encoding="utf-8") == "<main>ready</main>\n"
+    assert len(requests) == 3
+    assert "before a complete tool call" in requests[1][-1]["content"]
+    assert "mode=append" in requests[1][-1]["content"]
+
+
 def test_ollama_terminal_answer_is_not_replaced_by_a_verification_round(
     harness_job, monkeypatch,
 ):
@@ -583,7 +901,8 @@ def test_explicit_direct_and_distributed_strategies_control_tool_availability(ha
 
     job._configure_turn_policy("Implement the requested change", strategy="distributed")
     distributed = _tool_names(job._ollama_tools("Implement the requested change"))
-    assert {"repo_map", "update_plan", "spawn_agent"} <= distributed
+    assert {"update_plan", "spawn_agent", "select_tools"} <= distributed
+    assert "repo_map" not in distributed
 
 
 def test_subagent_cannot_execute_a_write_even_if_provider_emits_one(harness_job, monkeypatch):

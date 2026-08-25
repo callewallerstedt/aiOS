@@ -9,7 +9,8 @@ Public API:
     get_current_sha()        -> short SHA or "" if unknown
     check_for_update()       -> dict with current/latest SHAs and a behind flag
     perform_update(progress) -> dict with ok/message
-    restart_aios()           -> never returns; launches a new helper and exits
+    restart_aios()           -> never returns; relaunches the complete stack
+    spawn_relaunch(pid, args)-> detach the shared full-stack coordinator
 """
 from __future__ import annotations
 
@@ -410,7 +411,7 @@ def perform_update(progress=None, owner: str | None = None,
 # ---------------------------------------------------------------------------
 # Apply-after-restart helper. This script is dropped into TEMP, run detached,
 # waits for the running helper to release its files, swaps the staged tree in,
-# reinstalls deps, and then relaunches the helper.
+# reinstalls deps, and then relaunches the complete stack.
 # ---------------------------------------------------------------------------
 
 APPLY_SCRIPT_TEMPLATE = r'''#!/usr/bin/env python3
@@ -428,7 +429,7 @@ STAGING_DIR = BASE_DIR / ".aios_update_staging"
 LOG_PATH = BASE_DIR / "update-apply.log"
 PENDING_SHA_FILE = BASE_DIR / ".aios_update_pending_sha"
 SHA_FILE = BASE_DIR / ".aios_sha"
-HELPER = BASE_DIR / "helper_overlay.py"
+LAUNCHER = BASE_DIR / "launch_aios.py"
 REQUIREMENTS = BASE_DIR / "requirements.txt"
 PARENT_PID = __PARENT_PID__
 
@@ -535,17 +536,17 @@ def install_deps():
 
 
 def relaunch_helper():
-    if not HELPER.exists():
-        log("helper_overlay.py missing — cannot relaunch")
+    if not LAUNCHER.exists():
+        log("launch_aios.py missing — cannot relaunch")
         return
-    log("relaunching helper")
+    log("relaunching complete aiOS stack")
     kwargs = {"cwd": str(BASE_DIR), "close_fds": True}
     if os.name == "nt":
         DETACHED = 0x00000008
         NEW_GROUP = 0x00000200
         kwargs["creationflags"] = DETACHED | NEW_GROUP
     try:
-        subprocess.Popen([sys.executable, str(HELPER)], **kwargs)
+        subprocess.Popen([sys.executable, str(LAUNCHER)], **kwargs)
     except Exception as exc:
         log(f"relaunch failed: {exc}")
 
@@ -598,18 +599,45 @@ def _spawn_apply_script() -> bool:
     return spawn_staged_apply()
 
 
+def spawn_relaunch(parent_pid: int | None = None, extra_args: list[str] | None = None) -> bool:
+    """Detach the shared coordinator so it restarts all aiOS services."""
+    relaunch = BASE_DIR / "aios_relaunch.py"
+    shell = BASE_DIR / "aios_shell.py"
+    if not relaunch.exists() or not shell.exists():
+        return False
+    pid = int(parent_pid if parent_pid is not None else os.getpid())
+    args = [sys.executable, str(relaunch), str(pid), *(extra_args or ["--fast-start"])]
+    kwargs: dict = {"cwd": str(BASE_DIR), "close_fds": True}
+    if os.name == "nt":
+        DETACHED_PROCESS = 0x00000008
+        CREATE_NEW_PROCESS_GROUP = 0x00000200
+        CREATE_NO_WINDOW = 0x08000000
+        kwargs["creationflags"] = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
+        kwargs["stdin"] = subprocess.DEVNULL
+        kwargs["stdout"] = subprocess.DEVNULL
+        kwargs["stderr"] = subprocess.DEVNULL
+    try:
+        subprocess.Popen(args, **kwargs)
+        return True
+    except Exception:
+        return False
+
+
 def restart_aios(extra_args: list[str] | None = None) -> None:
-    """Restart the helper.
+    """Restart the complete aiOS desktop stack.
 
     If there's a staged update in `.aios_update_staging`, spawn the apply
-    script (which will wait for us to exit, swap files in, install deps,
-    and relaunch the helper). Otherwise just relaunch the helper directly.
+    script (which waits for us to exit, swaps files, installs dependencies,
+    and invokes the full launcher). Otherwise the coordinator waits for this
+    process to exit, tears down every managed tree, and fast-starts the stack.
 
     Safe to call from the Tk thread — we launch detached then os._exit.
     """
-    extra_args = extra_args or []
-    helper_path = BASE_DIR / "helper_overlay.py"
-    if not helper_path.exists():
+    extra_args = list(extra_args or [])
+    if "--fast-start" not in extra_args:
+        extra_args.append("--fast-start")
+    shell_path = BASE_DIR / "aios_shell.py"
+    if not shell_path.exists():
         return
     # If files were staged, hand off to the apply script and exit.
     if STAGING_DIR.exists():
@@ -624,17 +652,19 @@ def restart_aios(extra_args: list[str] | None = None) -> None:
                 ".aios_update_staging\n", encoding="utf-8")
         except OSError:
             pass
-    cmd = [sys.executable, str(helper_path), *extra_args]
-    kwargs = {"cwd": str(BASE_DIR), "close_fds": True}
-    if os.name == "nt":
-        DETACHED_PROCESS = 0x00000008
-        CREATE_NEW_PROCESS_GROUP = 0x00000200
-        kwargs["creationflags"] = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
-    try:
-        subprocess.Popen(cmd, **kwargs)
-    except Exception:
-        return
-    threading.Timer(0.6, lambda: os._exit(0)).start()
+    if not spawn_relaunch(os.getpid(), extra_args):
+        # Last resort: direct spawn (may still race the mutex briefly).
+        cmd = [sys.executable, str(shell_path)]
+        kwargs = {"cwd": str(BASE_DIR), "close_fds": True}
+        if os.name == "nt":
+            DETACHED_PROCESS = 0x00000008
+            CREATE_NEW_PROCESS_GROUP = 0x00000200
+            kwargs["creationflags"] = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+        try:
+            subprocess.Popen(cmd, **kwargs)
+        except Exception:
+            return
+    threading.Timer(0.2, lambda: os._exit(0)).start()
 
 
 if __name__ == "__main__":

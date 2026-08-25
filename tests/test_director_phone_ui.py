@@ -141,6 +141,68 @@ def test_operator_tool_card_opens_its_own_reasoning_and_screenshot_timeline():
     assert ".operator-event-text" in CSS
 
 
+def test_operator_card_is_typed_on_start_and_history_is_paginated_deterministically():
+    live = _block(JS, 'case "tool.start":', 'case "tool.done":')
+    assert "card: payload.card" in live
+    assert 'job_kind": "operator"' in (
+        ROOT / "director" / "runtime.py").read_text(encoding="utf-8")
+    loader = _block(JS, "async function loadOperatorJob", "function approvalCard")
+    assert "while (true)" in loader
+    assert "pageSize = 80" in loader
+    assert "next <= cursor" in loader
+    server = (ROOT / "director" / "server.py").read_text(encoding="utf-8")
+    assert 'request.query.get("limit")' in server
+    assert 'store.list_job_events(job["id"], since=since, limit=limit)' in server
+    meta = _block(JS, "function updateOperatorMeta", "function appendOperatorEvent")
+    assert "OPERATOR_TERMINAL_EVENTS" in meta
+    assert "terminal || progress" in meta
+
+
+def test_operator_live_and_history_events_merge_in_id_order_without_status_regression(tmp_path):
+    import subprocess
+
+    logic = _block(JS, "function operatorEventKey", "function recordOperatorEvent")
+    script = r'''
+function operatorEventNode(event) { return { kind: event.kind, parentNode: null }; }
+class Classes {
+  constructor() { this.values = new Set(); }
+  add(...names) { names.forEach((name) => this.values.add(name)); }
+  remove(...names) { names.forEach((name) => this.values.delete(name)); }
+}
+const meta = { textContent: "running" };
+const body = {
+  children: [],
+  querySelector() { return null; },
+  append(node) { node.parentNode = this; this.children.push(node); },
+  insertBefore(node, following) {
+    node.parentNode = this;
+    this.children.splice(this.children.indexOf(following), 0, node);
+  },
+};
+const view = {
+  body, seen: new Set(), events: new Map(),
+  wrap: { classList: new Classes(), querySelector() { return meta; } },
+};
+appendOperatorEvent(view, { id: 10, kind: "operator.done", payload: { summary: "done" } });
+appendOperatorEvent(view, { id: 5, kind: "operator.step", payload: { step: 2 } });
+appendOperatorEvent(view, { id: 7, kind: "operator.note", payload: { step: 2 } });
+appendOperatorEvent(view, { id: 5, kind: "operator.step", payload: { step: 2 } });
+if (body.children.map((node) => node.kind).join(",") !==
+    "operator.step,operator.note,operator.done") process.exit(1);
+if (meta.textContent !== "done") process.exit(2);
+if (view.events.size !== 3) process.exit(3);
+process.stdout.write("ok");
+'''
+    path = tmp_path / "operator-order.js"
+    path.write_text(logic + "\n" + script, encoding="utf-8")
+
+    result = subprocess.run(
+        ["node", str(path)], capture_output=True, text=True, check=False)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "ok"
+
+
 def test_live_churning_grid_survives_into_real_thinking_and_history():
     theme = (ROOT / "phone_site" / "code" / "code-beautiful.css").read_text(
         encoding="utf-8")

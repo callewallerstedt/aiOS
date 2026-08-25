@@ -12,10 +12,15 @@ from typing import Any, Iterator
 from urllib.request import Request, urlopen
 
 API_BASE = os.environ.get("AIOS_OLLAMA_HOST", "http://localhost:11434").rstrip("/")
-MODEL_ROOT = os.environ.get("OLLAMA_MODELS") or r"C:\AI\OllamaModels"
+# Ollama's own default store. The desktop app keeps its model directory in
+# its settings database and ignores OLLAMA_MODELS, so a server we start
+# ourselves must default to the same place or it reports an empty library
+# while the app sees every model.
+DEFAULT_MODEL_ROOT = str(Path.home() / ".ollama" / "models")
+MODEL_ROOT = os.environ.get("OLLAMA_MODELS") or DEFAULT_MODEL_ROOT
 KEEP_ALIVE = os.environ.get("AIOS_OLLAMA_KEEP_ALIVE", "1h")
 DEFAULT_CHAT_MODEL = "qwen3:14b"
-DEFAULT_CODE_MODEL = "qwen3.6-agent:27b"
+DEFAULT_CODE_MODEL = "hf.co/unsloth/Qwen3.8-27B-GGUF:UD-Q2_K_XL"
 _MODELS_CACHE: list[dict[str, Any]] | None = None
 _MODELS_CACHE_AT = 0.0
 _MODELS_CACHE_TTL = float(os.environ.get("AIOS_OLLAMA_MODELS_TTL", "30"))
@@ -26,6 +31,7 @@ _STATUS_CACHE_TTL = 8.0
 # Short parenthetical blurbs shown in model pickers. Matched against the
 # installed tag (case-insensitive substring), first hit wins.
 _MODEL_BLURBS: tuple[tuple[str, str, int], ...] = (
+    ("qwen3.8-27b", "strongest local, fits 16GB", 5),
     ("qwen3-coder", "best at coding", 10),
     ("qwen3.6-agent", "local coding agent", 20),
     ("qwen3.6-27b", "local coding agent", 20),
@@ -82,6 +88,12 @@ def stream_json(path: str, payload: dict, timeout: float = 900) -> Iterator[dict
 
 def ensure_ollama(timeout: float = 30) -> bool:
     os.environ.setdefault("OLLAMA_MODELS", MODEL_ROOT)
+    # At 32k context a 27B spends more on the KV cache than on its own
+    # weights when the cache is fp16, which is the difference between the
+    # model sitting entirely in VRAM and paging against it every token.
+    # Flash attention plus an 8-bit KV cache keeps it resident.
+    os.environ.setdefault("OLLAMA_FLASH_ATTENTION", "1")
+    os.environ.setdefault("OLLAMA_KV_CACHE_TYPE", "q8_0")
     try:
         request_json("/api/version", timeout=2)
         return True

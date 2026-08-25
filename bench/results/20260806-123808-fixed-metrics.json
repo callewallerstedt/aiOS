@@ -1,0 +1,100 @@
+{
+  "summary": {
+    "label": "fixed-metrics",
+    "provider": "openrouter",
+    "model": "deepseek/deepseek-v4-flash",
+    "reasoning": "off",
+    "tasks": 4,
+    "passed": 4,
+    "pass_rate": 1.0,
+    "total_tokens": 68127,
+    "tokens_per_task": 17032,
+    "tokens_per_pass": 17032,
+    "cost_usd": 0.0098,
+    "input_tokens": 61121,
+    "cached_input_tokens": 34432,
+    "cache_hit_rate": 0.563,
+    "total_seconds": 214.4,
+    "seconds_per_task": 53.6,
+    "tool_calls": 13,
+    "tool_calls_per_task": 3.2
+  },
+  "records": [
+    {
+      "task": "HumanEval/0",
+      "passed": true,
+      "error": "",
+      "status": "completed",
+      "seconds": 65.6,
+      "usage": {
+        "input_tokens": 18754,
+        "cached_input_tokens": 9216,
+        "output_tokens": 2324,
+        "reasoning_tokens": 1370,
+        "total_tokens": 21078,
+        "cost_usd": 0.0049000528
+      },
+      "events": 30,
+      "tool_calls": 4,
+      "review": "concerns",
+      "workspace": "C:\\Users\\calle\\AppData\\Local\\Temp\\aios-bench-26r7hbj2"
+    },
+    {
+      "task": "HumanEval/7",
+      "passed": true,
+      "error": "",
+      "status": "completed",
+      "seconds": 37.6,
+      "usage": {
+        "input_tokens": 13801,
+        "cached_input_tokens": 9600,
+        "output_tokens": 1100,
+        "reasoning_tokens": 803,
+        "total_tokens": 14901,
+        "cost_usd": 0.0011912351
+      },
+      "events": 24,
+      "tool_calls": 3,
+      "review": "pass",
+      "workspace": "C:\\Users\\calle\\AppData\\Local\\Temp\\aios-bench-2wi_8g_y"
+    },
+    {
+      "task": "HumanEval/14",
+      "passed": true,
+      "error": "",
+      "status": "completed",
+      "seconds": 45.1,
+      "usage": {
+        "input_tokens": 13604,
+        "cached_input_tokens": 5888,
+        "output_tokens": 1445,
+        "reasoning_tokens": 1045,
+        "total_tokens": 15049,
+        "cost_usd": 0.0018125576
+      },
+      "events": 24,
+      "tool_calls": 3,
+      "review": "pass",
+      "workspace": "C:\\Users\\calle\\AppData\\Local\\Temp\\aios-bench-o4w2egos"
+    },
+    {
+      "task": "HumanEval/21",
+      "passed": true,
+      "error": "",
+      "status": "completed",
+      "seconds": 66.1,
+      "usage": {
+        "input_tokens": 14962,
+        "cached_input_tokens": 9728,
+        "output_tokens": 2137,
+        "reasoning_tokens": 1448,
+        "total_tokens": 17099,
+        "cost_usd": 0.0018870561
+      },
+      "events": 25,
+      "tool_calls": 3,
+      "review": "pass",
+      "workspace": "C:\\Users\\calle\\AppData\\Local\\Temp\\aios-bench-xs84cwow"
+    }
+  ]
+}

@@ -3,8 +3,28 @@ __pycache__/
 *.pyo
 .Python
 .venv/
+.venv*/
 venv/
 env/
+.pytest_cache/
+
+# Reproducible dependency trees, SDKs, build outputs and local research
+# workspaces. Keep source/configuration in Git; rebuild these on each machine.
+node_modules/
+.next/
+dist/
+build/
+.gradle/
+local.properties
+.tmp/
+.tools/
+.codex-sites-source-*/
+.codex-sites-publish-*/
+*.apk
+*.aab
+*.tar.gz
+*.keystore
+*.jks
 
 .env
 .env.*
@@ -60,6 +80,7 @@ aios-phone-v*.tar.gz
 .aios-helper-heartbeat
 .aios-ahk-heartbeat
 .aios-phone-relay-heartbeat
+.aios-director-client-heartbeat
 .aios-phone-secret.pem
 .aios-stream-health.json
 .aios-codex-plan-usage.json
@@ -70,6 +91,35 @@ aios-phone-v*.tar.gz
 .aios_update_pending_sha
 .aios_sha
 
+# Local sessions, scratch probes, screen captures and machine-specific launch
+# state are not portable source and may contain personal data.
+cli_sessions/
+training_data/
+scratch/
+scratch_*.py
+quick_launch.json
+quick_launch_icons/
+
+# Generated desktop bundle; the Python sources and packaging support files are
+# the portable inputs.
+assets/aios-director.exe
+
+# This is a separate nested Git checkout with its own remote and credentials,
+# not part of the aiOS repository.
+wallerstedt.live/
+
+# Separate phone/vehicle projects live beside aiOS locally. They contain large
+# on-device models and deployment credentials and belong in their own private
+# repositories, not in the public desktop aiOS history.
+circle-launcher/
+tesla-telemetry/
+
+# Credentials and locally issued certificates never belong in Git.
+*.pem
+*.key
+*.crt
+
 # aiOS Director
 aios_director_client.json
 .aios-director-client.log
+.aios-ahk-log.txt

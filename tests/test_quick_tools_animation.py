@@ -1,3 +1,5 @@
+import pytest
+
 import helper_overlay
 
 
@@ -44,13 +46,16 @@ def make_tray():
     tray.quick_tools_status = FakeWidget()
     tray._tray_anim_job = None
     tray._tray_hide_job = None
-    tray._tray_current_h = 30
-    tray._tray_current_relwidth = 0.20
     tray._tray_open = False
-    tray._tray_target_h = 268
-    tray._tray_peek_h = 30
-    tray._tray_open_relwidth = 0.88
-    tray._tray_peek_relwidth = 0.20
+    tray._tray_anim_progress = 0.0
+    # Mirror the shipping geometry rather than pinning old numbers, so the
+    # test keeps covering the animation when the tray is resized.
+    tray._tray_target_h = 208
+    tray._tray_peek_h = 24
+    tray._tray_open_relwidth = 0.44
+    tray._tray_peek_relwidth = 0.13
+    tray._tray_current_h = tray._tray_peek_h
+    tray._tray_current_relwidth = tray._tray_peek_relwidth
     return tray
 
 
@@ -63,7 +68,8 @@ def test_repeated_hover_uses_one_animation_loop():
     assert len(tray.root.jobs) == 1
     assert tray.root.run() < 50
     assert tray.root.jobs == {}
-    assert (tray._tray_current_h, tray._tray_current_relwidth) == (268, 0.88)
+    assert tray._tray_current_h == pytest.approx(tray._tray_target_h)
+    assert tray._tray_current_relwidth == pytest.approx(tray._tray_open_relwidth)
 
 
 def test_close_and_mid_animation_reversal_finish_cleanly():
@@ -77,4 +83,28 @@ def test_close_and_mid_animation_reversal_finish_cleanly():
     assert len(tray.root.jobs) == 1
     assert tray.root.run() < 50
     assert tray.root.jobs == {}
-    assert (tray._tray_current_h, tray._tray_current_relwidth) == (30, 0.20)
+    assert tray._tray_current_h == pytest.approx(tray._tray_peek_h)
+    assert tray._tray_current_relwidth == pytest.approx(tray._tray_peek_relwidth)
+
+
+def test_width_and_height_finish_together_so_opening_does_not_jump():
+    tray = make_tray()
+    tray._tray_show()
+
+    ratios = []
+    while tray.root.jobs:
+        _, callback = tray.root.jobs.popitem()
+        callback()
+        height_span = tray._tray_target_h - tray._tray_peek_h
+        width_span = tray._tray_open_relwidth - tray._tray_peek_relwidth
+        ratios.append((
+            (tray._tray_current_h - tray._tray_peek_h) / height_span,
+            (tray._tray_current_relwidth - tray._tray_peek_relwidth) / width_span,
+        ))
+
+    assert ratios, "the tray never animated"
+    # Both axes are driven by one eased value, so they stay in lockstep;
+    # animating them separately is what made the panel look like it jumped.
+    for height_ratio, width_ratio in ratios:
+        assert height_ratio == pytest.approx(width_ratio, abs=1e-6)
+    assert ratios[-1][0] == pytest.approx(1.0)

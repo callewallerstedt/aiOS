@@ -4,6 +4,7 @@ import json
 import os
 import re
 import threading
+from pathlib import Path
 from typing import Any
 
 from PIL import Image
@@ -116,11 +117,26 @@ def _usage_dict(usage, *, backend: str, model: str) -> dict:
     return result
 
 
+def _openrouter_chat():
+    """Import openrouter_client from the aiOS root, which is not on sys.path here."""
+    try:
+        from openrouter_client import chat as or_chat
+    except ImportError:
+        import sys
+        root = Path(__file__).resolve().parents[2]
+        if str(root) not in sys.path:
+            sys.path.insert(0, str(root))
+        from openrouter_client import chat as or_chat
+    return or_chat
+
+
 def chat_with_usage(system: str, messages: list[dict], model: str | None = None,
-                    backend: str = "api", reasoning_effort: str | None = None) -> tuple[str, dict]:
+                    backend: str = "api", reasoning_effort: str | None = None,
+                    web_search: bool = False) -> tuple[str, dict]:
     """Send a chat with vision messages; return raw assistant text.
 
     backend = 'api'  -> standard api.openai.com (billed to OPENAI_API_KEY)
+    backend = 'openrouter' -> OpenRouter API (billed to OpenRouter credits)
     backend = 'codex' -> chatgpt.com/backend-api/codex/responses, auth from
                          ~/.codex/auth.json (billed to ChatGPT subscription).
                          Undocumented; can break with Codex updates.
@@ -128,8 +144,33 @@ def chat_with_usage(system: str, messages: list[dict], model: str | None = None,
 
     reasoning_effort: 'minimal' | 'low' | 'medium' | 'high' for gpt-5.x.
     None = let the API default (medium on gpt-5.x).
+
+    web_search: enable OpenRouter web search (only for 'openrouter' backend).
     """
     model = model or config.MODEL
+
+    # --- OpenRouter backend ---
+    if backend == "openrouter":
+        or_chat = _openrouter_chat()
+        full = [{"role": "system", "content": system}] + messages
+        resp = or_chat(full, model, web_search=web_search)
+        choice = (resp.get("choices") or [{}])[0] or {}
+        text = (choice.get("message") or {}).get("content") or ""
+        usage_data = resp.get("usage") or {}
+        usage = {
+            "requests": 1,
+            "input_tokens": usage_data.get("prompt_tokens", 0),
+            "output_tokens": usage_data.get("completion_tokens", 0),
+            "total_tokens": usage_data.get("total_tokens", 0),
+            "backend": "openrouter",
+            "model": model,
+        }
+        cost = usage_data.get("cost", resp.get("total_cost"))
+        if cost is not None:
+            usage["total_cost"] = cost
+        return text, usage
+
+    # --- Codex backend ---
     if backend in {"codex", "codex_fallback"}:
         from . import codex_backend
         try:
@@ -143,6 +184,7 @@ def chat_with_usage(system: str, messages: list[dict], model: str | None = None,
     else:
         fallback_reason = ""
 
+    # --- Default OpenAI API backend ---
     full = [{"role": "system", "content": system}] + messages
     kwargs: dict = {
         "model": model,
@@ -165,10 +207,12 @@ def chat_with_usage(system: str, messages: list[dict], model: str | None = None,
 
 
 def chat_raw(system: str, messages: list[dict], model: str | None = None,
-             backend: str = "api", reasoning_effort: str | None = None) -> str:
+             backend: str = "api", reasoning_effort: str | None = None,
+             web_search: bool = False) -> str:
     text, usage = chat_with_usage(
         system, messages, model=model, backend=backend,
         reasoning_effort=reasoning_effort,
+        web_search=web_search,
     )
     _usage_local.last = usage
     return text
@@ -182,10 +226,12 @@ def take_last_usage() -> dict:
 
 
 def chat_json(system: str, messages: list[dict], model: str | None = None,
-              backend: str = "api", reasoning_effort: str | None = None) -> tuple[dict, str]:
+              backend: str = "api", reasoning_effort: str | None = None,
+              web_search: bool = False) -> tuple[dict, str]:
     """Returns (parsed_json, raw_text). Raises on unrecoverable parse errors."""
     raw = chat_raw(system, messages, model, backend=backend,
-                   reasoning_effort=reasoning_effort)
+                   reasoning_effort=reasoning_effort,
+                   web_search=web_search)
     return parse_json_lenient(raw), raw
 
 

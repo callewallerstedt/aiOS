@@ -88,3 +88,114 @@ def test_notification_poll_prefetches_sessions_before_code_is_open():
 
     assert view.code_jobs == jobs
     assert view.code_notify_busy is False
+
+
+def test_opening_a_long_session_only_rebuilds_the_tail(monkeypatch):
+    """Replaying thousands of events blocks the Tk thread for many seconds."""
+    import helper_overlay
+
+    view = object.__new__(helper_overlay.HelperOverlay)
+    view.active_tab = "CODE"
+    view.code_view_token = 1
+    view.code_selected_id = "job-1"
+    view.code_jobs = []
+    view.code_log_size = 0
+    view._code_refresh_inflight = {"id": 7, "scope": None}
+    rendered = []
+    notes = []
+
+    monkeypatch.setattr(helper_overlay.HelperOverlay, "_code_chat_reset", lambda self: None)
+    monkeypatch.setattr(helper_overlay.HelperOverlay, "_code_set_auto_follow", lambda self, value: None)
+    monkeypatch.setattr(helper_overlay.HelperOverlay, "_code_chat_scroll_end", lambda self, force=False: None)
+    monkeypatch.setattr(helper_overlay.HelperOverlay, "_code_render_detail_meta", lambda self, job: None)
+    monkeypatch.setattr(helper_overlay.HelperOverlay, "_code_render_event",
+                        lambda self, event, live=False: rendered.append(event))
+    monkeypatch.setattr(helper_overlay.HelperOverlay, "_code_add_status",
+                        lambda self, text: notes.append(text))
+
+    class Root:
+        def after(self, *_args):
+            return None
+
+    view.root = Root()
+    limit = helper_overlay.CODE_HISTORY_RENDER_LIMIT
+    events = [{"kind": "status", "text": f"e{i}"} for i in range(limit + 400)]
+
+    view._code_apply_refresh(1, 7, "job-1", None,
+                             {"ok": True, "events": events, "size": len(events)}, 0)
+
+    assert len(rendered) == limit
+    assert rendered[-1]["text"] == f"e{limit + 399}"     # the newest output survives
+    assert notes and "earlier events hidden" in notes[0]
+
+
+def test_short_sessions_render_completely(monkeypatch):
+    import helper_overlay
+
+    view = object.__new__(helper_overlay.HelperOverlay)
+    view.active_tab = "CODE"
+    view.code_view_token = 1
+    view.code_selected_id = "job-2"
+    view.code_jobs = []
+    view.code_log_size = 0
+    view._code_refresh_inflight = {"id": 3, "scope": None}
+    rendered = []
+    notes = []
+
+    monkeypatch.setattr(helper_overlay.HelperOverlay, "_code_chat_reset", lambda self: None)
+    monkeypatch.setattr(helper_overlay.HelperOverlay, "_code_set_auto_follow", lambda self, value: None)
+    monkeypatch.setattr(helper_overlay.HelperOverlay, "_code_chat_scroll_end", lambda self, force=False: None)
+    monkeypatch.setattr(helper_overlay.HelperOverlay, "_code_render_detail_meta", lambda self, job: None)
+    monkeypatch.setattr(helper_overlay.HelperOverlay, "_code_render_event",
+                        lambda self, event, live=False: rendered.append(event))
+    monkeypatch.setattr(helper_overlay.HelperOverlay, "_code_add_status",
+                        lambda self, text: notes.append(text))
+
+    class Root:
+        def after(self, *_args):
+            return None
+
+    view.root = Root()
+    events = [{"kind": "status", "text": f"e{i}"} for i in range(12)]
+
+    view._code_apply_refresh(1, 3, "job-2", None,
+                             {"ok": True, "events": events, "size": 12}, 0)
+
+    assert len(rendered) == 12
+    assert not notes
+
+
+def test_detail_view_trusts_the_listing_status_over_the_raw_job_file(monkeypatch):
+    """After an aiOS restart the job file still says 'running'; the listing
+    knows better, and the transcript must not keep spinning 'working'."""
+    import helper_overlay
+
+    view = object.__new__(helper_overlay.HelperOverlay)
+    view.active_tab = "CODE"
+    view.code_view_token = 1
+    view.code_selected_id = "job-9"
+    view.code_log_size = 0
+    view._code_refresh_inflight = {"id": 5, "scope": None}
+    shown = {}
+
+    monkeypatch.setattr(helper_overlay.HelperOverlay, "_code_chat_reset", lambda self: None)
+    monkeypatch.setattr(helper_overlay.HelperOverlay, "_code_set_auto_follow", lambda self, v: None)
+    monkeypatch.setattr(helper_overlay.HelperOverlay, "_code_chat_scroll_end", lambda self, force=False: None)
+    monkeypatch.setattr(helper_overlay.HelperOverlay, "_code_render_event", lambda self, e, live=False: None)
+    monkeypatch.setattr(helper_overlay.HelperOverlay, "_code_add_status", lambda self, t: None)
+    monkeypatch.setattr(helper_overlay.HelperOverlay, "_code_render_summary", lambda self: None)
+    monkeypatch.setattr(helper_overlay.HelperOverlay, "_code_render_sessions", lambda self: None)
+    monkeypatch.setattr(helper_overlay.HelperOverlay, "_code_render_detail_meta",
+                        lambda self, job: shown.update(job))
+
+    class Root:
+        def after(self, *_args):
+            return None
+
+    view.root = Root()
+    listing = {"ok": True, "jobs": [{"id": "job-9", "status": "interrupted", "title": "t"}]}
+    log = {"ok": True, "events": [], "size": 3, "job": {"id": "job-9", "status": "running", "title": "t"}}
+
+    view._code_apply_refresh(1, 5, "job-9", listing, log, 0)
+
+    assert shown["status"] == "interrupted"

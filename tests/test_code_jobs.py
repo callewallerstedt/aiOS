@@ -1,3 +1,4 @@
+import inspect
 import json
 import os
 import subprocess
@@ -20,7 +21,6 @@ def isolated_jobs(tmp_path, monkeypatch):
     jobs_dir.mkdir()
     monkeypatch.setattr(code_jobs, "JOBS_DIR", jobs_dir)
     monkeypatch.setattr(code_jobs, "CAPABILITIES_CACHE", jobs_dir / "capabilities.json")
-    monkeypatch.setattr(code_jobs, "PROJECTS_PATH", jobs_dir / "projects.json")
     config_path = tmp_path / "helper_config.json"
     config_path.write_text(json.dumps({"code_roles": {
         "scout": {"enabled": False},
@@ -1171,15 +1171,19 @@ def test_auto_compaction_releases_read_evidence_no_longer_visible(
         lambda provider: code_jobs.code_harness_policy.ContextBudget(32_000, 4_000, 16_000),
     )
     job._model_profile = code_jobs.code_harness_policy.resolve_model_profile("deepseek/test", 32_000)
-    history = [
-        {"role": "system", "content": "rules"},
-        {"role": "assistant", "content": "", "tool_calls": [{
-            "id": "read-1",
-            "type": "function",
-            "function": {"name": "read_file", "arguments": json.dumps({"relative_path": "app.py"})},
-        }]},
-        {"role": "tool", "tool_call_id": "read-1", "content": "source\n" * 8_000},
-    ]
+    # Several reads, so compaction has older groups it can genuinely drop.
+    # The newest group keeps its payload; the evidence that goes away is an
+    # older one, and that is what releases the reuse guards.
+    history = [{'role': 'system', 'content': 'rules'}]
+    for index in range(4):
+        history.append({'role': 'assistant', 'content': '', 'tool_calls': [{
+            'id': f'read-{index}',
+            'type': 'function',
+            'function': {'name': 'read_file',
+                         'arguments': json.dumps({'relative_path': f'app{index}.py'})},
+        }]})
+        history.append({'role': 'tool', 'tool_call_id': f'read-{index}',
+                        'content': 'source\n' * 8_000})
 
     compacted = job._auto_compact_local_history(history, "openrouter", [])
 
@@ -1318,6 +1322,21 @@ def test_historical_cursor_assembled_snapshot_is_not_repeated():
     ])
     assert len(coalesced) == 1
     assert coalesced[0]["text"] == "Hello world"
+
+
+def test_raw_provider_deltas_coalesce_only_with_the_same_request_and_stream():
+    coalesced = code_jobs.coalesce_events([
+        {"kind": "raw_model_delta", "request_id": "ollama:job:1", "raw_stream": "content", "delta": "plain "},
+        {"kind": "raw_model_delta", "request_id": "ollama:job:1", "raw_stream": "content", "delta": "tokens"},
+        {"kind": "raw_model_delta", "request_id": "ollama:job:1", "raw_stream": "thinking", "delta": "reasoning"},
+        {"kind": "raw_model_delta", "request_id": "ollama:job:2", "raw_stream": "content", "delta": "next"},
+    ])
+
+    assert [(row["request_id"], row["raw_stream"], row["text"]) for row in coalesced] == [
+        ("ollama:job:1", "content", "plain tokens"),
+        ("ollama:job:1", "thinking", "reasoning"),
+        ("ollama:job:2", "content", "next"),
+    ]
 
 
 def test_historical_local_tool_json_is_folded_into_clean_activity_card():
@@ -1557,6 +1576,9 @@ def test_openrouter_loop_repairs_missing_tool_call_ids(isolated_jobs, tmp_path, 
     assert assistant["tool_calls"][0]["id"]
     assert tool_reply["tool_call_id"] == assistant["tool_calls"][0]["id"]
     assert job.load()["model_request_count"] == 2
+    raw_events = [row for row in code_jobs.read_events(job.id, 0)["events"] if row["kind"].startswith("raw_model_")]
+    assert [row["kind"] for row in raw_events] == ["raw_model_tool", "raw_model_delta"]
+    assert raw_events[-1]["text"] == "All done."
 
 
 def test_openrouter_loop_retries_transient_stream_errors(isolated_jobs, tmp_path, monkeypatch):
@@ -1759,6 +1781,21 @@ def test_run_shell_propagates_exit_codes(isolated_jobs, tmp_path):
     assert bad["exit_code"] == 7
 
 
+@pytest.mark.skipif(os.name != "nt", reason="PowerShell wrapper is Windows-specific")
+def test_run_shell_missing_command_cannot_false_pass(isolated_jobs, tmp_path):
+    job = code_jobs.CodeJob("shellmissing")
+    job.directory.mkdir(parents=True, exist_ok=True)
+
+    result = json.loads(job._ollama_run_tool(
+        tmp_path,
+        "run_shell",
+        {"command": "aios_command_that_does_not_exist_7f3c"},
+    ))
+
+    assert result["exit_code"] != 0
+    assert "aios_command_that_does_not_exist_7f3c" in result["output"]
+
+
 def test_benchmark_identity_is_system_context_and_shell_environment(isolated_jobs, tmp_path):
     job = code_jobs.CodeJob("benchidentity")
     job.directory.mkdir(parents=True, exist_ok=True)
@@ -1922,9 +1959,13 @@ def test_ask_user_structured_questions_round_trip_through_normal_message_path(is
 
 def test_lookup_tools_are_offered_so_the_model_can_verify_instead_of_guessing(isolated_jobs):
     job = code_jobs.CodeJob("lookuptools")
-    names = {tool["function"]["name"] for tool in job._ollama_tools()}
+    tools = job._ollama_tools()
+    names = {tool["function"]["name"] for tool in tools}
+    selector = next(tool["function"] for tool in tools if tool["function"]["name"] == "select_tools")
+    available = set(selector["parameters"]["properties"]["names"]["items"]["enum"])
 
-    assert {"ask_user", "fetch_url", "web_search"} <= names
+    assert {"ask_user", "select_tools"} <= names
+    assert {"fetch_url", "web_search"} <= available
 
 
 def test_fetch_url_rejects_non_http_targets(isolated_jobs, tmp_path):
@@ -2512,6 +2553,27 @@ def test_two_agents_starting_at_once_do_not_race_on_the_projects_file(isolated_j
     assert not list(tmp_path.glob("*.tmp")), "temp files have to be cleaned up"
 
 
+def test_project_registry_follows_current_jobs_dir(isolated_jobs, tmp_path, monkeypatch):
+    project = tmp_path / "registered-project"
+    project.mkdir()
+    writes = []
+    atomic_json = code_jobs._atomic_json
+
+    def capture_write(path, payload):
+        writes.append(Path(path))
+        atomic_json(path, payload)
+
+    monkeypatch.setattr(code_jobs, "_atomic_json", capture_write)
+
+    result = code_jobs.add_project(str(project), "Isolated project")
+
+    registry = isolated_jobs / "projects.json"
+    assert result["ok"] is True
+    assert code_jobs.projects_path() == registry
+    assert writes == [registry]
+    assert json.loads(registry.read_text(encoding="utf-8"))["projects"][0]["path"] == str(project)
+
+
 def test_a_review_with_concerns_is_reported_and_left_alone_by_default(isolated_jobs, tmp_path, monkeypatch):
     """The reviewer is a second opinion, not a boss.
 
@@ -3033,3 +3095,307 @@ def test_completion_gate_prompt_gives_state_specific_next_action():
     assert "another check cannot unlock" in syntax
     assert "do not run another syntax or version probe" in planned
     assert "src/b.py" in coverage and "src/a.py" not in coverage.split("still-unverified paths:", 1)[1]
+
+
+def test_compaction_keeps_the_newest_tool_output_readable() -> None:
+    """A blanked receipt is indistinguishable from an empty file.
+
+    When the model cannot tell the difference it answers by calling the same
+    tool again, which is how a tight context budget became a read loop.
+    """
+    body = "<!doctype html>\n" + ("<div class='row'>content</div>\n" * 400)
+    history = [{"role": "system", "content": "S" * 3_000},
+               {"role": "user", "content": "fix the layout"}]
+    for index in range(8):
+        history.append({"role": "assistant", "tool_calls": [{
+            "id": f"c{index}",
+            "function": {"name": "read_file",
+                         "arguments": {"relative_path": "page.html"}},
+        }]})
+        history.append({"role": "tool", "tool_call_id": f"c{index}", "content": body})
+
+    compacted = code_jobs.CodeJob._compact_local_history(history, 12_000)
+
+    assert len(json.dumps(compacted)) <= 12_000
+    results = [item for item in compacted if item.get("role") == "tool"]
+    newest = results[-1]["content"]
+    assert not newest.startswith(code_jobs.BLANKED_TOOL_RECEIPT[:24])
+    assert "<div" in newest, "the model must still read what it just fetched"
+    # Older receipts are still surrendered; only the working tail is protected.
+    assert any(item["content"].startswith(code_jobs.BLANKED_TOOL_RECEIPT[:24])
+               for item in results[:-1])
+
+
+def test_clipping_alone_does_not_release_read_reuse() -> None:
+    """Reuse is only invalid once the evidence is actually gone.
+
+    Releasing it on any rewrite is what let the model ask for the same file
+    forever: compaction blanked the answer, then lifted the guard that would
+    have stopped the repeat.
+    """
+    before = [{"role": "tool", "tool_call_id": "a", "content": "x" * 5_000}]
+    clipped = [{"role": "tool", "tool_call_id": "a", "content": "x" * 2_000 + "[clipped]"}]
+    blanked = [{"role": "tool", "tool_call_id": "a",
+                "content": code_jobs.BLANKED_TOOL_RECEIPT}]
+
+    assert code_jobs._evidence_left_history(before, clipped) is False
+    assert code_jobs._evidence_left_history(before, blanked) is True
+    assert code_jobs._evidence_left_history(before, []) is True
+    assert code_jobs._evidence_left_history(before, before) is False
+
+
+def test_protected_tail_walks_whole_tool_groups() -> None:
+    """A protected result must never be split from the call it answers."""
+    body = [{"role": "assistant", "tool_calls": [{"id": "a"}]},
+            {"role": "tool", "tool_call_id": "a"},
+            {"role": "tool", "tool_call_id": "a"},
+            {"role": "assistant", "tool_calls": [{"id": "b"}]},
+            {"role": "tool", "tool_call_id": "b"}]
+
+    assert code_jobs.CodeJob._protected_tail_start(body, 1) == 3
+    assert code_jobs.CodeJob._protected_tail_start(body, 2) == 0
+    assert code_jobs.CodeJob._protected_tail_start(body, 0) == len(body)
+
+
+def test_shell_timeout_tells_the_model_how_to_run_a_server() -> None:
+    """A blocking server times out, and a bare timeout reads as a broken command.
+
+    Without an alternative the model retries the same foreground command; the
+    observed failure was `python -m http.server` attempted four times in a row.
+    """
+    hint = code_jobs.SERVER_TIMEOUT_HINT
+    assert "detached" in hint
+    assert "Start-Process" in hint, "Windows needs the concrete recipe, not just advice"
+    assert "Do not retry it unchanged" in hint
+
+    run_shell = next(t["function"] for t in code_jobs.CodeJob._local_tool_schema()
+                     if t["function"]["name"] == "run_shell")
+    # The first attempt should already be right, not just the retry.
+    assert "detached" in run_shell["description"]
+    assert run_shell["parameters"]["properties"]["timeout_seconds"].get("description"),         "an undocumented timeout is why the model guessed 20s for a server"
+
+
+def test_compaction_leaves_headroom_on_a_small_window() -> None:
+    """One compaction must buy more than a single tool result.
+
+    A 4k-token tool schema against a 32k window pushed both the trigger and the
+    target onto their floors: compaction fired at 3,028 tokens and compacted to
+    3,000, so every round compacted and the model could never hold a whole file.
+    """
+    import code_harness_policy
+
+    allocation = code_harness_policy.context_budget("direct", 32_768)
+    # The flat 16k output reserve must not claim half a small window.
+    assert allocation.output_reserve_tokens <= 32_768 // 4
+    assert allocation.working_tokens >= 24_000
+
+    schema = [t for t in code_jobs.CodeJob._local_tool_schema()
+              if t["function"]["name"] not in ("spawn_agent", "consult")]
+    schema_tokens = code_harness_policy.estimate_tokens(
+        json.dumps(schema, ensure_ascii=False, separators=(",", ":")))
+    threshold = code_jobs.AUTO_COMPACT_THRESHOLD
+    ratio = min(code_jobs.COMPACT_TARGET_RATIO, threshold * 0.7)
+
+    trigger = max(3_000, int(allocation.working_tokens * threshold) - schema_tokens - 1_024)
+    target = max(3_000, min(trigger, int(allocation.working_tokens * ratio) - schema_tokens - 1_024))
+    target = min(target, max(1_000, int(trigger * code_jobs.COMPACT_HEADROOM_RATIO)))
+
+    headroom = trigger - target
+    assert headroom > 2_000, f"only {headroom} tokens between compactions"
+
+
+def test_large_context_windows_keep_their_output_reserve() -> None:
+    """The small-window cap must not shrink the reserve cloud models rely on."""
+    import code_harness_policy
+
+    for window, expected in ((200_000, 30_000), (1_000_000, 150_000)):
+        allocation = code_harness_policy.context_budget("direct", window)
+        assert allocation.output_reserve_tokens == expected, window
+
+
+def test_repeated_compaction_never_empties_the_working_state() -> None:
+    """The state message is JSON, and half a JSON object parses as nothing.
+
+    The generic long-message truncation cut it mid-object, the next pass failed
+    to parse it and treated it as no state at all, and the model was handed
+    `active_user_requests: []` beside "continue, do not rediscover".
+    """
+    marker = code_jobs.COMPACTED_STATE_MARKER
+    request = "set up a website to stream f1 for free"
+    state = {
+        "active_user_requests": [request],
+        "recent_dialogue": ["assistant: " + "d" * 4_000],
+        "durable_state": ["EDIT app.py"],
+        "recent_evidence": ["READ app.py"],
+        "next_action": "Continue from this state.",
+    }
+    history = [{"role": "system", "content": "S" * 3_000},
+               {"role": "user", "content": marker + chr(10) + json.dumps(state, indent=2)}]
+    for index in range(6):
+        history.append({"role": "assistant", "tool_calls": [{
+            "id": f"c{index}",
+            "function": {"name": "read_file", "arguments": {"relative_path": "page.html"}},
+        }]})
+        history.append({"role": "tool", "tool_call_id": f"c{index}", "content": "x" * 3_000})
+
+    limit = 12_000
+    for _ in range(7):
+        history = code_jobs.CodeJob._compact_local_history(history, limit)
+        assert len(json.dumps(history, ensure_ascii=False)) <= limit
+
+        carried = next((m for m in history
+                        if str(m.get("content") or "").startswith(marker)), None)
+        assert carried is not None, "the working state disappeared entirely"
+        body = str(carried["content"])[len(marker):].strip()
+        parsed = json.loads(body)   # must never be half an object
+        joined = " ".join(str(r) for r in (parsed.get("active_user_requests") or []))
+        assert request in joined, "the operator's actual request was compacted away"
+        limit = max(1_000, int(limit * 0.72))
+
+
+def test_damaged_working_state_is_salvaged_not_discarded() -> None:
+    """Unparseable state must not be silently downgraded to no state."""
+    marker = code_jobs.COMPACTED_STATE_MARKER
+    damaged = marker + chr(10) + '{"active_user_requests": ["stream f1"], "recent_'
+    body = [{"role": "user", "content": damaged}]
+
+    summary = code_jobs.CodeJob._compacted_working_summary(body, [])
+
+    text = json.dumps(summary)
+    assert "stream f1" in text, "the damaged state was thrown away instead of salvaged"
+
+
+def test_reasoning_only_overrun_is_recoverable_not_terminal() -> None:
+    """A turn that spends its whole response reasoning must not end the turn.
+
+    Measured: the same history and tools produced 22,993 characters of thinking
+    and zero tool calls with thinking on, and a clean tool call with it off.
+    `done_reason=length` used to be terminal, so nothing recovered and nothing
+    even noticed for eight minutes -- the round cap counts rounds, not time.
+    """
+    source = inspect.getsource(code_jobs.CodeJob._run_ollama)
+
+    # The overrun is detected and separated from the unsafe replay cases.
+    assert "overran_on_thinking" in source
+    assert "retryable_eof = overran_on_thinking or (" in source
+
+    # Replay is only safe with nothing emitted: no content, no tool call.
+    detection = source.split("overran_on_thinking = (", 1)[1][:600]
+    assert "not candidate_tools" in detection
+    assert "not candidate_content" in detection
+    assert 'round_stop_reason.strip().casefold() == "length"' in detection
+
+    # And the retry must actually drop thinking, or it just overruns again.
+    assert 'reasoning="off" if thinking_ran_away else request_reasoning' in source
+    assert "thinking_ran_away = True" in source
+
+
+def test_normal_local_turns_do_not_have_an_artificial_output_cap() -> None:
+    """Long local responses use the model/context limit, not a harness allowance."""
+    source = inspect.getsource(code_jobs.CodeJob._run_ollama)
+    options = source.split("request_options = {", 1)[1].split("}", 1)[0]
+    assert "num_predict" not in options
+    assert "num_predict" not in source
+
+
+def test_tool_cards_say_what_was_read_and_how_much_is_left() -> None:
+    """A bare path makes four reads of one file look identical.
+
+    With the range on the card, progress through a file is distinguishable from
+    re-reading the same region, which is the thing that was impossible to see.
+    """
+    line = code_jobs.CodeJob._tool_detail_line
+
+    detail = line("read_file", {"relative_path": "f1-stream.html", "start_line": 240},
+                  {"path": "f1-stream.html", "start_line": 240, "next_line": 300,
+                   "total_lines": 299})
+    assert "f1-stream.html" in detail and "240" in detail and "299" in detail
+
+    # A partial read must advertise that there is more.
+    partial = line("read_file", {"relative_path": "f1-stream.html", "start_line": 1},
+                   {"path": "f1-stream.html", "start_line": 1, "next_line": 121,
+                    "total_lines": 299, "truncated": True})
+    assert "more follows" in partial
+
+    # Character-addressed reads carry their own counters.
+    chars = line("read_file", {"relative_path": "a.html"},
+                 {"path": "a.html", "offset": 0, "next_offset": 12_000,
+                  "total_chars": 13_210, "truncated": True})
+    assert "13,210" in chars
+
+    assert line("search_text", {"query": "f1"}, {"matches": []}) == '"f1" · no matches'
+    many = line("search_text", {"query": "f1"},
+                {"matches": [{"path": "a"}, {"path": "a"}, {"path": "b"}]})
+    assert "3 matches in 2 files" in many
+    assert "1 match in 1 file" in line("search_text", {"query": "x"}, {"matches": [{"path": "a"}]})
+    assert "14 entries" in line("list_dir", {"relative_path": "."},
+                                {"entries": [{"path": str(i)} for i in range(14)]})
+    assert "1 entry" in line("list_dir", {"relative_path": "."}, {"entries": [{"path": "a"}]})
+
+    # A failing command should say so on the card itself.
+    assert "exit 1" in line("run_shell", {"command": "pytest -q"}, {"exit_code": 1})
+    assert line("run_shell", {"command": "pytest -q"}, {"exit_code": 0}) == "pytest -q"
+
+    # Unknown tools still fall back to something rather than an empty card.
+    assert line("mystery_tool", {"relative_path": "x.py"}, {}) == "x.py"
+    assert line("read_file", {}, {}) == "."
+
+
+def test_turn_rate_is_weighted_by_tokens_not_wall_clock() -> None:
+    """Dividing output by elapsed folds tool time in and understates the model.
+
+    The turn figure also has to be token-weighted: a five-token round finishing
+    fast must not drag the average away from what the model actually sustains.
+    """
+    rates = code_jobs.CodeJob._stage_generation_rates
+    meta = {"model_request_rounds": [
+        {"started_at": 100.0, "finished_at": 110.0, "tokens_per_second": 50.0,
+         "usage": {"output_tokens": 500}},
+        {"started_at": 120.0, "finished_at": 121.0, "tokens_per_second": 10.0,
+         "usage": {"output_tokens": 10}},
+    ]}
+    last, mean = rates(meta, 50.0)
+    assert last == 10.0, "the latest round is the one that just finished"
+    # 510 tokens over 10s + 1s -> ~46.4, not the flat mean of 30.
+    assert 46.0 < mean < 47.0, mean
+
+    # Rounds from an earlier turn are excluded.
+    last_only, mean_only = rates(meta, 115.0)
+    assert last_only == 10.0 and mean_only == 10.0
+
+    # Nothing measurable must not fabricate a number.
+    assert rates({"model_request_rounds": []}, 0.0) == (None, None)
+    assert rates({"model_request_rounds": [
+        {"started_at": 1.0, "tokens_per_second": 0, "usage": {"output_tokens": 5}}]}, 0.0) == (None, None)
+
+
+def test_truncated_tool_call_is_recovered_not_fatal() -> None:
+    """Ollama answers a tool call cut off mid-JSON with a 500, not a length stop.
+
+    The generic handler raised RuntimeError and killed the turn, even though
+    nothing had been executed and nothing streamed. Bounding the output made
+    this reachable, so it has to be recoverable.
+    """
+    import io
+    from urllib.error import HTTPError
+
+    def http500(body: str) -> HTTPError:
+        return HTTPError("http://localhost:11434/api/chat", 500, "Internal Server Error",
+                         {}, io.BytesIO(body.encode()))
+
+    real = http500('{"error":"llama-server returned invalid tool call arguments for '
+                   '\\"find_symbol\\": unexpected end of JSON input"}')
+    assert code_jobs._is_truncated_tool_call_error(real) is True
+
+    # A genuine server fault must still be fatal.
+    assert code_jobs._is_truncated_tool_call_error(http500('{"error":"out of memory"}')) is False
+    assert code_jobs._is_truncated_tool_call_error(RuntimeError("connection reset")) is False
+    # A body that cannot be read must not raise from inside the check.
+    class Unreadable(Exception):
+        def read(self):
+            raise OSError("stream already consumed")
+    assert code_jobs._is_truncated_tool_call_error(Unreadable()) is False
+
+    source = inspect.getsource(code_jobs.CodeJob._run_ollama)
+    assert "_is_truncated_tool_call_error(exc)" in source
+    assert "incomplete_retries < PROVIDER_INCOMPLETE_STREAM_RETRIES" in source
