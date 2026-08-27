@@ -197,6 +197,17 @@ def test_tray_exposes_the_complete_restart_action():
     assert "self.restart_application()" in source
 
 
+def test_tray_show_and_double_click_target_the_webview_shell():
+    source = (Path(__file__).resolve().parent.parent / "helper_overlay.py").read_text(encoding="utf-8")
+    assert "self.root.after(0, self._show_primary_aios)" in source
+    assert "if command == TRAY_SHOW:\n            self._show_primary_aios()" in source
+    method = source.split("def _show_primary_aios(self):", 1)[1].split("\n    def ", 1)[0]
+    assert '_forward_to_webview_control("show")' in method
+    assert "_show_webview_shell()" in method
+    assert "_start_webview_shell()" in method
+    assert "self.show()" not in method
+
+
 def test_restart_aios_uses_spawn_relaunch(monkeypatch):
     calls = []
     monkeypatch.setattr(aios_updater, "STAGING_DIR", Path("definitely-missing-staging-dir"))

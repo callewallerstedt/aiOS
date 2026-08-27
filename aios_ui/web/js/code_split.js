@@ -236,9 +236,9 @@ export class CodeSplit {
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17 1l4 4-4 4M3 11V9a4 4 0 0 1 4-4h14M7 23l-4-4 4-4m14-2v2a4 4 0 0 1-4 4H3"></path></svg>
             <span><strong>Handoff</strong><small>Pull in the latest external coding session</small></span>
           </button>
-          <button type="button" class="prompt-menu-row" data-pmenu="queue-next">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>
-            <span><strong>Queue next</strong><small>Run after the current turn</small></span>
+          <button type="button" class="prompt-menu-row" data-pmenu="steer-now">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"></path></svg>
+            <span><strong>Steer now</strong><small>Interrupt this round and apply immediately</small></span>
           </button>
         </div>
         <div class="prompt-menu prompt-config-menu" data-pane-config-menu hidden>
@@ -322,7 +322,7 @@ export class CodeSplit {
         this.closePaneMenus();
         if (action === "attach") this.code.shell.toast("File attachments are not wired up in this build yet.", "info");
         else if (action === "handoff") this.handoffToBrief(pane);
-        else if (action === "queue-next") this.sendToPane(pane, "queue_next");
+        else if (action === "steer-now") this.sendToPane(pane, "steer_now");
         return;
       }
       const act = event.target.closest("[data-pane-act]")?.dataset.paneAct;
@@ -643,9 +643,9 @@ export class CodeSplit {
     if (sendButton) sendButton.disabled = true;
     try {
       const status = String((pane.meta || {}).status || "").toLowerCase();
-      const deliveryMode = delivery === "queue_next"
-        ? "queue_next"
-        : ((status === "running" || status === "queued") ? "steer_now" : "continue");
+      const deliveryMode = delivery === "steer_now"
+        ? "steer_now"
+        : ((status === "running" || status === "queued") ? "queue_next" : "continue");
       const result = await api(`/api/code/jobs/${encodeURIComponent(pane.jobId)}/messages`, {
         method: "POST",
         body: {
@@ -660,6 +660,7 @@ export class CodeSplit {
         return;
       }
       if (result.job) { pane.meta = result.job; this.syncPaneHeader(pane); }
+      if (result.injected_next_round) this.code.shell.toast("Queued for the next model round.");
       pane.brief.value = "";
       pane.brief.style.height = "auto";
       pane.shell?.classList.remove("expanded");

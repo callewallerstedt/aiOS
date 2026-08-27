@@ -641,10 +641,13 @@
   gap: 6px;
   padding: 6px;
   border: 1px solid var(--bui-line);
-  border-radius: 999px !important;
+  /* The one-line shell is 40px tall, so 20px is the same full pill shape.
+     Keeping that exact radius in every state prevents a one-frame 999px
+     clamp before the autosizer marks a multi-line composer as expanded. */
+  border-radius: 20px !important;
   background: var(--bui-surface);
   box-shadow: var(--bui-shadow-card);
-  transition: border-color 150ms ease, border-radius 150ms ease;
+  transition: border-color 150ms ease;
 }
 .prompt-shell:focus-within { border-color: var(--bui-line-strong); box-shadow: var(--bui-shadow-card); }
 .prompt-controls { grid-template-columns: 28px minmax(0, 1fr) auto 28px 28px; gap: 6px 4px; }

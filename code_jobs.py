@@ -1636,6 +1636,13 @@ class CodeJob:
         self.interrupt_requested = False
         self.queued = 0
         self._messages: queue.Queue[dict[str, Any]] = queue.Queue()
+        # OpenRouter and Ollama expose their model/tool round boundaries to the
+        # harness.  Follow-ups received during one of those turns wait here so
+        # they can join the very next request without cancelling the response
+        # that is currently streaming.
+        self._in_turn_followups: queue.Queue[dict[str, Any]] = queue.Queue()
+        self._in_turn_followup_lock = threading.Lock()
+        self._accept_in_turn_followups = False
         self._worker_lock = threading.Lock()
         self._worker_running = False
         self.question_waiter: queue.Queue[Any] | None = None
@@ -2468,6 +2475,87 @@ class CodeJob:
                 question_answers=question_answers,
             )
 
+    def _begin_in_turn_followups(self) -> None:
+        """Open the safe next-model-round delivery window for a local agent."""
+        with self._in_turn_followup_lock:
+            self._accept_in_turn_followups = True
+
+    def _queue_in_turn_followup(self, payload: str, attachments: list[dict],
+                                *, planned: bool, strategy: str) -> bool:
+        """Queue a live follow-up only while a supported provider turn is open."""
+        with self._in_turn_followup_lock:
+            if not self._accept_in_turn_followups:
+                return False
+            self._in_turn_followups.put({
+                "payload": payload,
+                "attachments": attachments or [],
+                "planned": bool(planned),
+                "strategy": _strategy_override(strategy),
+            })
+            self.queued += 1
+            waiting = self.queued
+            # Persist under the same lock as the counter. Otherwise a boundary
+            # drain and a new enqueue can save their counts in reverse order.
+            self.save(status="running", queued=waiting)
+        self.append(
+            "status",
+            "Follow-up queued for the next model round.",
+            notify=True,
+            state="running",
+        )
+        return True
+
+    def _inject_in_turn_followups(self, history: list[dict], provider: str,
+                                  *, close_if_empty: bool = False) -> bool:
+        """Append every waiting operator message at one safe provider boundary."""
+        pending: list[dict[str, Any]] = []
+        with self._in_turn_followup_lock:
+            while True:
+                try:
+                    pending.append(self._in_turn_followups.get_nowait())
+                except queue.Empty:
+                    break
+            if not pending and close_if_empty:
+                # Closing and checking are atomic with enqueueing. A message
+                # arriving after this point becomes a normal queued turn.
+                self._accept_in_turn_followups = False
+            if pending:
+                self.queued = max(0, self.queued - len(pending))
+            waiting = self.queued
+            if pending:
+                self.save(status="running", queued=waiting)
+        if not pending:
+            return False
+        for item in pending:
+            history.append({"role": "user", "content": str(item.get("payload") or "")})
+            self._in_turn_followups.task_done()
+        count = len(pending)
+        self.append(
+            "status",
+            f"Injected {count} follow-up{'s' if count != 1 else ''} into the next {provider} model round.",
+            notify=True,
+            state="running",
+        )
+        return True
+
+    def _close_in_turn_followups(self, *, requeue: bool = False) -> list[dict[str, Any]]:
+        """Close live injection and return messages not yet given to a model."""
+        pending: list[dict[str, Any]] = []
+        with self._in_turn_followup_lock:
+            self._accept_in_turn_followups = False
+            while True:
+                try:
+                    pending.append(self._in_turn_followups.get_nowait())
+                except queue.Empty:
+                    break
+            for item in pending:
+                self._in_turn_followups.task_done()
+                if requeue:
+                    # Keep an older in-run message ahead of a normal follow-up
+                    # that races with this provider's terminal boundary.
+                    self._messages.put(item)
+        return pending
+
     def _send(self, text: str, *, urgent: bool = False, attachments: Any = None,
               model: str = "", reasoning: str = "", fast: bool | None = None,
               planned: bool = True, strategy: str = "auto",
@@ -2525,6 +2613,14 @@ class CodeJob:
             self.save(status="running", pending_question="")
             self.append("status", "Answer delivered to the active agent question.", notify=True, state="running")
             return {"ok": True, "answered": True, "job": self.load()}
+
+        if not urgent and self._queue_in_turn_followup(
+            payload,
+            normalized,
+            planned=planned,
+            strategy=selected_strategy,
+        ):
+            return {"ok": True, "queued": True, "injected_next_round": True, "job": self.load()}
 
         if urgent and self.rpc and self.active_turn_id:
             try:
@@ -3782,6 +3878,8 @@ class CodeJob:
                 turn_started_at=started,
                 last_error="",
             )
+            if str(meta_before.get("provider") or "").strip().casefold() in {"openrouter", "ollama"}:
+                self._begin_in_turn_followups()
             self.append("status", "Working", notify=True, state="running")
             warning_stop = threading.Event()
             threading.Thread(
@@ -3833,6 +3931,16 @@ class CodeJob:
                     outcome = "failed"
             finally:
                 warning_stop.set()
+                pending_followups = self._close_in_turn_followups(
+                    requeue=not self.stop_requested,
+                )
+                if pending_followups and not self.stop_requested:
+                    self.append(
+                        "status",
+                        "The provider turn ended before the next model boundary; "
+                        "the waiting follow-up will run as the next turn.",
+                        notify=True,
+                    )
                 self.process = None
                 if self.rpc:
                     self.rpc.stop()
@@ -10449,6 +10557,8 @@ class CodeJob:
                     break
                 closing_attempted = True
                 self.append("status", f"{closing_reason} Preparing one bounded truthful incomplete handoff.")
+            if not force_closing and self._inject_in_turn_followups(history, "Ollama"):
+                self._save_ollama_history(history)
             request_tools = [] if force_closing else tools
             if self.stop_requested or self.interrupt_requested:
                 self._save_ollama_history(history)
@@ -10745,7 +10855,13 @@ class CodeJob:
                     return "incomplete", (
                         (answer + "\n\n") if answer else ""
                     ) + f"Incomplete provider response: {reason}."
+                if self._inject_in_turn_followups(history, "Ollama"):
+                    self._save_ollama_history(history)
+                    continue
                 if not force_closing and self._queue_acceptance_audit(history, payload):
+                    self._save_ollama_history(history)
+                    continue
+                if self._inject_in_turn_followups(history, "Ollama", close_if_empty=True):
                     self._save_ollama_history(history)
                     continue
                 self._save_ollama_history(history)
@@ -10897,6 +11013,8 @@ class CodeJob:
                     break
                 closing_attempted = True
                 self.append("status", f"{closing_reason} Preparing one bounded truthful incomplete handoff.")
+            if not force_closing and self._inject_in_turn_followups(history, "OpenRouter"):
+                self._save_openrouter_history(history)
             request_tools = [] if force_closing else tools
             if self.stop_requested or self.interrupt_requested:
                 self._save_openrouter_history(history)
@@ -11273,7 +11391,13 @@ class CodeJob:
                     return "incomplete", (
                         (answer + "\n\n") if answer else ""
                     ) + f"Incomplete provider response: {reason}."
+                if self._inject_in_turn_followups(history, "OpenRouter"):
+                    self._save_openrouter_history(history)
+                    continue
                 if not force_closing and self._queue_acceptance_audit(history, payload):
+                    self._save_openrouter_history(history)
+                    continue
+                if self._inject_in_turn_followups(history, "OpenRouter", close_if_empty=True):
                     self._save_openrouter_history(history)
                     continue
                 self._save_openrouter_history(history)

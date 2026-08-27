@@ -610,9 +610,9 @@ export class CodeTab {
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h6l2 2h10v12H3z"></path></svg>
                 <span><strong>Project</strong><small data-project-name></small></span>
               </button>
-              <button type="button" class="prompt-menu-row" data-code="queue-next" data-code-queue-row hidden>
-                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>
-                <span><strong>Queue next</strong><small>Run after the current turn</small></span>
+              <button type="button" class="prompt-menu-row" data-code="steer-now" data-code-queue-row hidden>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"></path></svg>
+                <span><strong>Steer now</strong><small>Interrupt this round and apply immediately</small></span>
               </button>
             </div>
 
@@ -795,7 +795,7 @@ export class CodeTab {
       else if (action === "reload-ui") this.reloadUI();
       else if (action === "hide-toggle") this.toggleHideMode();
       else if (action === "send") this.send();
-      else if (action === "queue-next") this.send("queue_next");
+      else if (action === "steer-now") this.send("steer_now");
       else if (action === "prompt-plus") this.togglePromptMenu("plus");
       else if (action === "prompt-config") this.togglePromptMenu("config");
       else if (action === "standing-toggle") this.toggleStandingPrompt();
@@ -1572,7 +1572,7 @@ export class CodeTab {
   syncTarget() {
     const job = this.selectedId ? this.jobMeta : null;
     const send = this.el("send");
-    const queue = this.el("queue-next");
+    const queue = this.el("steer-now");
     const brief = this.el("brief");
     const projectRow = this.host.querySelector("[data-code-project-row]");
     if (this.selectedId) {
@@ -1584,10 +1584,10 @@ export class CodeTab {
         queue.hidden = true;
         brief.placeholder = "Answer the agent to continue this turn...";
       } else if (status === "running" || status === "queued") {
-        send.setAttribute("aria-label", "Steer now");
-        send.title = "Apply this correction to the current turn now; providers without live steering interrupt safely and run it next";
+        send.setAttribute("aria-label", "Queue follow-up");
+        send.title = "Add this message to the next safe model round without interrupting the response in progress";
         queue.hidden = false;
-        brief.placeholder = "Correct the current turn or add what it should do...";
+        brief.placeholder = "Add context or a follow-up while this run continues...";
       } else {
         send.setAttribute("aria-label", "Continue session");
         send.title = "Start a follow-up turn in this same session";
@@ -2048,7 +2048,7 @@ export class CodeTab {
     const text = brief.value.trim();
     if (!text) return;
     const button = this.el("send");
-    const queueButton = this.el("queue-next");
+    const queueButton = this.el("steer-now");
     button.disabled = true;
     queueButton.disabled = true;
     if (this.standingPromptSaveTimer) this.saveStandingPrompt();
@@ -2061,9 +2061,9 @@ export class CodeTab {
       this.syncTarget();
     }
     const targetStatus = String((this.jobMeta || {}).status || "").toLowerCase();
-    const deliveryMode = delivery === "queue_next"
-      ? "queue_next"
-      : ((targetStatus === "running" || targetStatus === "queued") ? "steer_now" : "continue");
+    const deliveryMode = delivery === "steer_now"
+      ? "steer_now"
+      : ((targetStatus === "running" || targetStatus === "queued") ? "queue_next" : "continue");
     if (targetId) {
       // Selecting a configuration only stages roles/models for the next prompt;
       // the send is what commits them. If the operator changed the model,
@@ -2138,7 +2138,9 @@ export class CodeTab {
         receipt = "Live steering was unavailable - the current turn was interrupted and this runs next.";
         preview = text;
       } else if (deliveryMode === "queue_next") {
-        receipt = queued > 1 ? `Queued as follow-up ${queued}.` : "Queued after the current turn.";
+        receipt = result.injected_next_round
+          ? (queued > 1 ? `Queued as in-run follow-up ${queued}.` : "Queued for the next model round.")
+          : (queued > 1 ? `Queued as follow-up ${queued}.` : "Queued after the current turn.");
         preview = text;
       }
       if (receipt) {

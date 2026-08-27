@@ -7,6 +7,7 @@ from aios_ui import server
 ROOT = Path(__file__).resolve().parent.parent
 CODE_JS = (ROOT / "aios_ui" / "web" / "js" / "code.js").read_text(encoding="utf-8")
 CODE_CSS = (ROOT / "aios_ui" / "web" / "css" / "code.css").read_text(encoding="utf-8")
+BEAUTIFUL_CSS = (ROOT / "aios_ui" / "web" / "css" / "code-beautiful.css").read_text(encoding="utf-8")
 MODELS_JS = (ROOT / "aios_ui" / "web" / "js" / "models.js").read_text(encoding="utf-8")
 BENCH_JS = (ROOT / "aios_ui" / "web" / "js" / "bench.js").read_text(encoding="utf-8")
 
@@ -40,12 +41,22 @@ def test_strategy_control_is_compact_and_has_a_selected_state():
     assert '.composer-strategy-btn[aria-pressed="true"]' in CODE_CSS
 
 
-def test_active_session_ui_separates_steering_from_queued_followups():
-    assert 'Steer now &#9656;' in CODE_JS
-    assert ">Queue next</button>" in CODE_JS
+def test_active_session_send_queues_next_round_and_keeps_explicit_steering():
+    assert 'aria-label", "Queue follow-up"' in CODE_JS
+    assert "Queued for the next model round." in CODE_JS
+    assert "data-code=\"steer-now\"" in CODE_JS
     assert 'urgent: deliveryMode === "steer_now"' in CODE_JS
-    assert 'deliveryMode === "queue_next"' in CODE_JS
+    assert '? "steer_now"' in CODE_JS
+    assert '? "queue_next" : "continue"' in CODE_JS
     assert "delivery-receipt" in CODE_JS
+
+
+def test_multiline_composer_uses_one_radius_without_transition_flicker():
+    shell = BEAUTIFUL_CSS.split(".prompt-shell {", 1)[1].split("}", 1)[0]
+    assert "border-radius: 20px !important" in shell
+    assert "transition: border-color 150ms ease" in shell
+    assert "border-radius 150ms" not in shell
+    assert ".prompt-shell.expanded { border-radius" not in BEAUTIFUL_CSS
 
 
 def test_lifecycle_banner_uses_backend_truth_and_current_turn_clock():

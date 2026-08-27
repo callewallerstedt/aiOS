@@ -15422,6 +15422,14 @@ class HelperOverlay:
         if hasattr(self, "input"):
             self.input.focus_set()
 
+    def _show_primary_aios(self):
+        """Show or launch the WebView2 aiOS shell; never surface the old Tk UI."""
+        if self._forward_to_webview_control("show"):
+            return True
+        if self._show_webview_shell():
+            return True
+        return _start_webview_shell()
+
     def _apply_window_icon(self):
         if not APP_ICON_PATH.exists():
             return
@@ -15509,7 +15517,7 @@ class HelperOverlay:
                     self._show_tray_menu()
                     return 0
                 if lparam == WM_LBUTTONDBLCLK:
-                    self.root.after(0, self.show)
+                    self.root.after(0, self._show_primary_aios)
                     return 0
             return user32.CallWindowProcW(self._tray_old_wndproc, window, message, wparam, lparam)
 
@@ -15546,7 +15554,7 @@ class HelperOverlay:
 
     def _handle_tray_command(self, command):
         if command == TRAY_SHOW:
-            self.show()
+            self._show_primary_aios()
         elif command == TRAY_HIDE:
             self.hide()
         elif command == TRAY_START_VOICE:
