@@ -434,6 +434,108 @@ def test_normal_followup_keeps_live_turn_running_and_exposes_queue_count(isolate
     assert meta["queued"] == 1
 
 
+def test_local_provider_followups_enter_the_next_model_round_fifo(
+    isolated_jobs, monkeypatch,
+):
+    monkeypatch.setattr(code_jobs, "selection_error", lambda *_args, **_kwargs: None)
+    job = code_jobs.CodeJob("inturnfollowups")
+    job.directory.mkdir(parents=True, exist_ok=True)
+    job.save(
+        id=job.id,
+        provider="openrouter",
+        model="vendor/model",
+        reasoning="off",
+        status="running",
+        queued=0,
+        user_turns=0,
+    )
+    job._begin_in_turn_followups()
+
+    first = job.send("add the API test")
+    second = job.send("and keep the old behavior compatible")
+
+    assert first["injected_next_round"] is True
+    assert second["injected_next_round"] is True
+    assert job._messages.empty()
+    assert job.load()["queued"] == 2
+
+    history = [{"role": "assistant", "content": "current round"}]
+    assert job._inject_in_turn_followups(history, "OpenRouter") is True
+    assert history[-2:] == [
+        {"role": "user", "content": "add the API test"},
+        {"role": "user", "content": "and keep the old behavior compatible"},
+    ]
+    assert job.load()["status"] == "running"
+    assert job.load()["queued"] == 0
+
+
+def test_closed_model_boundary_rejects_late_in_turn_enqueue(isolated_jobs):
+    job = code_jobs.CodeJob("closedfollowups")
+    job.directory.mkdir(parents=True, exist_ok=True)
+    job.save(id=job.id, status="running", queued=0)
+    job._begin_in_turn_followups()
+
+    assert job._inject_in_turn_followups([], "OpenRouter", close_if_empty=True) is False
+    assert job._queue_in_turn_followup(
+        "too late for this turn", [], planned=True, strategy="auto",
+    ) is False
+
+
+def test_openrouter_live_followup_is_used_by_the_next_request(
+    isolated_jobs, tmp_path, monkeypatch,
+):
+    import openrouter_client
+
+    monkeypatch.setattr(code_jobs, "selection_error", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(openrouter_client, "provider_status", lambda **_kwargs: (True, "ready"))
+    requests = []
+    job = code_jobs.CodeJob("openrouterlivefollowup")
+    job.directory.mkdir(parents=True, exist_ok=True)
+    job.save(
+        id=job.id,
+        provider="openrouter",
+        cwd=str(tmp_path),
+        model="vendor/model",
+        reasoning="off",
+        fast=False,
+        status="running",
+        queued=0,
+        user_turns=1,
+        role_config={},
+    )
+    job.reset_turn_discipline("direct")
+    job._begin_in_turn_followups()
+
+    def stream_chat(messages, *_args, **_kwargs):
+        requests.append(json.loads(json.dumps(messages)))
+        if len(requests) == 1:
+            delivered = job.send("also cover the retry path")
+            assert delivered["injected_next_round"] is True
+            answer = "I was about to finish."
+        else:
+            answer = "Implemented both requests."
+        yield {
+            "done": True,
+            "message": {"role": "assistant", "content": answer, "finish_reason": "stop"},
+            "finish_reason": "stop",
+            "stream_complete": True,
+            "usage": {},
+        }
+
+    monkeypatch.setattr(openrouter_client, "stream_chat", stream_chat)
+
+    outcome, summary = job._run_openrouter("make the change", [])
+
+    assert outcome == "completed"
+    assert summary == "Implemented both requests."
+    assert len(requests) == 2
+    assert requests[1][-2:] == [
+        {"role": "assistant", "content": "I was about to finish."},
+        {"role": "user", "content": "also cover the retry path"},
+    ]
+    assert job.load()["queued"] == 0
+
+
 def test_native_command_with_session_cwd_still_tracks_shell_mutations(isolated_jobs, tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
